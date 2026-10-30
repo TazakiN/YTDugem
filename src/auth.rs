@@ -336,9 +336,38 @@ fn commit(mut s: Session, cancel: &AtomicBool, generation: u64) -> Result<Accoun
     Ok(s.account)
 }
 
+fn default_browser_command() -> Command {
+    #[cfg(windows)]
+    let mut command = {
+        let system = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        let mut command = Command::new(system.join("System32/rundll32.exe"));
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = Command::new("xdg-open");
+    command.arg(MUSIC);
+    command
+}
+
+/// Opens a page only; account connection still requires validated manual cookies.
+pub fn open_default_login() -> Result<()> {
+    let status = default_browser_command()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("Could not open your default browser")?;
+    if !status.success() {
+        bail!("Could not open your default browser ({status}). Open https://music.youtube.com manually and connect with cookies.");
+    }
+    Ok(())
+}
+
 pub fn browser_login(cancel: Arc<AtomicBool>) -> Result<Account> {
-    let exe =
-        find_browser().ok_or_else(|| anyhow!("Install Chrome, Edge, or Chromium to sign in"))?;
+    let exe = find_chromium_browser().ok_or_else(|| anyhow!("Automatic sign-in requires Chrome, Edge, or Chromium. To use your default browser, open YouTube Music and connect with cookies."))?;
     let generation = AUTH_GENERATION.load(Ordering::SeqCst);
     let profile = auth_dir()?.join(format!(
         "browser-{}-{}",
@@ -513,7 +542,7 @@ fn valid_cdp_url(url: &str, port: u16) -> bool {
     url.strip_prefix(&format!("ws://127.0.0.1:{port}/"))
         .is_some_and(|p| !p.is_empty() && !p.contains(['#', '?']))
 }
-fn find_browser() -> Option<PathBuf> {
+fn find_chromium_browser() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         for p in [
@@ -736,6 +765,31 @@ fn dpapi(encrypt: bool, input: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_login_uses_os_handler_with_fixed_url() {
+        let command = default_browser_command();
+        let args: Vec<_> = command.get_args().collect();
+        #[cfg(windows)]
+        {
+            assert!(Path::new(command.get_program()).ends_with("System32/rundll32.exe"));
+            assert_eq!(args, ["url.dll,FileProtocolHandler", MUSIC]);
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(command.get_program(), "xdg-open");
+            assert_eq!(args, [MUSIC]);
+        }
+    }
+    #[test]
+    #[ignore = "opens the system default browser; requires a desktop session"]
+    fn opens_default_browser_without_connecting_account() {
+        assert!(snapshot().is_none());
+        open_default_login().unwrap();
+        assert!(
+            snapshot().is_none(),
+            "Opening a browser must not authenticate BitChord"
+        );
+    }
     #[test]
     fn parses_cookie_and_netscape_and_filters_domains() {
         let s = parse_cookie_input("SAPISID=secret; SID=x").unwrap();

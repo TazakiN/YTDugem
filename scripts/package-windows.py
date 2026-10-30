@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a portable Windows ZIP with pinned, checksum-verified audio tools.
 
-First cross-build BitChord.exe, then run this script with 7zz or 7z on PATH.
+First cross-build YTDugem.exe, then run this script with 7zz or 7z on PATH.
 Set SEVENZIP to override the archive extractor. No machine-wide installation.
 """
 import hashlib
@@ -53,9 +53,9 @@ def fetch(url, digest):
 
 
 def main():
-    binary = ROOT / "target/x86_64-pc-windows-gnu/release/bitchord-desktop.exe"
+    binary = ROOT / "target/x86_64-pc-windows-gnu/release/ytdugem.exe"
     if not binary.is_file():
-        binary = ROOT / "target/release/bitchord-desktop.exe"
+        binary = ROOT / "target/release/ytdugem.exe"
     if not binary.is_file():
         raise RuntimeError("Build the Windows release executable first")
     sevenzip = os.environ.get("SEVENZIP") or shutil.which("7zz") or shutil.which("7z")
@@ -90,15 +90,15 @@ def main():
         if not (TOOLS / name).is_file():
             raise RuntimeError(f"Package is missing tools/{name}")
     (DIST / "runtime-sources.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    temporary = DIST / "BitChord.exe.new"
+    temporary = DIST / "YTDugem.exe.new"
     shutil.copy2(binary, temporary)
-    temporary.replace(DIST / "BitChord.exe")
+    temporary.replace(DIST / "YTDugem.exe")
     shutil.copy2(ROOT / "LICENSE", DIST / "LICENSE")
     (DIST / "START-HERE.txt").write_text(
-        "Extract the ENTIRE ZIP, then double-click BitChord.exe.\n"
-        "Keep the tools folder beside BitChord.exe. No PATH changes or admin installation needed.\n"
+        "Extract the ENTIRE ZIP, then double-click YTDugem.exe.\n"
+        "Keep the tools folder beside YTDugem.exe. No PATH changes or admin installation needed.\n"
         "Audio and download tools are bundled; online playback still requires internet access.\n"
-        "Runtime versions/checksums: runtime-sources.json. BitChord source: source/.\n"
+        "Runtime versions/checksums: runtime-sources.json. YTDugem source: source/.\n"
         "mpv/FFmpeg build recipes and upstream source: https://github.com/shinchiro/mpv-winbuild-cmake/tree/20261021\n"
         "mpv source: https://github.com/mpv-player/mpv/tree/e471496c56\n"
         "FFmpeg source: https://github.com/FFmpeg/FFmpeg/tree/n9.0.2\n"
@@ -106,20 +106,20 @@ def main():
         "yt-dlp source/license: https://github.com/yt-dlp/yt-dlp/tree/2026.10.26\n"
         "Deno source/license: https://github.com/denoland/deno/tree/v2.9.8\n"
     )
-    output = DIST / "BitChord-windows-x86_64.zip"
+    output = DIST / "YTDugem-windows-x86_64.zip"
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
-        for item in ("BitChord.exe", "LICENSE", "START-HERE.txt", "runtime-sources.json", "tools", "third-party"):
+        for item in ("YTDugem.exe", "LICENSE", "START-HERE.txt", "runtime-sources.json", "tools", "third-party"):
             path = DIST / item
             for file in ([path] if path.is_file() else path.rglob("*")):
                 if file.is_file():
                     if item == "tools" and file.suffix.lower() == ".exe" and file.name.lower() not in EXECUTABLES:
                         continue
-                    bundle.write(file, Path("BitChord") / file.relative_to(DIST))
-        for item in ("Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "src", "assets", "scripts", "packaging"):
+                    bundle.write(file, Path("YTDugem") / file.relative_to(DIST))
+        for item in ("Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "src", "assets", "scripts", "packaging"):
             path = ROOT / item
             for file in ([path] if path.is_file() else path.rglob("*")):
                 if file.is_file() and "__pycache__" not in file.parts:
-                    bundle.write(file, Path("BitChord/source") / file.relative_to(ROOT))
+                    bundle.write(file, Path("YTDugem/source") / file.relative_to(ROOT))
     print("Portable package:", output, flush=True)
     print("Bundled tools:", ", ".join(EXECUTABLES), flush=True)
 

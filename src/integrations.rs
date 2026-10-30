@@ -46,8 +46,8 @@ impl Integrations {
     pub fn for_window(hwnd: Option<*mut std::ffi::c_void>) -> Self {
         let (tx, events) = mpsc::channel();
         let config = PlatformConfig {
-            dbus_name: "bitchord",
-            display_name: "BitChord",
+            dbus_name: "ytdugem",
+            display_name: "YTDugem",
             hwnd,
         };
         let has_session_bus =
@@ -227,7 +227,7 @@ mod tests {
         let mut integrations = Integrations::new();
         assert!(integrations.available());
         let track = Track {
-            title: "BitChord MPRIS test".into(),
+            title: "YTDugem MPRIS test".into(),
             artist: "Test Artist".into(),
             duration: 120.0,
             ..Default::default()
@@ -243,7 +243,7 @@ mod tests {
             "call",
             "--session",
             "--dest",
-            "org.mpris.MediaPlayer2.bitchord",
+            "org.mpris.MediaPlayer2.ytdugem",
             "--object-path",
             "/org/mpris/MediaPlayer2",
             "--method",
@@ -260,7 +260,7 @@ mod tests {
                 .output()
                 .unwrap();
             if out.status.success()
-                && String::from_utf8_lossy(&out.stdout).contains("BitChord MPRIS test")
+                && String::from_utf8_lossy(&out.stdout).contains("YTDugem MPRIS test")
             {
                 break;
             }

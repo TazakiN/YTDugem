@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=BitChord
+Name=YTDugem
 Comment=Your music. Your space.
-Exec=bitchord-desktop
-Icon=in.bitchord.desktop
+Exec=ytdugem
+Icon=in.ytdugem.desktop
 Terminal=false
 Categories=AudioVideo;Audio;Player;
-StartupWMClass=in.bitchord.desktop
+StartupWMClass=in.ytdugem.desktop

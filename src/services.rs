@@ -70,7 +70,7 @@ pub struct Collection {
 fn client() -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(25))
-        .user_agent("Mozilla/5.0 BitChord-Rust/0.1")
+        .user_agent("Mozilla/5.0 YTDugem/0.1")
         .build()?)
 }
 

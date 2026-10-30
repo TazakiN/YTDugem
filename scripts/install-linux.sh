@@ -7,7 +7,7 @@ for tool in cargo mpv yt-dlp ffmpeg ffprobe; do
 done
 cargo build --release --locked
 prefix="${PREFIX:-$HOME/.local}"
-install -Dm755 target/release/bitchord-desktop "$prefix/bin/bitchord-desktop"
-install -Dm644 assets/icon.png "$prefix/share/icons/hicolor/512x512/apps/in.bitchord.desktop.png"
-install -Dm644 packaging/in.bitchord.desktop.desktop "$prefix/share/applications/in.bitchord.desktop.desktop"
-echo "Installed $prefix/bin/bitchord-desktop"
+install -Dm755 target/release/ytdugem "$prefix/bin/ytdugem"
+install -Dm644 assets/icon.png "$prefix/share/icons/hicolor/512x512/apps/in.ytdugem.desktop.png"
+install -Dm644 packaging/in.ytdugem.desktop.desktop "$prefix/share/applications/in.ytdugem.desktop.desktop"
+echo "Installed $prefix/bin/ytdugem"

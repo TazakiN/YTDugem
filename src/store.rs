@@ -37,7 +37,7 @@ impl Default for Library {
             download_dir: directories::UserDirs::new()
                 .and_then(|d| d.audio_dir().map(Path::to_path_buf))
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("BitChord"),
+                .join("YTDugem"),
         }
     }
 }
@@ -46,6 +46,7 @@ pub fn data_path() -> PathBuf {
     if let Some(path) = std::env::var_os("BITCHORD_DATA_DIR") {
         return PathBuf::from(path).join("library.json");
     }
+    // ponytail: retain the legacy data location so renaming never loses a library or sign-in.
     directories::ProjectDirs::from("in", "BitChord", "BitChord")
         .expect("Home directory unavailable")
         .data_dir()
@@ -63,7 +64,7 @@ pub fn lock(path: &Path) -> Result<std::fs::File> {
         .truncate(false)
         .open(path.with_extension("lock"))?;
     file.try_lock()
-        .context("BitChord is already running, or its library cannot be locked")?;
+        .context("YTDugem is already running, or its library cannot be locked")?;
     Ok(file)
 }
 

@@ -40,6 +40,14 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, selected: bool, label: &
             Color32::from_white_alpha(if selected { 32 } else { 16 }),
         );
     }
+    if matches!(icon, Icon::Logo) {
+        egui::Image::from_bytes(
+            "bytes://ytdugem-icon.png",
+            include_bytes!("../assets/icon.png").as_slice(),
+        )
+        .paint_at(ui, rect.shrink(3.0));
+        return response.on_hover_text(label);
+    }
     paint(
         ui.painter(),
         icon,
@@ -306,18 +314,17 @@ pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
             }
         }
         Icon::Logo => {
-            for row in 0..3 {
-                let pts = (0..24)
-                    .map(|i| {
-                        let x = i as f32 / 23.0;
-                        point(
-                            0.08 + x * 0.84,
-                            0.22 + row as f32 * 0.24 + 0.15 * (x * std::f32::consts::PI).sin(),
-                        )
-                    })
-                    .collect();
-                p.add(egui::Shape::line(pts, Stroke::new(r.width() * 0.09, color)));
-            }
+            p.circle_stroke(
+                r.center(),
+                r.width() * 0.43,
+                Stroke::new(r.width() * 0.075, color),
+            );
+            p.circle_stroke(
+                r.center(),
+                r.width() * 0.31,
+                Stroke::new(r.width() * 0.025, color),
+            );
+            path(&[(0.4, 0.29), (0.7, 0.5), (0.4, 0.71)], true, true);
         }
     }
 }

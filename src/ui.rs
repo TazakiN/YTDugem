@@ -9,7 +9,7 @@ use crate::{
 };
 use eframe::egui::{self, Align, Color32, FontId, Pos2, Rect, RichText, Stroke, Vec2};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
@@ -56,11 +56,12 @@ enum Event {
     Lyrics(String, Result<Vec<LyricLine>, String>),
     Downloaded(Result<PathBuf, String>),
     Account(u64, Result<Account, String>),
+    BrowserOpened(u64, Result<(), String>),
     Artwork(String, Result<(egui::ColorImage, egui::ColorImage), String>),
     Radio(String, Result<Vec<Track>, String>),
 }
 
-pub struct BitChord {
+pub struct YTDugem {
     library: Library,
     path: PathBuf,
     read_only: bool,
@@ -109,7 +110,6 @@ pub struct BitChord {
     account: Option<Account>,
     account_open: bool,
     cookie_input: String,
-    cookie_visible: bool,
     account_busy: bool,
     account_request: u64,
     login_cancel: Arc<AtomicBool>,
@@ -118,7 +118,7 @@ pub struct BitChord {
     radio_pending: bool,
 }
 
-impl BitChord {
+impl YTDugem {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         configure_style(&cc.egui_ctx);
         let path = store::data_path();
@@ -201,7 +201,6 @@ impl BitChord {
             account,
             account_open: false,
             cookie_input: String::new(),
-            cookie_visible: false,
             account_busy: false,
             account_request: 0,
             login_cancel: Arc::new(AtomicBool::new(false)),
@@ -510,6 +509,22 @@ impl BitChord {
             let _ = tx.send(Event::Downloaded(services::download(&t, &dir).map_err(err)));
         });
     }
+    fn open_default_login(&mut self) {
+        if self.account_busy {
+            return;
+        }
+        self.account_busy = true;
+        self.account_request += 1;
+        self.message = "Opening your default browser…".into();
+        let id = self.account_request;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Event::BrowserOpened(
+                id,
+                auth::open_default_login().map_err(err),
+            ));
+        });
+    }
     fn login(&mut self, browser: bool) {
         if self.account_busy {
             return;
@@ -635,6 +650,13 @@ impl BitChord {
                         egui::TextureOptions::LINEAR,
                     ));
                 }
+                Event::BrowserOpened(id, r) if id == self.account_request => {
+                    self.account_busy = false;
+                    self.message = match r {
+                        Ok(()) => "Sign in to YouTube Music in your browser, then paste your cookies below to connect YTDugem. Opening the browser does not connect your account automatically.".into(),
+                        Err(e) => e,
+                    };
+                }
                 Event::Account(id, r) if id == self.account_request => {
                     self.account_busy = false;
                     match r {
@@ -718,7 +740,7 @@ fn err(e: anyhow::Error) -> String {
     format!("{e:#}")
 }
 
-impl BitChord {
+impl YTDugem {
     fn sidebar(&mut self, ui: &mut egui::Ui, rect: Rect) {
         ui.painter().rect_filled(rect, 0.0, SIDE);
         ui.painter().line_segment(
@@ -1483,7 +1505,7 @@ impl BitChord {
                     .library
                     .local
                     .iter()
-                    .filter(|t| t.source.contains("BitChord"))
+                    .filter(|t| Path::new(&t.source).starts_with(&self.library.download_dir))
                     .cloned()
                     .collect();
                 self.track_list(ui, tracks, "Downloads");
@@ -1573,22 +1595,30 @@ impl BitChord {
                 } else {
                     ui.label("Sign in to access your YouTube Music library and history.");
                     if ui
-                        .add_enabled(!self.account_busy, egui::Button::new("Sign in with Google"))
+                        .add_enabled(!self.account_busy, egui::Button::new("Open default browser"))
+                        .clicked()
+                    {
+                        self.open_default_login();
+                    }
+                    ui.label("Sign in to YouTube Music in your browser, then paste your cookies below to connect YTDugem.");
+                    if ui
+                        .add_enabled(!self.account_busy, egui::Button::new("Automatic sign-in (Chrome/Edge/Chromium)"))
                         .clicked()
                     {
                         self.login(true);
                     }
                     ui.separator();
                     ui.label("Or paste a Cookie header, Netscape cookies, or cookie JSON:");
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.cookie_input)
-                                .password(!self.cookie_visible)
-                                .desired_rows(4)
-                                .desired_width(380.0),
-                        );
-                        ui.checkbox(&mut self.cookie_visible, "Show");
-                    });
+                    egui::ScrollArea::vertical()
+                        .max_height(120.0)
+                        .id_salt("cookie-input-scroll")
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.cookie_input)
+                                    .desired_rows(4)
+                                    .desired_width(420.0),
+                            );
+                        });
                     if ui.button("Cancel").clicked() {
                         self.login_cancel.store(true, Ordering::SeqCst);
                         self.account_request += 1;
@@ -1971,7 +2001,7 @@ impl BitChord {
     }
 }
 
-impl eframe::App for BitChord {
+impl eframe::App for YTDugem {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.events(ctx);
         let typing = ctx.wants_keyboard_input();

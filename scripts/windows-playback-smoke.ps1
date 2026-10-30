@@ -1,5 +1,5 @@
 param(
-    [string]$Package = (Join-Path $PSScriptRoot '..\dist\BitChord-windows-x86_64.zip'),
+    [string]$Package = (Join-Path $PSScriptRoot '..\dist\YTDugem-windows-x86_64.zip'),
     [string]$Reports = (Join-Path $PSScriptRoot '..\dist\playback-test-results'),
     [switch]$Online,
     [switch]$RealAudio
@@ -14,9 +14,9 @@ try {
     New-Item -ItemType Directory -Force -Path $Reports | Out-Null
     $Reports = (Resolve-Path $Reports).ProviderPath
     Expand-Archive -LiteralPath (Resolve-Path $Package).Path -DestinationPath $work
-    $exe = Join-Path $work 'BitChord\BitChord.exe'
+    $exe = Join-Path $work 'YTDugem\YTDugem.exe'
     foreach ($tool in @('mpv','yt-dlp','ffmpeg','ffprobe','deno')) {
-        if (!(Test-Path (Join-Path $work ('BitChord\tools\'+$tool+'.exe')))) { throw ('Missing bundled '+$tool) }
+        if (!(Test-Path (Join-Path $work ('YTDugem\tools\'+$tool+'.exe')))) { throw ('Missing bundled '+$tool) }
     }
     # No externally installed audio tools, executable overrides, or helpful caller PATH.
     $env:PATH = Join-Path $env:SystemRoot 'System32'

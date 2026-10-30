@@ -55,11 +55,11 @@ with tempfile.TemporaryDirectory(prefix="bitchord-gui-") as data:
     env.pop("WAYLAND_DISPLAY", None)
     if not existing: env["XAUTHORITY"] = str(auth)
     log = (OUT / "desktop.log").open("w")
-    binary = os.environ.get("BITCHORD_TEST_BINARY", str(ROOT / "target/debug/bitchord-desktop"))
+    binary = os.environ.get("BITCHORD_TEST_BINARY", str(ROOT / "target/debug/ytdugem"))
     app = subprocess.Popen([binary], env=env, stdout=log, stderr=log)
     window = None
     try:
-        window = check("xdotool", "search", "--sync", "--onlyvisible", "--name", "^BitChord$", env=env, timeout=30).splitlines()[0]
+        window = check("xdotool", "search", "--sync", "--onlyvisible", "--name", "^YTDugem$", env=env, timeout=30).splitlines()[0]
         geometry = check("xdotool", "getwindowgeometry", "--shell", window, env=env)
         print("Native window:\n" + geometry)
         check("xdotool", "windowfocus", "--sync", window, env=env)

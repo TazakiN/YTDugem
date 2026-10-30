@@ -1,4 +1,4 @@
-# BitChord Desktop — Rust
+# YTDugem
 
 A native desktop rewrite of [BitChord](https://github.com/kushagrasinghx/BitChord), based on its `desktop-build-30` desktop target (`7c673dc`). Rust application and UI; no Kotlin/JVM, Android, web frontend, or embedded browser. Native rendering with egui, mpv for audio decoding/output, YouTube Music's public Innertube endpoints for discovery.
 
@@ -12,13 +12,13 @@ cargo run --release --locked
 
 Linux (Debian/Ubuntu): `sudo apt install mpv yt-dlp ffmpeg libxkbcommon0 libgl1`. A graphical X11/Wayland session is required. Keep yt-dlp current when YouTube changes its player.
 
-**Windows portable:** extract **all** of `dist/BitChord-windows-x86_64.zip`, then double-click `BitChord/BitChord.exe`. Keep its `tools` folder beside the executable. mpv, yt-dlp, FFmpeg/ffprobe and Deno are included; no audio-tool installation, administrator access, or system `PATH` changes are needed. **The `.exe` alone is not a portable distribution.** The app prepends its own `tools` folder to the environment inherited by its audio processes.
+**Windows portable:** extract **all** of `dist/YTDugem-windows-x86_64.zip`, then double-click `YTDugem/YTDugem.exe`. Keep its `tools` folder beside the executable. mpv, yt-dlp, FFmpeg/ffprobe and Deno are included; no audio-tool installation, administrator access, or system `PATH` changes are needed. **The `.exe` alone is not a portable distribution.** The app prepends its own `tools` folder to the environment inherited by its audio processes.
 
 To build from source on Windows, use Rust with the MSVC build tools and `cargo build --release --locked`. Package the runtime with `python scripts/package-windows.py` (requires Python and 7zip; set `SEVENZIP` if needed). Downloads are version-pinned and SHA-256 checked. Without the portable package, install mpv, yt-dlp and FFmpeg yourself or use executable overrides below.
 
 **WSL/WSLg:** BitChord automatically uses X11 and Mesa's software renderer as a workaround for EGL/Zink driver initialization failures. Run from your WSL terminal, not a separate Windows shell. Set `BITCHORD_WSL_COMPAT=0` to opt back into the default graphics path if your WSL GPU driver works. To apply the workaround to an older build: `env -u WAYLAND_DISPLAY LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe cargo run --release --locked`. If WSLg still fails to present the window, use the native Windows executable instead; it does not depend on WSLg, Mesa or the WSL display server.
 
-Linux user-local installation: `sh scripts/install-linux.sh`. The resulting executable is `~/.local/bin/bitchord-desktop`; add `~/.local/bin` to `PATH`. It also installs the desktop launcher and icon.
+Linux user-local installation: `sh scripts/install-linux.sh`. The resulting executable is `~/.local/bin/ytdugem`; add `~/.local/bin` to `PATH`. It also installs the desktop launcher and icon.
 
 ## Implemented
 
@@ -61,14 +61,14 @@ powershell -NoProfile -File scripts/windows-playback-smoke.ps1 -Online -RealAudi
 
 The GUI smoke check creates an isolated library, imports and plays a generated WAV, exercises search, and captures screenshots in `/tmp/opencode/bitchord-smoke`. Set `BITCHORD_TEST_OUTPUT` to change that directory, `BITCHORD_TEST_BINARY` to test the release executable, or `BITCHORD_TEST_DISPLAY=:0` to use an existing test display.
 
-The Windows playback check runs **the packaged BitChord.exe**, not a substitute player. It verifies decoded samples, advancing playback, pause, seek, observed volume/speed changes, resume and shutdown, writing JSON reports to `dist/playback-test-results`. `-RealAudio` rejects null audio output. CI runs the extracted-package local-audio check on Windows to catch missing-runtime regressions.
+The Windows playback check runs **the packaged YTDugem.exe**, not a substitute player. It verifies decoded samples, advancing playback, pause, seek, observed volume/speed changes, resume and shutdown, writing JSON reports to `dist/playback-test-results`. `-RealAudio` rejects null audio output. CI runs the extracted-package local-audio check on Windows to catch missing-runtime regressions.
 
 Verified on Windows with no installed audio tools in `PATH`: a local WAV and a YouTube music stream both opened **WASAPI audio output at 44.1 kHz** and passed every playback/control check.
 
 You can also diagnose any local file or HTTPS stream directly:
 
 ```powershell
-.\BitChord.exe --check-playback "C:\Music\track.flac" "C:\Temp\playback-report.json"
+.\YTDugem.exe --check-playback "C:\Music\track.flac" "C:\Temp\playback-report.json"
 ```
 
 ## Configuration and data
@@ -82,10 +82,10 @@ No account credentials or API keys are required for public search. Online playba
 | `BITCHORD_DATA_DIR` | Override the directory containing `library.json` |
 | `BITCHORD_AUDIO_OUTPUT=null` | Null audio output for headless tests |
 
-By default, library data lives in the OS application-data directory (`~/.local/share/bitchord` on Linux; the exact path is shown in Settings). Downloads default to `Music/BitChord` and can be changed in Settings. No upstream user data is modified or migrated automatically.
+Library and credentials retain the legacy BitChord OS application-data directory (`~/.local/share/bitchord` on Linux; the exact path is shown in Settings), so renaming does not lose existing data. The `BITCHORD_*` environment variables remain compatible. New libraries default to `Music/YTDugem` for downloads; existing libraries retain their configured download directory.
 
 Account credentials are stored separately in `auth/` beside the library, protected with Windows DPAPI or Unix directory/file permissions (0700/0600). Manual cookies grant account access: never share them. Sign-in uses a separate temporary browser profile, not cookies from your normal browser. Chrome, Edge or Chromium must be installed for browser sign-in; Google may restrict automated browser login. Logout removes the saved session; playback already running can retain its private temporary cookie file until the player stops.
 
 ## License
 
-GPL-3.0-only. Original BitChord and its icon: kushagrasinghx and contributors. See [LICENSE](LICENSE). Independent third-party client; not affiliated with YouTube or Google.
+GPL-3.0-only. Based on the original BitChord by kushagrasinghx and contributors. See [LICENSE](LICENSE). YTDugem uses a newly generated app icon. Independent third-party client; not affiliated with YouTube or Google.

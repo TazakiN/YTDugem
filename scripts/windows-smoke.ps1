@@ -1,4 +1,4 @@
-param([string]$Executable = (Join-Path $PSScriptRoot '..\dist\BitChord.exe'))
+param([string]$Executable = (Join-Path $PSScriptRoot '..\dist\YTDugem.exe'))
 $ErrorActionPreference = 'Stop'
 Add-Type @'
 using System;
@@ -17,10 +17,10 @@ try {
     $until = [DateTime]::UtcNow.AddSeconds(30)
     do {
         $app.Refresh()
-        if ($app.MainWindowTitle -eq 'BitChord') { break }
+        if ($app.MainWindowTitle -eq 'YTDugem') { break }
         if ($app.WaitForExit(100)) { throw ('App exited before showing a window: '+$app.ExitCode) }
     } while ([DateTime]::UtcNow -lt $until)
-    if ($app.MainWindowTitle -ne 'BitChord') { throw 'No BitChord window appeared' }
+    if ($app.MainWindowTitle -ne 'YTDugem') { throw 'No YTDugem window appeared' }
     if (![BitChordSmokeWindow]::IsWindowVisible($app.MainWindowHandle)) { throw 'Window is not visible' }
     Write-Output ('Visible native Windows window: '+$app.MainWindowTitle+'; PID: '+$app.Id)
     [void][BitChordSmokeWindow]::PostMessage($app.MainWindowHandle,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)

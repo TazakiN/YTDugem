@@ -136,7 +136,7 @@ impl Player {
             .stderr(Stdio::null())
             .spawn()
             .context(if cfg!(windows) {
-                "Starting mpv: extract the COMPLETE BitChord ZIP, keeping tools/mpv.exe beside BitChord.exe, or set BITCHORD_MPV"
+                "Starting mpv: extract the COMPLETE YTDugem ZIP, keeping tools/mpv.exe beside YTDugem.exe, or set BITCHORD_MPV"
             } else { "starting mpv (install mpv or set BITCHORD_MPV)" })?;
         self.child = Some(child);
         self.cookie_file = cookies;

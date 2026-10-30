@@ -17,7 +17,7 @@ fn main() -> eframe::Result {
     if args.get(1).is_some_and(|s| s == "--check-playback") {
         if args.len() != 4 {
             return Err(eframe::Error::AppCreation(
-                "Usage: BitChord --check-playback SOURCE REPORT.json".into(),
+                "Usage: YTDugem --check-playback SOURCE REPORT.json".into(),
             ));
         }
         return playback_check::run(&args[2].to_string_lossy(), std::path::Path::new(&args[3]))
@@ -34,7 +34,7 @@ fn main() -> eframe::Result {
             std::env::remove_var("WAYLAND_DISPLAY");
         }
         eprintln!(
-            "BitChord: WSL compatibility rendering enabled (BITCHORD_WSL_COMPAT=0 to disable)"
+            "YTDugem: WSL compatibility rendering enabled (BITCHORD_WSL_COMPAT=0 to disable)"
         );
     }
     let _instance =
@@ -50,9 +50,9 @@ fn main() -> eframe::Result {
             }
         });
     let mut viewport = eframe::egui::ViewportBuilder::default()
-        .with_title("BitChord")
+        .with_title("YTDugem")
         .with_decorations(false)
-        .with_app_id("in.bitchord.desktop")
+        .with_app_id("in.ytdugem.desktop")
         .with_inner_size([1320.0, 850.0])
         .with_min_inner_size([960.0, 640.0]);
     if let Some(icon) = icon {
@@ -63,8 +63,8 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "BitChord",
+        "YTDugem",
         options,
-        Box::new(|cc| Ok(Box::new(ui::BitChord::new(cc)))),
+        Box::new(|cc| Ok(Box::new(ui::YTDugem::new(cc)))),
     )
 }

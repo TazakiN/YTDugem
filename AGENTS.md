@@ -2,7 +2,7 @@
 
 ## Goals and Scope
 
-- This project is a **Rust rewrite of BitChord desktop**, targeting Windows and Linux.
+- YTDugem is a **Rust rewrite of BitChord desktop**, targeting Windows and Linux.
 - Do not expand the scope to Android, TV, Wear OS, web, or backend development unless the user requests it.
 - Do not claim feature parity with upstream until implementation and testing demonstrate it.
 - Preserve the GPL-3.0 license and attribution to the original BitChord project.
@@ -62,7 +62,7 @@ Linux GUI smoke test: `python3 scripts/gui-smoke.py`; requires Xvfb, xauth, xdot
 
 ## Windows and Distribution
 
-- Distribute the complete portable ZIP, **not just the `.exe`**. Keep the `tools` folder beside `BitChord.exe`.
+- Distribute the complete portable ZIP, **not just the `.exe`**. Keep the `tools` folder beside `YTDugem.exe`.
 - Bundled runtime tools: mpv, yt-dlp, FFmpeg, ffprobe, and Deno. Do not rely on tools installed on the developer's machine or its `PATH`.
 - Package with `python scripts/package-windows.py` after building for Windows; requires 7zip. Preserve SHA-256 verification of runtime downloads.
 - After changing runtime discovery, IPC, playback, or packaging, test the actual ZIP that will be delivered to users:

@@ -27,5 +27,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
-          name: BitChord-windows-x86_64
-          path: dist/BitChord-windows-x86_64.zip
+          name: YTDugem-windows-x86_64
+          path: dist/YTDugem-windows-x86_64.zip
