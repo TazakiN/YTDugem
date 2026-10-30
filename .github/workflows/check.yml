@@ -1,0 +1,31 @@
+name: Rust desktop
+on: [push, pull_request]
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked -- -D warnings
+      - run: cargo build --release --locked
+      - name: Package Windows audio tools
+        if: runner.os == 'Windows'
+        env:
+          SEVENZIP: 'C:\Program Files\7-Zip\7z.exe'
+        run: python scripts/package-windows.py
+      - name: Test extracted Windows package playback without installed tools
+        if: runner.os == 'Windows'
+        run: ./scripts/windows-playback-smoke.ps1
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: BitChord-windows-x86_64
+          path: dist/BitChord-windows-x86_64.zip

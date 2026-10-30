@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=BitChord
+Comment=Your music. Your space.
+Exec=bitchord-desktop
+Icon=in.bitchord.desktop
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=in.bitchord.desktop
