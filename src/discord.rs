@@ -8,12 +8,16 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
 };
+// The IPC client below is Windows-only (named pipes); elsewhere presence stays Idle.
+#[cfg(windows)]
+use std::time::Duration;
 
+#[cfg(windows)]
 const APP_ID: &str = "1411019391843172514";
 const APP_URL: &str = "https://github.com/kushagrasinghx/BitChord";
 
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
     Idle,
