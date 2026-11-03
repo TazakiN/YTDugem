@@ -15,6 +15,103 @@ use std::{
 const EQ_HZ: [u32; 7] = [60, 150, 400, 1000, 2500, 6000, 14000];
 const MAX_IPC_FRAME: usize = 1024 * 1024;
 
+/// A directly playable YouTube stream and the HTTP headers yt-dlp says it needs.
+#[derive(Debug, PartialEq)]
+struct Stream {
+    url: String,
+    headers: Vec<(String, String)>,
+}
+
+/// Fast path for YouTube playback. Letting mpv's yt-dlp hook extract with the account cookies
+/// takes ~11 s to first audio: yt-dlp drops its quickest client (`visionos` accepts no cookies),
+/// the remaining clients are slower, often only offer a 360p video (format 18), and YouTube then
+/// refuses the stream until `available_at`. A cookie-less `visionos` extraction yields the Opus
+/// audio in ~3 s with no wait. Anything it cannot play (age-restricted, members-only, private)
+/// returns `None`, and the caller falls back to the signed-in hook.
+fn resolve_youtube(source: &str) -> Option<Stream> {
+    let ytdlp = std::env::var_os("BITCHORD_YTDLP").unwrap_or_else(|| "yt-dlp".into());
+    let mut cmd = Command::new(ytdlp);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let mut child = cmd
+        .args([
+            "-J",
+            "--no-playlist",
+            "--no-warnings",
+            "-f",
+            "bestaudio/best",
+            "--extractor-args",
+            "youtube:player_client=visionos",
+            "--",
+            source,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = thread::spawn(move || {
+        let mut body = Vec::new();
+        stdout
+            .by_ref()
+            .take(16 * 1024 * 1024)
+            .read_to_end(&mut body)
+            .map(|_| body)
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            _ => return None,
+        }
+    }
+    let info: Value = serde_json::from_slice(&reader.join().ok()?.ok()?).ok()?;
+    let (stream, available_at) = parse_stream(&info)?;
+    // YouTube answers 403 until `available_at`; this client rarely needs it, but honour it.
+    if let Some(at) = available_at {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        if at > now {
+            thread::sleep(Duration::from_secs((at - now).min(10)));
+        }
+    }
+    Some(stream)
+}
+
+fn parse_stream(info: &Value) -> Option<(Stream, Option<u64>)> {
+    let url = info["url"].as_str().filter(|u| u.starts_with("https://"))?;
+    let headers = info["http_headers"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, value)| {
+            let value = value.as_str()?;
+            // One header per mpv list item; a newline would smuggle in another header.
+            (!name.contains(['\r', '\n', ':']) && !value.contains(['\r', '\n']))
+                .then(|| (name.clone(), value.to_owned()))
+        })
+        .collect();
+    Some((
+        Stream {
+            url: url.to_owned(),
+            headers,
+        },
+        info["available_at"].as_u64(),
+    ))
+}
+
 pub fn audio_filter(settings: &crate::store::AudioSettings) -> Option<String> {
     let mut settings = settings.clone();
     settings.sanitize();
@@ -203,6 +300,14 @@ impl Player {
             self.socket_dir = socket_dir;
         }
 
+        let stream = if source.starts_with("https://music.youtube.com/")
+            || source.starts_with("https://www.youtube.com/")
+        {
+            resolve_youtube(source)
+        } else {
+            None
+        };
+
         let mpv = std::env::var_os("BITCHORD_MPV").unwrap_or_else(|| "mpv".into());
         let mut cmd = Command::new(mpv);
         #[cfg(windows)]
@@ -236,19 +341,29 @@ impl Player {
                 ytdlp.to_string_lossy()
             ));
         }
-        let cookies = crate::auth::cookie_file()?;
+        let cookies = if stream.is_none() {
+            crate::auth::cookie_file()?
+        } else {
+            None
+        };
         if let Some(ref file) = cookies {
             cmd.arg(format!(
                 "--ytdl-raw-options-append=cookies={}",
                 file.path().to_string_lossy()
             ));
         }
+        if let Some(ref stream) = stream {
+            cmd.arg("--ytdl=no");
+            for (name, value) in &stream.headers {
+                cmd.arg(format!("--http-header-fields-append={name}: {value}"));
+            }
+        }
         if force_null_output {
             cmd.arg("--ao=null");
         }
         let child = cmd
             .arg("--")
-            .arg(source)
+            .arg(stream.as_ref().map_or(source, |s| s.url.as_str()))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -662,6 +777,36 @@ fn valid_range(n: f64, min: f64, max: f64, name: &str) -> Result<f64> {
         bail!("{name} must be between {min} and {max}");
     }
     Ok(n)
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::{parse_stream, Stream};
+    use serde_json::json;
+
+    #[test]
+    fn parses_direct_stream_from_yt_dlp_json() {
+        let info = json!({
+            "url": "https://rr1.googlevideo.com/videoplayback?id=1",
+            "available_at": 1793710336u64,
+            "http_headers": {"User-Agent": "UA", "Accept": "a/b,c/d", "Bad\nName": "x", "X-Evil": "a\r\nHost: y"}
+        });
+        let (stream, at) = parse_stream(&info).unwrap();
+        assert_eq!(at, Some(1793710336));
+        assert_eq!(
+            stream,
+            Stream {
+                url: "https://rr1.googlevideo.com/videoplayback?id=1".into(),
+                headers: vec![
+                    ("Accept".into(), "a/b,c/d".into()),
+                    ("User-Agent".into(), "UA".into())
+                ],
+            }
+        );
+        // Merged video+audio selections have no single URL: fall back to the mpv hook.
+        assert!(parse_stream(&json!({"requested_formats": []})).is_none());
+        assert!(parse_stream(&json!({"url": "file:///etc/passwd"})).is_none());
+    }
 }
 
 #[cfg(test)]
