@@ -1076,13 +1076,14 @@ impl YTDugem {
             let art = Rect::from_min_size(rect.min + Vec2::new(7.0, 7.0), Vec2::splat(44.0));
             draw_cover(ui, &d.track, art, None);
             let x = art.right() + 12.0;
-            let max = ((rect.width() - 200.0) / 7.4).max(8.0) as usize;
-            ui.painter().text(
+            fit_text(
+                ui.painter(),
                 Pos2::new(x, rect.top() + 20.0),
                 egui::Align2::LEFT_CENTER,
-                truncate(&d.track.title, max),
+                &d.track.title,
                 FontId::new(14.0, egui::FontFamily::Name("bold".into())),
                 WHITE,
+                rect.right() - 90.0 - x,
             );
             let (status, color) = match &d.state {
                 DownloadState::Queued => ("Queued".to_owned(), MUTED),
@@ -1091,17 +1092,18 @@ impl YTDugem {
                     (format!("Downloading · {}%", (f * 100.0) as u32), MUTED)
                 }
                 DownloadState::Running(_) => ("Downloading".to_owned(), MUTED),
-                DownloadState::Failed(e) => (
-                    format!("Failed · {}", truncate(e, max)),
-                    Color32::from_rgb(232, 120, 110),
-                ),
+                DownloadState::Failed(e) => {
+                    (format!("Failed · {e}"), Color32::from_rgb(232, 120, 110))
+                }
             };
-            ui.painter().text(
+            fit_text(
+                ui.painter(),
                 Pos2::new(x, rect.top() + 39.0),
                 egui::Align2::LEFT_CENTER,
-                status,
+                &status,
                 FontId::proportional(12.5),
                 color,
+                rect.right() - 90.0 - x,
             );
             if let DownloadState::Running(f) = d.state {
                 let bar = Rect::from_min_size(
@@ -1367,19 +1369,23 @@ impl YTDugem {
                         ui.painter()
                             .rect_filled(art, 8.0, Color32::from_black_alpha(40));
                     }
-                    ui.painter().text(
+                    fit_text(
+                        ui.painter(),
                         Pos2::new(rect.left(), art.bottom() + 16.0),
                         egui::Align2::LEFT_CENTER,
-                        truncate(&p.title, 20),
+                        &p.title,
                         FontId::new(14.0, egui::FontFamily::Name("bold".into())),
                         WHITE,
+                        rect.width(),
                     );
-                    ui.painter().text(
+                    fit_text(
+                        ui.painter(),
                         Pos2::new(rect.left(), art.bottom() + 36.0),
                         egui::Align2::LEFT_CENTER,
-                        truncate(&p.subtitle, 24),
+                        &p.subtitle,
                         FontId::proportional(12.5),
                         MUTED,
+                        rect.width(),
                     );
                     if response.clicked() {
                         open = Some(p.clone());
@@ -2303,19 +2309,23 @@ impl YTDugem {
             if self.loading {
                 self.now_playing_badge(ui, art);
             }
-            ui.painter().text(
+            fit_text(
+                ui.painter(),
                 Pos2::new(card.left() + 61.0, card.top() + 15.0),
                 egui::Align2::LEFT_CENTER,
-                truncate(&t.title, (card_width / 8.0 - 9.0).max(8.0) as usize),
+                &t.title,
                 FontId::new(12.5, egui::FontFamily::Name("bold".into())),
                 WHITE,
+                card.width() - 70.0,
             );
-            ui.painter().text(
+            fit_text(
+                ui.painter(),
                 Pos2::new(card.left() + 61.0, card.top() + 33.0),
                 egui::Align2::LEFT_CENTER,
-                truncate(&t.artist, (card_width / 8.0 - 9.0).max(8.0) as usize),
+                &t.artist,
                 FontId::proportional(11.0),
                 MUTED,
+                card.width() - 70.0,
             );
             let progress = if self.duration() > 0.0 {
                 (self.status.position / self.duration()).clamp(0.0, 1.0) as f32
@@ -2580,28 +2590,30 @@ impl YTDugem {
             self.now_playing_badge(ui, art);
         }
         let text_x = art.right() + 13.0;
-        let extra = if index.is_some() { 100.0 } else { 36.0 };
-        let max = ((rect.right() - text_x - extra) / 7.6).max(8.0) as usize;
-        ui.painter().text(
+        // Room for the "···" menu (and the duration, when numbered), plus a gap before it.
+        let extra = if index.is_some() { 110.0 } else { 48.0 };
+        let max = rect.right() - text_x - extra;
+        fit_text(
+            ui.painter(),
             Pos2::new(text_x, rect.top() + 23.0),
             egui::Align2::LEFT_CENTER,
-            truncate(&track.title, max),
+            &track.title,
             FontId::new(15.0, egui::FontFamily::Name("bold".into())),
             WHITE,
+            max,
         );
-        ui.painter().text(
+        fit_text(
+            ui.painter(),
             Pos2::new(text_x, rect.top() + 46.0),
             egui::Align2::LEFT_CENTER,
-            truncate(
-                if track.artist.is_empty() {
-                    "Local audio"
-                } else {
-                    &track.artist
-                },
-                max,
-            ),
+            if track.artist.is_empty() {
+                "Local audio"
+            } else {
+                &track.artist
+            },
             FontId::proportional(14.0),
             MUTED,
+            max,
         );
         if index.is_some() {
             ui.painter().text(
@@ -2740,20 +2752,19 @@ impl YTDugem {
                                     }
                                     if ui
                                         .add(
-                                            egui::Button::new(heading(
-                                                truncate(&item.title, 22),
-                                                15.0,
-                                            ))
-                                            .frame(false),
+                                            egui::Label::new(heading(&item.title, 15.0))
+                                                .truncate()
+                                                .sense(egui::Sense::click()),
                                         )
                                         .clicked()
                                     {
                                         self.open_item(item.clone());
                                     }
-                                    ui.label(
-                                        RichText::new(truncate(&item.subtitle, 25))
-                                            .size(14.0)
-                                            .color(MUTED),
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&item.subtitle).size(14.0).color(MUTED),
+                                        )
+                                        .truncate(),
                                     );
                                 });
                             });
@@ -3484,12 +3495,14 @@ impl YTDugem {
         }
         // The page's status line is hidden behind the sheet; failures must still be seen.
         if !self.message.is_empty() {
-            painter.text(
+            fit_text(
+                &painter,
                 Pos2::new(rect.center().x, rect.bottom() - 14.0),
                 egui::Align2::CENTER_CENTER,
-                truncate(&self.message, 140),
+                &self.message,
                 FontId::proportional(12.0),
                 MUTED,
+                rect.width() - 80.0,
             );
         }
     }
@@ -3513,12 +3526,15 @@ impl YTDugem {
                 FontId::proportional(11.0),
                 MUTED,
             );
-            painter.text(
+            // Between the collapse button and the tabs, which take up to ~340 px on the right.
+            fit_text(
+                &painter,
                 Pos2::new(rect.center().x, rect.top() + 43.0),
                 egui::Align2::CENTER_CENTER,
-                truncate(&self.now_origin, 48),
+                &self.now_origin,
                 FontId::new(14.0, egui::FontFamily::Name("bold".into())),
                 WHITE,
+                (rect.width() - 2.0 * 360.0).max(120.0),
             );
         }
         let tabs: &[(&str, PlayerTab)] = if wide {
@@ -4106,27 +4122,28 @@ impl YTDugem {
         }
         let buttons = if hovered && !current { 96.0 } else { 0.0 };
         let text_x = art.right() + 12.0;
-        let max = ((rect.right() - text_x - buttons - 52.0) / 7.4).max(6.0) as usize;
-        ui.painter().text(
+        let max = rect.right() - text_x - buttons - 52.0;
+        fit_text(
+            ui.painter(),
             Pos2::new(text_x, rect.top() + 21.0),
             egui::Align2::LEFT_CENTER,
-            truncate(&track.title, max),
+            &track.title,
             FontId::new(14.0, egui::FontFamily::Name("bold".into())),
             WHITE,
+            max,
         );
-        ui.painter().text(
+        fit_text(
+            ui.painter(),
             Pos2::new(text_x, rect.top() + 39.0),
             egui::Align2::LEFT_CENTER,
-            truncate(
-                if track.artist.is_empty() {
-                    "Local audio"
-                } else {
-                    &track.artist
-                },
-                max,
-            ),
+            if track.artist.is_empty() {
+                "Local audio"
+            } else {
+                &track.artist
+            },
             FontId::proportional(13.0),
             MUTED,
+            max,
         );
         let mut action = None;
         if buttons > 0.0 {
@@ -4441,6 +4458,33 @@ fn region<R>(ui: &mut egui::Ui, rect: Rect, f: impl FnOnce(&mut egui::Ui) -> R) 
     );
     f(&mut child)
 }
+/// Paint `text` on one line, ending in "…" where it would pass `max_width`. Measured, not
+/// counted: a CJK title is about twice as wide per character as a Latin one, so cutting at a
+/// character count let it run over the row's menu button.
+fn fit_text(
+    painter: &egui::Painter,
+    pos: Pos2,
+    anchor: egui::Align2,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    max_width: f32,
+) -> Rect {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat::simple(font, color),
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: max_width.max(8.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = painter.layout_job(job);
+    let rect = anchor.anchor_size(pos, galley.size());
+    painter.galley(rect.min, galley, color);
+    rect
+}
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() > max {
         let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
@@ -4474,12 +4518,14 @@ fn nav_row(
         Rect::from_min_size(r.min + Vec2::new(11.0, 10.0), Vec2::splat(18.0)),
         color,
     );
-    ui.painter().text(
+    fit_text(
+        ui.painter(),
         Pos2::new(r.left() + 43.0, r.center().y),
         egui::Align2::LEFT_CENTER,
-        truncate(label, 23),
+        label,
         FontId::proportional(15.0),
         color,
+        r.right() - r.left() - 51.0,
     );
     response
 }
