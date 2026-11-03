@@ -26,7 +26,7 @@ const SIDE: Color32 = Color32::from_rgb(21, 22, 19);
 const MUTED: Color32 = Color32::from_rgb(150, 151, 147);
 const WHITE: Color32 = Color32::from_rgb(244, 244, 242);
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Hash)]
 enum Page {
     Home,
     Explore,
@@ -179,6 +179,7 @@ pub struct YTDugem {
     show_translation: bool,
     translating: bool,
     translation_request: u64,
+    settings_query: String,
 }
 
 const SCREENSHOT_FRAMES: u32 = 120;
@@ -362,6 +363,7 @@ impl YTDugem {
             show_translation: false,
             translating: false,
             translation_request: 0,
+            settings_query: String::new(),
         };
         app.load_home();
         app
@@ -1611,6 +1613,645 @@ impl YTDugem {
             _ => self.lyrics.clone(),
         }
     }
+    /// Settings, grouped as upstream's `DesktopSettingsSection`s: titled groups of rows, each a
+    /// title and explanation on the left and its control on the right, filtered by a search box.
+    fn settings_view(&mut self, ui: &mut egui::Ui) {
+        self.load_lyrics_keys();
+        self.load_audio_devices();
+        ui.set_max_width(820.0);
+        ui.horizontal(|ui| {
+            ui.label(heading("Settings", 26.0));
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(14.0);
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(40, 42, 38))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(62)))
+                    .corner_radius(8.0)
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (r, _) =
+                                ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
+                            widgets::paint(ui.painter(), Icon::Search, r, MUTED);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.settings_query)
+                                    .hint_text(RichText::new("Search settings").color(MUTED))
+                                    .frame(false)
+                                    .desired_width(220.0),
+                            );
+                        });
+                    });
+            });
+        });
+        ui.add_space(12.0);
+        let query = self.settings_query.trim().to_lowercase();
+        let mut shown = false;
+
+        // Playback
+        let rows = [
+            "Autoplay similar music",
+            "Crossfade",
+            "Playback speed",
+            "Keep playing in the tray",
+        ];
+        if let Some(q) = group_query(&query, "Playback", &rows) {
+            shown = true;
+            settings_group(ui, "Playback", |ui| {
+                if hit(&q, rows[0]) {
+                    let mut on = self.library.autoplay;
+                    if toggle_row(
+                        ui,
+                        rows[0],
+                        "When the queue ends, keep playing songs like the last one",
+                        &mut on,
+                    ) {
+                        self.library.autoplay = on;
+                        self.save();
+                    }
+                }
+                if hit(&q, rows[1]) {
+                    setting_row(
+                        ui,
+                        rows[1],
+                        "Blend the end of a song into the next. The next song is prepared while this one plays.",
+                        |ui| {
+                            let seconds = self.library.crossfade_seconds;
+                            ui.label(
+                                RichText::new(if seconds == 0 {
+                                    "Off".to_owned()
+                                } else {
+                                    format!("{seconds} s")
+                                })
+                                .color(MUTED),
+                            );
+                            let mut value = seconds;
+                            if ui
+                                .add(egui::Slider::new(&mut value, 0..=12).show_value(false))
+                                .changed()
+                            {
+                                self.library.crossfade_seconds = value;
+                                self.save();
+                            }
+                        },
+                    );
+                }
+                if hit(&q, rows[2]) {
+                    setting_row(
+                        ui,
+                        rows[2],
+                        "Applies to the song that is playing now",
+                        |ui| {
+                            if (self.library.speed - 1.0).abs() > 0.001
+                                && ui.button("Reset").clicked()
+                            {
+                                self.library.speed = 1.0;
+                                let _ = self.player.speed(1.0);
+                                self.save();
+                            }
+                            ui.label(
+                                RichText::new(format!("{:.2}×", self.library.speed)).color(MUTED),
+                            );
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut self.library.speed, 0.5..=2.0)
+                                        .step_by(0.05)
+                                        .show_value(false),
+                                )
+                                .changed()
+                            {
+                                let _ = self.player.speed(self.library.speed);
+                                self.save();
+                            }
+                        },
+                    );
+                }
+                #[cfg(windows)]
+                if self.tray.is_some() && hit(&q, rows[3]) {
+                    let mut on = self.library.close_to_tray;
+                    if toggle_row(
+                        ui,
+                        "Keep playing in the tray",
+                        "Closing the window leaves YTDugem playing in the notification area",
+                        &mut on,
+                    ) {
+                        self.library.close_to_tray = on;
+                        self.save();
+                    }
+                }
+            });
+        }
+
+        // Audio output
+        let rows = ["Output device", "WASAPI exclusive mode"];
+        if let Some(q) = group_query(&query, "Audio output", &rows) {
+            shown = true;
+            settings_group(ui, "Audio output", |ui| {
+                if hit(&q, rows[0]) {
+                    let subtitle = if self.audio_devices_loading {
+                        "Reading devices from mpv…"
+                    } else {
+                        "Applies when the next song starts"
+                    };
+                    setting_row(ui, rows[0], subtitle, |ui| {
+                        if ui
+                            .add_enabled(!self.audio_devices_loading, egui::Button::new("Refresh"))
+                            .clicked()
+                        {
+                            self.audio_devices_loaded = false;
+                            self.load_audio_devices();
+                        }
+                        let selected = self.library.audio.output_device.clone();
+                        egui::ComboBox::from_id_salt("audio-output-device")
+                            .width(240.0)
+                            .selected_text(if selected.is_empty() {
+                                "System default".to_owned()
+                            } else {
+                                self.audio_devices
+                                    .iter()
+                                    .find(|(id, _)| *id == selected)
+                                    .map_or("Unavailable device".to_owned(), |(_, n)| n.clone())
+                            })
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(selected.is_empty(), "System default")
+                                    .clicked()
+                                {
+                                    self.library.audio.output_device.clear();
+                                    self.save();
+                                }
+                                for (id, name) in self.audio_devices.clone() {
+                                    if ui.selectable_label(selected == id, name).clicked() {
+                                        self.library.audio.output_device = id;
+                                        self.save();
+                                    }
+                                }
+                            });
+                    });
+                }
+                #[cfg(windows)]
+                if hit(&q, rows[1]) {
+                    let mut on = self.library.audio.wasapi_exclusive;
+                    if toggle_row(
+                        ui,
+                        rows[1],
+                        "Bypass the Windows mixer on a wasapi/ device; applies to the next song",
+                        &mut on,
+                    ) {
+                        self.library.audio.wasapi_exclusive = on;
+                        self.save();
+                    }
+                }
+            });
+        }
+
+        // Equalizer
+        let rows = ["Equalizer", "Preset", "Stereo balance"];
+        if let Some(q) = group_query(&query, "Equalizer", &rows) {
+            shown = true;
+            settings_group(ui, "Equalizer", |ui| {
+                if hit(&q, rows[0]) {
+                    let mut on = self.library.audio.equalizer_enabled;
+                    if toggle_row(
+                        ui,
+                        rows[0],
+                        "Seven bands and balance, applied to the song that is playing",
+                        &mut on,
+                    ) {
+                        self.library.audio.equalizer_enabled = on;
+                        self.library.audio.sanitize();
+                        self.save();
+                        self.apply_audio_settings();
+                    }
+                }
+                if hit(&q, rows[1]) {
+                    setting_row(ui, rows[1], "", |ui| {
+                        if ui.button("Reset").clicked() {
+                            self.library.audio.equalizer_enabled = false;
+                            self.library.audio.equalizer_bands = vec![0.0; 7];
+                            self.library.audio.stereo_balance = 0.0;
+                            self.save();
+                            self.apply_audio_settings();
+                        }
+                        let current = store::audio_presets()
+                            .iter()
+                            .find(|(_, b)| self.library.audio.equalizer_bands.as_slice() == *b)
+                            .map_or("Custom", |(name, _)| *name);
+                        egui::ComboBox::from_id_salt("equalizer-preset")
+                            .width(180.0)
+                            .selected_text(current)
+                            .show_ui(ui, |ui| {
+                                for (name, bands) in store::audio_presets() {
+                                    if ui.selectable_label(current == *name, *name).clicked() {
+                                        self.library.audio.equalizer_bands = bands.to_vec();
+                                        self.library.audio.equalizer_enabled = true;
+                                        self.save();
+                                        self.apply_audio_settings();
+                                    }
+                                }
+                            });
+                    });
+                    self.equalizer_bands(ui);
+                }
+                if hit(&q, rows[2]) {
+                    setting_row(ui, rows[2], "", |ui| {
+                        let b = self.library.audio.stereo_balance;
+                        ui.label(
+                            RichText::new(if b.abs() < 0.01 {
+                                "Centre".to_owned()
+                            } else if b < 0.0 {
+                                format!("L {:.0}%", -b * 100.0)
+                            } else {
+                                format!("R {:.0}%", b * 100.0)
+                            })
+                            .color(MUTED),
+                        );
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut self.library.audio.stereo_balance,
+                                    -1.0..=1.0,
+                                )
+                                .show_value(false),
+                            )
+                            .changed()
+                        {
+                            self.library.audio.sanitize();
+                            self.save();
+                            self.apply_audio_settings();
+                        }
+                    });
+                }
+            });
+        }
+
+        // Lyrics
+        let rows = [
+            "Lyrics lookup",
+            "Translation language",
+            "Providers",
+            "API key",
+        ];
+        if let Some(q) = group_query(&query, "Lyrics", &rows) {
+            shown = true;
+            settings_group(ui, "Lyrics", |ui| {
+                if hit(&q, rows[0]) {
+                    let mut on = self.library.lyrics_enabled;
+                    if toggle_row(
+                        ui,
+                        rows[0],
+                        "Find timed lyrics for each song from the providers below",
+                        &mut on,
+                    ) {
+                        self.library.lyrics_enabled = on;
+                        self.save();
+                        self.lyrics_settings_changed(true);
+                    }
+                }
+                if hit(&q, rows[1]) {
+                    setting_row(
+                        ui,
+                        rows[1],
+                        "Used by the Translate button in the player",
+                        |ui| {
+                            let system = translate::system_language();
+                            let name = |tag: &str| {
+                                translate::LANGUAGES
+                                    .iter()
+                                    .find(|(t, _)| *t == tag)
+                                    .map_or(tag.to_owned(), |(_, n)| (*n).to_owned())
+                            };
+                            let current = self.library.translation_language.clone();
+                            let follows = format!("{} · follows Windows", name(&system));
+                            let mut chosen = current.clone();
+                            egui::ComboBox::from_id_salt("translation-language")
+                                .width(240.0)
+                                .selected_text(if current.is_empty() {
+                                    follows.clone()
+                                } else {
+                                    name(&current)
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut chosen, String::new(), follows);
+                                    for (tag, label) in translate::LANGUAGES {
+                                        ui.selectable_value(&mut chosen, tag.to_owned(), label);
+                                    }
+                                });
+                            if chosen != current {
+                                self.library.translation_language = chosen;
+                                self.save();
+                                if self.show_translation {
+                                    self.request_translation();
+                                }
+                            }
+                        },
+                    );
+                }
+                if hit(&q, rows[2]) {
+                    setting_row(
+                        ui,
+                        rows[2],
+                        "Tried from the top; untick one to skip it",
+                        |ui| {
+                            if ui.button("Reset").clicked() {
+                                self.library.lyrics_order = store::lyrics_order_default();
+                                self.library.lyrics_sources = store::lyrics_order_default();
+                                self.library.lyrics_enabled = true;
+                                self.save();
+                                self.lyrics_settings_changed(true);
+                            }
+                        },
+                    );
+                    self.lyrics_provider_list(ui);
+                }
+                if hit(&q, rows[3]) {
+                    self.lyrics_key_rows(ui);
+                }
+            });
+        }
+
+        // Downloads
+        let rows = ["Download format", "Download folder"];
+        if let Some(q) = group_query(&query, "Downloads", &rows) {
+            shown = true;
+            settings_group(ui, "Downloads", |ui| {
+                if hit(&q, rows[0]) {
+                    setting_row(
+                        ui,
+                        rows[0],
+                        "Original keeps YouTube's audio as it is",
+                        |ui| {
+                            let current = services::DOWNLOAD_FORMATS
+                                .iter()
+                                .find(|(id, _)| *id == self.library.download_format)
+                                .unwrap_or(&services::DOWNLOAD_FORMATS[0]);
+                            let mut chosen = current.0.to_owned();
+                            egui::ComboBox::from_id_salt("download-format")
+                                .width(280.0)
+                                .selected_text(current.1)
+                                .show_ui(ui, |ui| {
+                                    for (id, label) in services::DOWNLOAD_FORMATS {
+                                        ui.selectable_value(&mut chosen, id.to_owned(), label);
+                                    }
+                                });
+                            if chosen != self.library.download_format {
+                                self.library.download_format = chosen;
+                                self.save();
+                            }
+                        },
+                    );
+                }
+                if hit(&q, rows[1]) {
+                    let saved = self.library.download_dir.to_string_lossy() == self.download_path;
+                    setting_row(
+                        ui,
+                        rows[1],
+                        if saved { "" } else { "Not saved yet" },
+                        |ui| {
+                            if ui.add_enabled(!saved, egui::Button::new("Save")).clicked() {
+                                self.library.download_dir = PathBuf::from(&self.download_path);
+                                self.save();
+                            }
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.download_path)
+                                    .desired_width(300.0),
+                            );
+                        },
+                    );
+                }
+            });
+        }
+
+        // Integrations
+        let rows = [
+            "Discord Rich Presence",
+            "Activity name",
+            "Show YouTube Music button",
+            "Show BitChord button",
+            "System media controls",
+        ];
+        if let Some(q) = group_query(&query, "Integrations", &rows) {
+            shown = true;
+            settings_group(ui, "Integrations", |ui| {
+                if hit(&q, rows[0]) {
+                    let status = if !self.library.discord_enabled {
+                        "Show what you are listening to on your Discord profile".to_owned()
+                    } else {
+                        match self.discord.status() {
+                            crate::discord::Status::Idle => {
+                                "On · shown while a song plays".to_owned()
+                            }
+                            crate::discord::Status::Waiting => {
+                                "On · waiting for Discord".to_owned()
+                            }
+                            crate::discord::Status::Connected => "On · connected".to_owned(),
+                            crate::discord::Status::Error(e) => format!("On · {e}"),
+                        }
+                    };
+                    let mut on = self.library.discord_enabled;
+                    if toggle_row(ui, rows[0], &status, &mut on) {
+                        self.library.discord_enabled = on;
+                        self.save();
+                        if !on {
+                            self.discord.clear();
+                        }
+                    }
+                }
+                if self.library.discord_enabled {
+                    if hit(&q, rows[1]) {
+                        setting_row(ui, rows[1], "Blank shows the song title", |ui| {
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(
+                                        &mut self.library.discord_activity_name,
+                                    )
+                                    .desired_width(240.0),
+                                )
+                                .changed()
+                            {
+                                self.save();
+                            }
+                        });
+                    }
+                    for i in 0..2 {
+                        if hit(&q, rows[2 + i]) {
+                            let mut on = self.library.discord_buttons[i];
+                            if toggle_row(ui, rows[2 + i], "", &mut on) {
+                                self.library.discord_buttons[i] = on;
+                                self.save();
+                            }
+                        }
+                    }
+                }
+                if hit(&q, rows[4]) {
+                    setting_row(
+                        ui,
+                        rows[4],
+                        "Media keys and the Windows volume flyout",
+                        |ui| {
+                            ui.label(
+                                RichText::new(if self.integrations.available() {
+                                    "Available"
+                                } else {
+                                    "Unavailable"
+                                })
+                                .color(MUTED),
+                            );
+                        },
+                    );
+                }
+            });
+        }
+
+        if !shown {
+            ui.add_space(30.0);
+            ui.label(RichText::new("No settings match your search").color(MUTED));
+        }
+    }
+    /// The seven equalizer bands as a graphic equalizer: vertical sliders side by side.
+    fn equalizer_bands(&mut self, ui: &mut egui::Ui) {
+        const BANDS: [&str; 7] = ["60", "150", "400", "1k", "2.5k", "6k", "14k"];
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = 120.0;
+            let column = ((ui.available_width() - 20.0) / 7.0).clamp(48.0, 96.0);
+            for (index, label) in BANDS.iter().enumerate() {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(column, 170.0),
+                    egui::Layout::top_down(Align::Center),
+                    |ui| {
+                        let mut gain = self.library.audio.equalizer_bands[index];
+                        ui.label(RichText::new(format!("{gain:+.0}")).size(12.0).color(MUTED));
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut gain, -12.0..=12.0)
+                                    .vertical()
+                                    .show_value(false),
+                            )
+                            .on_hover_text(format!("{label} Hz · {gain:+.1} dB"))
+                            .changed()
+                        {
+                            self.library.audio.equalizer_bands[index] = gain;
+                            self.library.audio.equalizer_enabled = true;
+                            self.save();
+                            self.apply_audio_settings();
+                        }
+                        ui.label(RichText::new(*label).size(12.0).color(MUTED));
+                    },
+                );
+            }
+        });
+        ui.add_space(6.0);
+    }
+    fn lyrics_provider_list(&mut self, ui: &mut egui::Ui) {
+        let ordered = services::lyrics::ordered(&self.library.lyrics_order);
+        let mut moved = None;
+        egui::Frame::new()
+            .fill(Color32::from_black_alpha(40))
+            .corner_radius(8.0)
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                for (index, provider) in ordered.iter().enumerate() {
+                    let mut enabled = self
+                        .library
+                        .lyrics_sources
+                        .iter()
+                        .any(|id| id == provider.id);
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(30.0);
+                        ui.label(
+                            RichText::new(format!("{}", index + 1))
+                                .size(12.0)
+                                .color(MUTED),
+                        );
+                        if ui.checkbox(&mut enabled, provider.label).changed() {
+                            if enabled {
+                                self.library.lyrics_sources.push(provider.id.into());
+                            } else {
+                                self.library.lyrics_sources.retain(|id| id != provider.id);
+                            }
+                            self.save();
+                            self.lyrics_settings_changed(true);
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(provider.detail).size(12.5).color(MUTED),
+                            )
+                            .truncate(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                            let down = index + 1 < ordered.len();
+                            if ui
+                                .add_enabled_ui(down, |u| {
+                                    widgets::button(u, Icon::Collapse, 26.0, false, "Move down")
+                                })
+                                .inner
+                                .clicked()
+                            {
+                                moved = Some((index, index + 1));
+                            }
+                            if ui
+                                .add_enabled_ui(index > 0, |u| {
+                                    widgets::button(u, Icon::Raise, 26.0, false, "Move up")
+                                })
+                                .inner
+                                .clicked()
+                            {
+                                moved = Some((index, index - 1));
+                            }
+                        });
+                    });
+                }
+            });
+        if let Some((a, b)) = moved {
+            let mut ids: Vec<_> = ordered.iter().map(|p| p.id.to_owned()).collect();
+            ids.swap(a, b);
+            self.library.lyrics_order = ids;
+            self.save();
+            self.lyrics_settings_changed(true);
+        }
+        ui.add_space(6.0);
+    }
+    fn lyrics_key_rows(&mut self, ui: &mut egui::Ui) {
+        let key_ids: std::collections::BTreeSet<&str> = services::lyrics::PROVIDERS
+            .iter()
+            .filter_map(|provider| provider.key_id)
+            .collect();
+        for key in key_ids {
+            let configured = self.lyric_keys.get(key).copied().unwrap_or(false);
+            setting_row(
+                ui,
+                &format!("{key} API key"),
+                if configured {
+                    "Saved, protected by Windows"
+                } else {
+                    "Not set; providers that need it are skipped"
+                },
+                |ui| {
+                    let input = self.lyric_key_inputs.entry(key.to_owned()).or_default();
+                    let label = if input.trim().is_empty() && configured {
+                        "Remove"
+                    } else {
+                        "Save"
+                    };
+                    let ready = !self.lyric_keys_busy && (configured || !input.trim().is_empty());
+                    if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
+                        self.save_lyrics_key(key.to_owned());
+                    }
+                    let input = self.lyric_key_inputs.entry(key.to_owned()).or_default();
+                    ui.add(
+                        egui::TextEdit::singleline(input)
+                            .password(true)
+                            .hint_text(if configured {
+                                "Paste to replace"
+                            } else {
+                                "Paste key"
+                            })
+                            .desired_width(220.0),
+                    );
+                },
+            );
+        }
+    }
     fn cancel_download(&mut self, key: &str) {
         if let Some(i) = self.downloads.iter().position(|d| d.track.key() == key) {
             // A running worker sees the flag, kills yt-dlp and reports back; either way the row
@@ -2027,37 +2668,20 @@ impl YTDugem {
             [rect.right_top(), rect.right_bottom()],
             Stroke::new(1.0_f32, Color32::from_gray(43)),
         );
-        for (i, color) in [
-            Color32::from_rgb(255, 91, 84),
-            Color32::from_rgb(255, 190, 51),
-            Color32::from_rgb(40, 201, 65),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let r = Rect::from_center_size(
-                Pos2::new(rect.left() + 25.0 + i as f32 * 24.0, rect.top() + 20.0),
-                Vec2::splat(16.0),
-            );
-            let resp = ui.interact(
-                r,
-                ui.make_persistent_id(("window-dot", i)),
-                egui::Sense::click(),
-            );
-            ui.painter().circle_filled(r.center(), 6.5, color);
-            if resp.clicked() {
-                match i {
-                    0 => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
-                    1 => ui
-                        .ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
-                    _ => {
-                        let max = ui.ctx().input(|s| s.viewport().maximized.unwrap_or(false));
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
-                    }
-                }
-            }
+        // The strip above the search box moves the window, like the top bar (the macOS-style
+        // traffic lights that used to sit here duplicated the real window controls).
+        let drag = ui.interact(
+            Rect::from_min_size(rect.min, Vec2::new(rect.width(), 40.0)),
+            ui.make_persistent_id("sidebar-drag"),
+            egui::Sense::click_and_drag(),
+        );
+        if drag.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if drag.double_clicked() {
+            let max = ui.ctx().input(|s| s.viewport().maximized.unwrap_or(false));
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
         }
         region(
             ui,
@@ -2198,7 +2822,10 @@ impl YTDugem {
             Stroke::new(1.0_f32, Color32::from_gray(42)),
         );
         let drag = ui.interact(
-            Rect::from_min_max(rect.min, Pos2::new(rect.right() - 106.0, rect.top() + 20.0)),
+            Rect::from_min_max(
+                rect.min,
+                Pos2::new(rect.right() - 3.0 * CAPTION.x, rect.top() + 20.0),
+            ),
             ui.make_persistent_id("window-drag"),
             egui::Sense::click_and_drag(),
         );
@@ -2407,36 +3034,7 @@ impl YTDugem {
                 });
             },
         );
-        region(
-            ui,
-            Rect::from_min_size(
-                Pos2::new(rect.right() - 103.0, rect.top()),
-                Vec2::new(101.0, 23.0),
-            ),
-            |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    for icon in [Icon::Minimize, Icon::Maximize, Icon::Close] {
-                        if widgets::button(ui, icon, 25.0, false, "Window control").clicked() {
-                            match icon {
-                                Icon::Close => {
-                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close)
-                                }
-                                Icon::Minimize => ui
-                                    .ctx()
-                                    .send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
-                                _ => {
-                                    let m =
-                                        ui.ctx().input(|s| s.viewport().maximized.unwrap_or(false));
-                                    ui.ctx()
-                                        .send_viewport_cmd(egui::ViewportCommand::Maximized(!m));
-                                }
-                            }
-                        }
-                    }
-                });
-            },
-        );
+        window_controls(ui, rect);
     }
     /// Over the artwork of the current track: a spinner while its stream opens, then a small
     /// equalizer that moves while it plays.
@@ -2899,395 +3497,7 @@ impl YTDugem {
                     self.track_list(ui, p.tracks, "Playlist");
                 }
             }
-            Page::Settings => {
-                self.load_lyrics_keys();
-                self.load_audio_devices();
-                ui.label(heading("Settings", 26.0));
-                ui.add_space(16.0);
-                if ui
-                    .checkbox(&mut self.library.autoplay, "Autoplay similar music")
-                    .changed()
-                {
-                    self.save();
-                }
-                if ui
-                    .checkbox(
-                        &mut self.library.discord_enabled,
-                        "Enable Discord Rich Presence",
-                    )
-                    .changed()
-                {
-                    self.save();
-                    if !self.library.discord_enabled {
-                        self.discord.clear();
-                    }
-                }
-                if self.library.discord_enabled {
-                    ui.label(match self.discord.status() {
-                        crate::discord::Status::Idle => {
-                            "Discord: no active playback (Windows desktop only)".to_owned()
-                        }
-                        crate::discord::Status::Waiting => {
-                            "Discord: waiting for acknowledgement".to_owned()
-                        }
-                        crate::discord::Status::Connected => "Discord: connected".to_owned(),
-                        crate::discord::Status::Error(ref e) => format!("Discord: {e}"),
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Activity name");
-                        if ui
-                            .text_edit_singleline(&mut self.library.discord_activity_name)
-                            .changed()
-                        {
-                            self.save();
-                        }
-                    });
-                    for i in 0..2 {
-                        if ui
-                            .checkbox(
-                                &mut self.library.discord_buttons[i],
-                                if i == 0 {
-                                    "Show YouTube Music button"
-                                } else {
-                                    "Show BitChord button"
-                                },
-                            )
-                            .changed()
-                        {
-                            self.save();
-                        }
-                    }
-                }
-                if ui
-                    .checkbox(&mut self.library.lyrics_enabled, "Enable lyrics lookup")
-                    .changed()
-                {
-                    self.save();
-                    self.lyrics_settings_changed(true);
-                }
-                ui.label(heading("Lyrics providers", 18.0));
-                let ordered = services::lyrics::ordered(&self.library.lyrics_order);
-                for (index, provider) in ordered.iter().enumerate() {
-                    let mut enabled = self
-                        .library
-                        .lyrics_sources
-                        .iter()
-                        .any(|id| id == provider.id);
-                    ui.horizontal(|ui| {
-                        if ui.checkbox(&mut enabled, provider.label).changed() {
-                            if enabled
-                                && !self
-                                    .library
-                                    .lyrics_sources
-                                    .iter()
-                                    .any(|id| id == provider.id)
-                            {
-                                self.library.lyrics_sources.push(provider.id.into());
-                            } else {
-                                self.library.lyrics_sources.retain(|id| id != provider.id);
-                            }
-                            self.save();
-                            self.lyrics_settings_changed(true);
-                        }
-                        ui.label(RichText::new(provider.detail).color(MUTED));
-                        if ui.small_button("↑").clicked() && index > 0 {
-                            let mut ids: Vec<_> = ordered.iter().map(|p| p.id.to_owned()).collect();
-                            ids.swap(index, index - 1);
-                            self.library.lyrics_order = ids;
-                            self.save();
-                            self.lyrics_settings_changed(true);
-                        }
-                        if ui.small_button("↓").clicked() && index + 1 < ordered.len() {
-                            let mut ids: Vec<_> = ordered.iter().map(|p| p.id.to_owned()).collect();
-                            ids.swap(index, index + 1);
-                            self.library.lyrics_order = ids;
-                            self.save();
-                            self.lyrics_settings_changed(true);
-                        }
-                    });
-                }
-                let key_ids: Vec<String> = services::lyrics::PROVIDERS
-                    .iter()
-                    .filter_map(|provider| provider.key_id)
-                    .map(str::to_owned)
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                for key in key_ids {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{key} API key"));
-                        let input = self.lyric_key_inputs.entry(key.clone()).or_default();
-                        ui.add(
-                            egui::TextEdit::singleline(input)
-                                .password(true)
-                                .hint_text("Paste key to replace"),
-                        );
-                        let configured = self.lyric_keys.get(&key).copied().unwrap_or(false);
-                        ui.label(
-                            RichText::new(if configured { "Configured" } else { "Not set" })
-                                .color(MUTED),
-                        );
-                        let label = if input.trim().is_empty() && configured {
-                            "Remove"
-                        } else {
-                            "Save"
-                        };
-                        if ui
-                            .add_enabled(!self.lyric_keys_busy, egui::Button::new(label))
-                            .clicked()
-                        {
-                            self.save_lyrics_key(key.clone());
-                        }
-                    });
-                }
-                if ui.button("Reset lyric providers").clicked() {
-                    self.library.lyrics_order = store::lyrics_order_default();
-                    self.library.lyrics_sources = store::lyrics_order_default();
-                    self.library.lyrics_enabled = true;
-                    self.save();
-                    self.lyrics_settings_changed(true);
-                }
-                ui.separator();
-                ui.label(heading("Audio output", 18.0));
-                let selected = self.library.audio.output_device.clone();
-                egui::ComboBox::from_id_salt("audio-output-device")
-                    .selected_text(if selected.is_empty() {
-                        "System default"
-                    } else {
-                        self.audio_devices
-                            .iter()
-                            .find(|(id, _)| id == &selected)
-                            .map_or("Unavailable device", |(_, name)| name.as_str())
-                    })
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(selected.is_empty(), "System default")
-                            .clicked()
-                        {
-                            self.library.audio.output_device.clear();
-                            self.save();
-                        }
-                        for (id, name) in self.audio_devices.clone() {
-                            if ui.selectable_label(selected == id, name.clone()).clicked() {
-                                self.library.audio.output_device = id;
-                                self.save();
-                            }
-                        }
-                    });
-                if self.audio_devices_loading {
-                    ui.spinner();
-                    ui.label(RichText::new("Reading devices from mpv…").color(MUTED));
-                } else if ui.button("Refresh audio devices").clicked() {
-                    self.audio_devices_loaded = false;
-                    self.load_audio_devices();
-                }
-                ui.label(
-                    RichText::new("Output changes apply when the next track starts.").color(MUTED),
-                );
-                #[cfg(windows)]
-                if ui
-                    .checkbox(
-                        &mut self.library.audio.wasapi_exclusive,
-                        "Prefer WASAPI exclusive output",
-                    )
-                    .changed()
-                {
-                    self.save();
-                    self.message =
-                        "WASAPI exclusive preference applies when the next track starts.".into();
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui
-                        .checkbox(
-                            &mut self.library.audio.equalizer_enabled,
-                            "Enable equalizer",
-                        )
-                        .changed()
-                    {
-                        self.library.audio.sanitize();
-                        self.save();
-                        self.apply_audio_settings();
-                    }
-                    if ui.button("Reset EQ").clicked() {
-                        self.library.audio.equalizer_enabled = false;
-                        self.library.audio.equalizer_bands = vec![0.0; 7];
-                        self.library.audio.stereo_balance = 0.0;
-                        self.save();
-                        self.apply_audio_settings();
-                    }
-                });
-                let current_preset = store::audio_presets()
-                    .iter()
-                    .find(|(_, bands)| self.library.audio.equalizer_bands.as_slice() == bands)
-                    .map_or("Custom", |(name, _)| *name);
-                egui::ComboBox::from_id_salt("equalizer-preset")
-                    .selected_text(current_preset)
-                    .show_ui(ui, |ui| {
-                        for (name, bands) in store::audio_presets() {
-                            if ui
-                                .selectable_label(current_preset == *name, *name)
-                                .clicked()
-                            {
-                                self.library.audio.equalizer_bands = bands.to_vec();
-                                self.library.audio.equalizer_enabled = true;
-                                self.save();
-                                self.apply_audio_settings();
-                            }
-                        }
-                    });
-                for (index, frequency) in [
-                    "60 Hz", "150 Hz", "400 Hz", "1 kHz", "2.5 kHz", "6 kHz", "14 kHz",
-                ]
-                .iter()
-                .enumerate()
-                {
-                    let mut gain = self.library.audio.equalizer_bands[index];
-                    ui.horizontal(|ui| {
-                        ui.label(*frequency);
-                        if ui
-                            .add(egui::Slider::new(&mut gain, -12.0..=12.0).suffix(" dB"))
-                            .changed()
-                        {
-                            self.library.audio.equalizer_bands[index] = gain;
-                            self.library.audio.equalizer_enabled = true;
-                            self.save();
-                            self.apply_audio_settings();
-                        }
-                    });
-                }
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.library.audio.stereo_balance, -1.0..=1.0)
-                            .text("Stereo balance"),
-                    )
-                    .changed()
-                {
-                    self.library.audio.sanitize();
-                    self.save();
-                    self.apply_audio_settings();
-                }
-                ui.label(RichText::new("Bands and balance update the active mpv filter chain. Output device and WASAPI mode apply to the next track.").color(MUTED));
-                ui.label(
-                    RichText::new(format!(
-                        "System media controls: {}",
-                        if self.integrations.available() {
-                            "available"
-                        } else {
-                            "unavailable"
-                        }
-                    ))
-                    .color(MUTED),
-                );
-                ui.horizontal(|ui| {
-                    ui.label("Playback speed");
-                    if ui
-                        .add(egui::Slider::new(&mut self.library.speed, 0.5..=2.0).step_by(0.05))
-                        .changed()
-                    {
-                        let _ = self.player.speed(self.library.speed);
-                        self.save();
-                    }
-                });
-                #[cfg(windows)]
-                if self.tray.is_some()
-                    && ui
-                        .checkbox(
-                            &mut self.library.close_to_tray,
-                            "Keep playing in the tray when the window is closed",
-                        )
-                        .changed()
-                {
-                    self.save();
-                }
-                ui.horizontal(|ui| {
-                    ui.label("Crossfade");
-                    let seconds = &mut self.library.crossfade_seconds;
-                    let off = *seconds == 0;
-                    let slider = egui::Slider::new(seconds, 0..=12)
-                        .show_value(false)
-                        .step_by(1.0);
-                    if ui.add(slider).changed() {
-                        self.save();
-                    }
-                    ui.label(if off {
-                        "Off".to_owned()
-                    } else {
-                        format!("{}s", self.library.crossfade_seconds)
-                    });
-                });
-                ui.label(
-                    RichText::new(
-                        "Blends the end of a song into the next one. The next song is prepared in the background while this one plays.",
-                    )
-                    .color(MUTED),
-                );
-                ui.horizontal(|ui| {
-                    ui.label("Lyrics translation");
-                    let system = translate::system_language();
-                    let name = |tag: &str| {
-                        translate::LANGUAGES
-                            .iter()
-                            .find(|(t, _)| *t == tag)
-                            .map_or(tag.to_owned(), |(_, n)| (*n).to_owned())
-                    };
-                    let current = &self.library.translation_language;
-                    let mut chosen = current.clone();
-                    egui::ComboBox::from_id_salt("translation-language")
-                        .selected_text(if current.is_empty() {
-                            format!("{} · follows Windows", name(&system))
-                        } else {
-                            name(current)
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut chosen,
-                                String::new(),
-                                format!("{} · follows Windows", name(&system)),
-                            );
-                            for (tag, label) in translate::LANGUAGES {
-                                ui.selectable_value(&mut chosen, tag.to_owned(), label);
-                            }
-                        });
-                    if chosen != self.library.translation_language {
-                        self.library.translation_language = chosen;
-                        self.save();
-                        if self.show_translation {
-                            self.request_translation();
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Download format");
-                    let current = services::DOWNLOAD_FORMATS
-                        .iter()
-                        .find(|(id, _)| *id == self.library.download_format)
-                        .unwrap_or(&services::DOWNLOAD_FORMATS[0]);
-                    let mut chosen = current.0.to_owned();
-                    egui::ComboBox::from_id_salt("download-format")
-                        .selected_text(current.1)
-                        .show_ui(ui, |ui| {
-                            for (id, label) in services::DOWNLOAD_FORMATS {
-                                ui.selectable_value(&mut chosen, id.to_owned(), label);
-                            }
-                        });
-                    if chosen != self.library.download_format {
-                        self.library.download_format = chosen;
-                        self.save();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Download folder");
-                    ui.text_edit_singleline(&mut self.download_path);
-                    if ui.button("Save").clicked() {
-                        self.library.download_dir = PathBuf::from(&self.download_path);
-                        self.save();
-                    }
-                });
-                if !self.message.is_empty() {
-                    ui.label(RichText::new(&self.message).color(MUTED));
-                }
-            }
+            Page::Settings => self.settings_view(ui),
         }
     }
     fn account_dialog(&mut self, ctx: &egui::Context) {
@@ -4407,12 +4617,16 @@ impl eframe::App for YTDugem {
                         .inner_margin(egui::Margin::same(28)),
                 )
                 .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        if !self.message.is_empty() {
-                            ui.label(RichText::new(&self.message).color(MUTED));
-                        }
-                        self.content(ui);
-                    });
+                    // One scroll position per page: opening Settings from a scrolled Home page
+                    // used to land halfway down it.
+                    egui::ScrollArea::vertical()
+                        .id_salt(("page", self.page.clone()))
+                        .show(ui, |ui| {
+                            if !self.message.is_empty() {
+                                ui.label(RichText::new(&self.message).color(MUTED));
+                            }
+                            self.content(ui);
+                        });
                 });
         }
         if shown > 0.0 {
@@ -4426,6 +4640,140 @@ impl eframe::App for YTDugem {
 }
 
 /// Translucent pill buttons and combo boxes for controls drawn over the player's artwork backdrop.
+/// The query a group's rows are filtered by, or `None` to hide the group. A group whose own
+/// name matches shows whole (upstream `SettingsGroup`).
+fn group_query(query: &str, group: &str, rows: &[&str]) -> Option<String> {
+    if query.is_empty() || group.to_lowercase().contains(query) {
+        Some(String::new())
+    } else if rows.iter().any(|r| hit(query, r)) {
+        Some(query.to_owned())
+    } else {
+        None
+    }
+}
+
+fn hit(query: &str, title: &str) -> bool {
+    query.is_empty() || title.to_lowercase().contains(query)
+}
+
+fn settings_group(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.label(
+        RichText::new(title.to_uppercase())
+            .size(11.5)
+            .color(MUTED)
+            .strong(),
+    );
+    ui.add_space(4.0);
+    egui::Frame::new()
+        .fill(Color32::from_rgb(35, 37, 33))
+        // Clear of the page scrollbar, which sits on the content's right edge.
+        .outer_margin(egui::Margin {
+            right: 14,
+            ..Default::default()
+        })
+        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 47, 43)))
+        .corner_radius(12.0)
+        .inner_margin(egui::Margin::symmetric(18, 4))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add(ui);
+        });
+    ui.add_space(22.0);
+}
+
+/// Title and explanation on the left, `control` right-aligned (added right to left).
+fn setting_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    subtitle: &str,
+    control: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+    // Rows after the first are divided by a hairline, as in upstream's settings list.
+    let first = ui.min_rect().height() < 1.0;
+    if !first {
+        let x = ui.max_rect().x_range();
+        let y = ui.cursor().top();
+        ui.painter()
+            .hline(x, y, Stroke::new(1.0_f32, Color32::from_rgb(46, 48, 44)));
+    }
+    ui.horizontal(|ui| {
+        ui.set_min_height(62.0);
+        let text = (ui.available_width() * 0.5).max(220.0);
+        let label = ui
+            .allocate_ui_with_layout(
+                Vec2::new(text, 62.0),
+                egui::Layout::top_down(Align::Min),
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    // Centred by hand against the 62 px row; a wrapped subtitle grows the row.
+                    ui.add_space(if subtitle.is_empty() { 21.0 } else { 12.0 });
+                    let r = ui.add(
+                        egui::Label::new(RichText::new(title).size(15.0).color(WHITE))
+                            .sense(egui::Sense::click()),
+                    );
+                    if !subtitle.is_empty() {
+                        ui.add(
+                            egui::Label::new(RichText::new(subtitle).size(12.5).color(MUTED))
+                                .wrap(),
+                        );
+                    }
+                    r
+                },
+            )
+            .inner;
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), control);
+        label
+    })
+    .inner
+}
+
+/// A row with a switch; clicking the title toggles it too. Returns whether it changed.
+fn toggle_row(ui: &mut egui::Ui, title: &str, subtitle: &str, on: &mut bool) -> bool {
+    let mut changed = false;
+    let label = setting_row(ui, title, subtitle, |ui| {
+        changed |= toggle_switch(ui, on).clicked();
+    });
+    if label.clicked() {
+        *on = !*on;
+        changed = true;
+    }
+    if label.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    changed
+}
+
+fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let (rect, mut response) = ui.allocate_exact_size(Vec2::new(40.0, 22.0), egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *on, ""));
+    let t = ui.ctx().animate_bool(response.id, *on);
+    let track = if *on {
+        Color32::from_gray(236)
+    } else {
+        Color32::from_white_alpha(if response.hovered() { 60 } else { 40 })
+    };
+    ui.painter().rect_filled(rect, 11.0, track);
+    let knob = egui::pos2(
+        egui::lerp((rect.left() + 11.0)..=(rect.right() - 11.0), t),
+        rect.center().y,
+    );
+    ui.painter().circle_filled(
+        knob,
+        8.0,
+        if *on {
+            Color32::from_rgb(20, 21, 19)
+        } else {
+            Color32::from_gray(200)
+        },
+    );
+    response
+}
+
 /// Label for a soft toggle: dark on the light "on" pill, light otherwise.
 fn toggle_text(text: &str, on: bool) -> RichText {
     RichText::new(text).color(if on {
@@ -4434,6 +4782,91 @@ fn toggle_text(text: &str, on: bool) -> RichText {
         WHITE
     })
 }
+/// Size of one caption button.
+const CAPTION: Vec2 = Vec2::new(44.0, 26.0);
+
+/// Windows-style caption buttons at the top-right: flat, a light wash on hover and red behind
+/// Close, 1 px glyphs, and the restore glyph while maximized.
+fn window_controls(ui: &mut egui::Ui, bar: Rect) {
+    let maximized = ui.ctx().input(|s| s.viewport().maximized.unwrap_or(false));
+    let labels = [
+        "Minimize",
+        if maximized {
+            "Restore down"
+        } else {
+            "Maximize"
+        },
+        "Close",
+    ];
+    for (i, label) in labels.into_iter().enumerate() {
+        let r = Rect::from_min_size(
+            Pos2::new(bar.right() - CAPTION.x * (3 - i) as f32, bar.top()),
+            CAPTION,
+        );
+        let response = ui.interact(
+            r,
+            ui.make_persistent_id(("caption", i)),
+            egui::Sense::click(),
+        );
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        let close = i == 2;
+        let pressed = response.is_pointer_button_down_on();
+        if response.hovered() {
+            let fill = match (close, pressed) {
+                (true, false) => Color32::from_rgb(196, 43, 28),
+                (true, true) => Color32::from_rgb(160, 32, 22),
+                (false, false) => Color32::from_white_alpha(20),
+                (false, true) => Color32::from_white_alpha(32),
+            };
+            ui.painter().rect_filled(r, 0.0, fill);
+        }
+        let color = if response.hovered() {
+            Color32::WHITE
+        } else {
+            Color32::from_gray(200)
+        };
+        let stroke = Stroke::new(1.0_f32, color);
+        let c = r.center();
+        let s = 5.0;
+        let p = ui.painter();
+        match i {
+            0 => {
+                p.hline((c.x - s)..=(c.x + s), c.y, stroke);
+            }
+            1 if maximized => {
+                let front = Rect::from_center_size(c + Vec2::new(-1.0, 1.0), Vec2::splat(8.0));
+                p.rect_stroke(front, 1.0, stroke, egui::StrokeKind::Middle);
+                // The back window shows only above and to the right of the front one.
+                let (t, rgt) = (front.top() - 2.0, front.right() + 2.0);
+                p.line_segment(
+                    [Pos2::new(front.left() + 2.0, t), Pos2::new(rgt, t)],
+                    stroke,
+                );
+                p.line_segment(
+                    [Pos2::new(rgt, t), Pos2::new(rgt, front.bottom() - 2.0)],
+                    stroke,
+                );
+            }
+            1 => {
+                let square = Rect::from_center_size(c, Vec2::splat(2.0 * s));
+                p.rect_stroke(square, 1.0, stroke, egui::StrokeKind::Middle);
+            }
+            _ => {
+                p.line_segment([c - Vec2::splat(s), c + Vec2::splat(s)], stroke);
+                p.line_segment([c + Vec2::new(s, -s), c + Vec2::new(-s, s)], stroke);
+            }
+        }
+        if response.clicked() {
+            let ctx = ui.ctx();
+            match i {
+                0 => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
+                1 => ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized)),
+                _ => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            }
+        }
+    }
+}
+
 fn soft_controls(ui: &mut egui::Ui) {
     let w = &mut ui.visuals_mut().widgets;
     for (state, alpha) in [

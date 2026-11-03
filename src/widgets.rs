@@ -26,8 +26,6 @@ pub enum Icon {
     Collapse,
     Raise,
     Close,
-    Minimize,
-    Maximize,
 }
 
 pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, selected: bool, label: &str) -> Response {
@@ -36,9 +34,10 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, selected: bool, label: &
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
     });
     if response.hovered() || selected {
-        ui.painter().rect_filled(
-            rect.shrink(1.0),
-            size * 0.5,
+        // A true circle: `rect_filled` with a corner radius above half the side drew stray arcs.
+        ui.painter().circle_filled(
+            rect.center(),
+            size * 0.5 - 1.0,
             Color32::from_white_alpha(if selected { 32 } else { 16 }),
         );
     }
@@ -271,12 +270,6 @@ pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
             line((0.2, 0.2), (0.8, 0.8));
             line((0.8, 0.2), (0.2, 0.8));
         }
-        Icon::Minimize => line((0.18, 0.5), (0.82, 0.5)),
-        Icon::Maximize => path(
-            &[(0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8)],
-            true,
-            false,
-        ),
         Icon::Repeat => {
             path(
                 &[(0.15, 0.55), (0.15, 0.22), (0.82, 0.22), (0.68, 0.08)],
