@@ -1813,7 +1813,11 @@ impl YTDugem {
                     self.cover = Some(ctx.load_texture(
                         format!("cover:{key}"),
                         cover,
-                        egui::TextureOptions::LINEAR,
+                        // Mipmapped: the same 1200 px cover is also drawn at 52 px in the top bar.
+                        egui::TextureOptions {
+                            mipmap_mode: Some(egui::TextureFilter::Linear),
+                            ..egui::TextureOptions::LINEAR
+                        },
                     ));
                     self.backdrop = Some(ctx.load_texture(
                         format!("back:{key}"),
@@ -4723,16 +4727,51 @@ fn merge_shelves(existing: &mut Vec<HomeShelf>, incoming: Vec<HomeShelf>) {
     }
 }
 
+/// Where to fetch the player's artwork, best first. Library and search thumbnails are usually
+/// 60–120 px (`=w120-h120`), which went blurry stretched over the Now Playing artwork, so the
+/// image hosts are asked for a large copy; the stored URL stays as the fallback.
+fn artwork_candidates(url: &str) -> Vec<String> {
+    let mut out = vec![];
+    let video = url
+        .strip_prefix("https://i.ytimg.com/vi/")
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(id, _)| id);
+    if let Some(id) = video {
+        out.push(format!("https://i.ytimg.com/vi/{id}/maxresdefault.jpg"));
+    } else {
+        out.push(artwork_at(url, 1200));
+    }
+    if !out.iter().any(|u| u == url) {
+        out.push(url.to_owned());
+    }
+    out
+}
+
 fn load_artwork(url: &str) -> anyhow::Result<(egui::ColorImage, egui::ColorImage)> {
     use std::io::Read;
-    let response = reqwest::blocking::Client::builder()
+    let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
-        .build()?
-        .get(url)
-        .send()?
-        .error_for_status()?;
+        .build()?;
+    let mut last = None;
     let mut bytes = vec![];
-    response.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    for candidate in artwork_candidates(url) {
+        match client
+            .get(&candidate)
+            .send()
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(response) => {
+                bytes.clear();
+                response.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+                last = None;
+                break;
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    if let Some(e) = last {
+        return Err(e.into());
+    }
     anyhow::ensure!(bytes.len() <= 8 * 1024 * 1024, "Artwork is too large");
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
     let mut limits = image::Limits::default();
@@ -4742,7 +4781,7 @@ fn load_artwork(url: &str) -> anyhow::Result<(egui::ColorImage, egui::ColorImage
     reader.limits(limits);
     let im = reader.decode()?;
     let cover = im
-        .resize(1024, 1024, image::imageops::FilterType::Triangle)
+        .resize(1200, 1200, image::imageops::FilterType::Lanczos3)
         .into_rgba8();
     let blurred = image::imageops::blur(
         &im.resize_exact(96, 96, image::imageops::FilterType::Triangle)
@@ -4761,6 +4800,24 @@ fn load_artwork(url: &str) -> anyhow::Result<(egui::ColorImage, egui::ColorImage
 #[cfg(test)]
 mod artwork_tests {
     use super::artwork_at;
+
+    #[test]
+    fn player_artwork_is_fetched_large_with_the_stored_url_as_fallback() {
+        assert_eq!(
+            super::artwork_candidates("https://yt3.googleusercontent.com/abc=w120-h120-l90-rj"),
+            [
+                "https://yt3.googleusercontent.com/abc=w1200-h1200-l90-rj",
+                "https://yt3.googleusercontent.com/abc=w120-h120-l90-rj"
+            ]
+        );
+        assert_eq!(
+            super::artwork_candidates("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg?sqp=x"),
+            [
+                "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg",
+                "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg?sqp=x"
+            ]
+        );
+    }
 
     #[test]
     fn artwork_is_requested_at_the_drawn_size() {
