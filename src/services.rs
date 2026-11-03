@@ -660,6 +660,62 @@ fn parse_renderers(value: &Value, tracks: &mut Vec<Track>) {
     }
 }
 
+/// Typed-query suggestions for the search palette (upstream `searchSuggestions`). Deliberately
+/// unauthenticated, so each debounced keystroke stays out of the account's search history.
+pub fn search_suggestions(input: &str) -> Result<Vec<String>> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(vec![]);
+    }
+    if input.len() > 500 {
+        bail!("Search text is too long");
+    }
+    let (status, response) = send_innertube(
+        "music/get_search_suggestions",
+        &json!({"input": input}),
+        None,
+    )?;
+    if !status.is_success() {
+        bail!("Suggestions unavailable ({status})");
+    }
+    Ok(parse_suggestions(&response))
+}
+
+/// The query strings of `searchSuggestionRenderer` rows, in order, without repeats. Entity rows
+/// (songs, artists) are ignored: the palette fills the search with a query, as upstream does.
+fn parse_suggestions(response: &Value) -> Vec<String> {
+    fn walk(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::Object(map) => {
+                if let Some(row) = map.get("searchSuggestionRenderer") {
+                    let query = row["navigationEndpoint"]["searchEndpoint"]["query"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            row["suggestion"]["runs"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|r| r["text"].as_str())
+                                .collect()
+                        });
+                    let query = query.trim().to_owned();
+                    if !query.is_empty() && !out.contains(&query) {
+                        out.push(query);
+                    }
+                }
+                map.values().for_each(|x| walk(x, out));
+            }
+            Value::Array(items) => items.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = vec![];
+    walk(response, &mut out);
+    out.truncate(8);
+    out
+}
+
 pub fn search(query: &str) -> Result<Vec<Track>> {
     let query = query.trim();
     if query.is_empty() || query.len() > 500 {
@@ -1121,6 +1177,27 @@ mod tests {
         assert!(edit_status(&json!({"status":"STATUS_SUCCEEDED"})).is_ok());
         assert!(edit_status(&json!({})).is_ok());
         assert!(edit_status(&json!({"status":"STATUS_FAILED"})).is_err());
+    }
+
+    #[test]
+    fn parses_typeahead_queries_and_skips_entity_rows() {
+        let response = json!({
+            "contents": [{"searchSuggestionsSectionRenderer": {"contents": [
+                {"searchSuggestionRenderer": {
+                    "navigationEndpoint": {"searchEndpoint": {"query": "aku milikmu"}},
+                    "suggestion": {"runs": [{"text": "aku mili"}, {"text": "kmu"}]}}},
+                {"searchSuggestionRenderer": {
+                    "suggestion": {"runs": [{"text": "aku milikmu dewa 19"}]}}},
+                {"searchSuggestionRenderer": {
+                    "navigationEndpoint": {"searchEndpoint": {"query": "aku milikmu"}}}},
+                {"musicResponsiveListItemRenderer": {"title": "Song"}}
+            ]}}]
+        });
+        assert_eq!(
+            parse_suggestions(&response),
+            ["aku milikmu", "aku milikmu dewa 19"]
+        );
+        assert!(parse_suggestions(&json!({})).is_empty());
     }
 
     #[test]

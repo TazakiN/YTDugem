@@ -52,6 +52,7 @@ enum Event {
     Playing(u64, Track, Result<Player, String>),
     Prepared(String, Option<Stream>),
     AccountPlaylists(u64, Result<Vec<ShelfItem>, String>),
+    Suggestions(u64, String, Result<Vec<String>, String>),
     Translated(u64, Result<Translation, String>),
     PlaylistEdited(Result<PlaylistEdit, String>),
     Results(u64, Result<Vec<Track>, String>),
@@ -146,6 +147,19 @@ pub struct YTDugem {
     now_origin: String,
     radio_pending: bool,
     discord: Presence,
+    /// The left sidebar (navigation); toggled from the top bar.
+    sidebar_open: bool,
+    palette_open: bool,
+    palette_query: String,
+    palette_suggestions: Vec<String>,
+    palette_selected: Option<usize>,
+    palette_focus: bool,
+    /// When the query last changed; suggestions wait for a short pause after typing.
+    palette_edited: Option<Instant>,
+    /// The query the last suggestion request was sent for.
+    palette_asked: String,
+    palette_request: u64,
+    palette_loading: bool,
     #[cfg(windows)]
     tray: Option<crate::tray::Tray>,
     #[cfg(windows)]
@@ -341,6 +355,16 @@ impl YTDugem {
             now_origin: "Home".into(),
             radio_pending: false,
             discord: Presence::new(),
+            sidebar_open: true,
+            palette_open: false,
+            palette_query: String::new(),
+            palette_suggestions: vec![],
+            palette_selected: None,
+            palette_focus: false,
+            palette_edited: None,
+            palette_asked: String::new(),
+            palette_request: 0,
+            palette_loading: false,
             #[cfg(windows)]
             tray: crate::tray::Tray::new(&cc.egui_ctx),
             #[cfg(windows)]
@@ -2252,6 +2276,179 @@ impl YTDugem {
             );
         }
     }
+    /// Ctrl+K: open the search palette, or close it if it is already open.
+    fn toggle_palette(&mut self) {
+        if self.palette_open {
+            self.palette_open = false;
+            return;
+        }
+        self.palette_open = true;
+        self.palette_focus = true;
+        self.palette_query.clear();
+        self.palette_suggestions.clear();
+        self.palette_selected = None;
+        self.palette_edited = None;
+        self.palette_asked.clear();
+        self.palette_loading = false;
+        // Anything still in flight for an earlier query is now stale.
+        self.palette_request += 1;
+    }
+    /// Search for `text` from the palette, as if typed into the search box.
+    fn palette_submit(&mut self, text: String) {
+        let text = text.trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        self.palette_open = false;
+        self.query = text;
+        self.search();
+    }
+    /// Suggestions follow typing after a short pause, so a fast typist sends one request per
+    /// pause rather than one per letter.
+    fn palette_debounce(&mut self, ctx: &egui::Context) {
+        const PAUSE: Duration = Duration::from_millis(250);
+        let Some(edited) = self.palette_edited else {
+            return;
+        };
+        let waited = edited.elapsed();
+        if waited < PAUSE {
+            ctx.request_repaint_after(PAUSE - waited);
+            return;
+        }
+        self.palette_edited = None;
+        let query = self.palette_query.trim().to_owned();
+        if query == self.palette_asked {
+            return;
+        }
+        self.palette_asked = query.clone();
+        self.palette_request += 1;
+        if query.is_empty() {
+            self.palette_suggestions.clear();
+            self.palette_loading = false;
+            return;
+        }
+        self.palette_loading = true;
+        let (id, tx) = (self.palette_request, self.tx.clone());
+        std::thread::spawn(move || {
+            let result = services::search_suggestions(&query).map_err(err);
+            let _ = tx.send(Event::Suggestions(id, query, result));
+        });
+    }
+    /// The palette itself: a centred modal holding only the search field and the suggestions
+    /// under it. Up/Down choose a suggestion, Enter searches (the chosen one, else what is typed),
+    /// and Escape or a click outside closes it.
+    fn palette(&mut self, ctx: &egui::Context) {
+        if !self.palette_open {
+            return;
+        }
+        self.palette_debounce(ctx);
+        let len = self.palette_suggestions.len();
+        let (down, up, enter) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            )
+        });
+        if down && len > 0 {
+            self.palette_selected = Some(self.palette_selected.map_or(0, |i| (i + 1).min(len - 1)));
+        }
+        if up {
+            self.palette_selected = self.palette_selected.and_then(|i| i.checked_sub(1));
+        }
+        let mut submit = None;
+        if enter {
+            submit = Some(
+                self.palette_selected
+                    .and_then(|i| self.palette_suggestions.get(i).cloned())
+                    .unwrap_or_else(|| self.palette_query.clone()),
+            );
+        }
+        let modal = egui::Modal::new(egui::Id::new("global-search"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(560.0);
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(30, 32, 28))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(58)))
+                    .corner_radius(14.0)
+                    .inner_margin(egui::Margin::symmetric(16, 14))
+                    .show(ui, |ui| {
+                        let mut picked = None;
+                        ui.horizontal(|ui| {
+                            let (r, _) =
+                                ui.allocate_exact_size(Vec2::splat(20.0), egui::Sense::hover());
+                            widgets::paint(ui.painter(), Icon::Search, r, MUTED);
+                            let field = ui.add(
+                                egui::TextEdit::singleline(&mut self.palette_query)
+                                    .id(egui::Id::new("palette-input"))
+                                    .hint_text(RichText::new("Search YouTube Music").color(MUTED))
+                                    .font(FontId::proportional(18.0))
+                                    .frame(false)
+                                    .desired_width(f32::INFINITY),
+                            );
+                            if self.palette_focus {
+                                field.request_focus();
+                                self.palette_focus = false;
+                            }
+                            if field.changed() {
+                                self.palette_edited = Some(Instant::now());
+                                self.palette_selected = None;
+                            }
+                        });
+                        ui.add_space(10.0);
+                        if self.palette_query.trim().is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "Type to search · ↑ ↓ to choose · Enter to search · Esc to close",
+                                )
+                                .color(MUTED)
+                                .size(12.0),
+                            );
+                        } else if self.palette_loading && self.palette_suggestions.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(RichText::new("Finding suggestions…").color(MUTED));
+                            });
+                        }
+                        for (i, suggestion) in self.palette_suggestions.iter().enumerate() {
+                            let (rect, response) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), 34.0),
+                                egui::Sense::click(),
+                            );
+                            let lit = self.palette_selected == Some(i) || response.hovered();
+                            if lit {
+                                ui.painter()
+                                    .rect_filled(rect, 8.0, Color32::from_white_alpha(14));
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            let icon = Rect::from_min_size(rect.min + Vec2::new(10.0, 9.0), Vec2::splat(16.0));
+                            widgets::paint(ui.painter(), Icon::Search, icon, MUTED);
+                            ui.painter().text(
+                                Pos2::new(rect.left() + 38.0, rect.center().y),
+                                egui::Align2::LEFT_CENTER,
+                                truncate(suggestion, 60),
+                                FontId::proportional(15.0),
+                                if lit { WHITE } else { Color32::from_gray(200) },
+                            );
+                            if response.clicked() {
+                                picked = Some(suggestion.clone());
+                            }
+                        }
+                        picked
+                    })
+                    .inner
+            });
+        let close = modal.should_close();
+        if submit.is_none() {
+            submit = modal.inner;
+        }
+        if let Some(text) = submit {
+            self.palette_submit(text);
+        } else if close {
+            self.palette_open = false;
+        }
+    }
     fn cancel_download(&mut self, key: &str) {
         if let Some(i) = self.downloads.iter().position(|d| d.track.key() == key) {
             // A running worker sees the flag, kills yt-dlp and reports back; either way the row
@@ -2309,6 +2506,13 @@ impl YTDugem {
                             self.account_playlists = Some(vec![]);
                             self.message = e;
                         }
+                    }
+                }
+                Event::Suggestions(id, query, r) if id == self.palette_request => {
+                    if query == self.palette_query.trim() {
+                        self.palette_loading = false;
+                        self.palette_suggestions = r.unwrap_or_default();
+                        self.palette_selected = None;
                     }
                 }
                 Event::PlaylistEdited(r) => self.playlist_edited(r),
@@ -2843,8 +3047,20 @@ impl YTDugem {
             |ui| {
                 ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if widgets::button(ui, Icon::Logo, 42.0, false, "Home").clicked() {
-                        self.navigate(Page::Home);
+                    if widgets::button(
+                        ui,
+                        Icon::Sidebar,
+                        32.0,
+                        false,
+                        if self.sidebar_open {
+                            "Hide sidebar"
+                        } else {
+                            "Show sidebar"
+                        },
+                    )
+                    .clicked()
+                    {
+                        self.sidebar_open = !self.sidebar_open;
                     }
                     if ui
                         .add_enabled_ui(!self.nav.is_empty(), |ui| {
@@ -4580,14 +4796,20 @@ impl eframe::App for YTDugem {
             self.message = "Your YouTube sign-in has expired, so public music is shown. Open your account to sign in again.".into();
         }
         let typing = ctx.wants_keyboard_input();
-        let (search, local, quit, escape) = ctx.input_mut(|i| {
+        // While the palette is open it owns Escape (its modal closes on it).
+        let palette_open = self.palette_open;
+        let (search, local, quit, escape, palette) = ctx.input_mut(|i| {
             (
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::F),
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::L),
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::Q),
-                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                !palette_open && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                i.consume_key(egui::Modifiers::CTRL, egui::Key::K),
             )
         });
+        if palette {
+            self.toggle_palette();
+        }
         if search {
             ctx.memory_mut(|m| m.request_focus(egui::Id::new("search_input")));
         }
@@ -4661,13 +4883,15 @@ impl eframe::App for YTDugem {
             egui::emath::easing::cubic_in_out,
         );
         if shown < 1.0 {
-            egui::SidePanel::left("sidebar")
-                .exact_width(258.0)
-                .resizable(false)
-                .frame(egui::Frame::new().fill(SIDE).inner_margin(0.0))
-                .show(ctx, |ui| {
-                    self.sidebar(ui, ui.max_rect());
-                });
+            if self.sidebar_open {
+                egui::SidePanel::left("sidebar")
+                    .exact_width(258.0)
+                    .resizable(false)
+                    .frame(egui::Frame::new().fill(SIDE).inner_margin(0.0))
+                    .show(ctx, |ui| {
+                        self.sidebar(ui, ui.max_rect());
+                    });
+            }
             egui::TopBottomPanel::top("topbar")
                 .exact_height(78.0)
                 .frame(egui::Frame::new().fill(SIDE).inner_margin(0.0))
@@ -4696,6 +4920,7 @@ impl eframe::App for YTDugem {
         if shown > 0.0 {
             self.expanded_view(ctx, shown);
         }
+        self.palette(ctx);
         self.account_dialog(ctx);
         self.playlist_dialog(ctx);
         ctx.request_repaint_after(Duration::from_millis(100));

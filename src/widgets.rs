@@ -25,6 +25,7 @@ pub enum Icon {
     Back,
     Collapse,
     Raise,
+    Sidebar,
     Translate,
     Refresh,
     Close,
@@ -271,6 +272,17 @@ pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
         }
         Icon::Back => path(&[(0.65, 0.13), (0.28, 0.5), (0.65, 0.87)], false, false),
         Icon::Collapse => path(&[(0.15, 0.36), (0.5, 0.68), (0.85, 0.36)], false, false),
+        Icon::Sidebar => {
+            // A panel outline with a divider: the left column is the sidebar.
+            let frame = Rect::from_min_max(point(0.08, 0.16), point(0.92, 0.84));
+            p.rect_stroke(
+                frame,
+                2.0,
+                Stroke::new(1.6_f32, color),
+                egui::StrokeKind::Middle,
+            );
+            line((0.36, 0.16), (0.36, 0.84));
+        }
         Icon::Raise => path(&[(0.15, 0.64), (0.5, 0.32), (0.85, 0.64)], false, false),
         Icon::Translate => {
             // The common "文A" translation glyph; the bundled fonts include CJK.
