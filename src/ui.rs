@@ -2942,13 +2942,27 @@ fn draw_cover(
     draw_image(ui, &t.thumbnail, r, texture.flatten());
 }
 fn draw_image(ui: &mut egui::Ui, url: &str, r: Rect, texture: Option<&egui::TextureHandle>) {
+    // Off-screen cards (long shelves, scrolled lists) would otherwise all download and decode
+    // at once; egui 0.31 decodes on the GUI thread, so only load what is actually shown.
+    if !ui.is_rect_visible(r) {
+        return;
+    }
     if let Some(tex) = texture {
         egui::Image::new(tex)
             .fit_to_exact_size(r.size())
             .corner_radius(8.0)
             .paint_at(ui, r);
     } else if url.starts_with("https://") {
-        egui::Image::new(url)
+        // A few shared buckets so rows and cards reuse one cached download each.
+        let px = r.width().max(r.height()) * ui.ctx().pixels_per_point();
+        let px = if px <= 120.0 {
+            120
+        } else if px <= 240.0 {
+            240
+        } else {
+            544
+        };
+        egui::Image::new(artwork_at(url, px))
             .fit_to_exact_size(r.size())
             .corner_radius(8.0)
             .paint_at(ui, r);
@@ -2957,6 +2971,54 @@ fn draw_image(ui: &mut egui::Ui, url: &str, r: Rect, texture: Option<&egui::Text
             .rect_filled(r, 8.0, Color32::from_rgb(51, 53, 48));
         widgets::paint(ui.painter(), Icon::Logo, r.shrink(r.width() * 0.3), MUTED);
     }
+}
+
+/// Upstream `artworkAt`: ask YouTube's image hosts for the size actually drawn instead of the
+/// largest thumbnail, by rewriting `w<N>-h<N>` and, on Google image hosts, `=s<N>`.
+fn artwork_at(url: &str, px: u32) -> String {
+    fn digits(s: &str) -> usize {
+        s.bytes().take_while(u8::is_ascii_digit).count()
+    }
+    let host = url
+        .split("://")
+        .nth(1)
+        .unwrap_or("")
+        .split(['/', ':', '?'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let google = ["ggpht.com", "googleusercontent.com"]
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{d}")));
+    let mut out = String::with_capacity(url.len());
+    let mut rest = url;
+    while !rest.is_empty() {
+        if let Some(tail) = rest.strip_prefix('w') {
+            let w = digits(tail);
+            if w > 0 && tail[w..].starts_with("-h") {
+                let h = digits(&tail[w + 2..]);
+                if h > 0 {
+                    out.push_str(&format!("w{px}-h{px}"));
+                    rest = &tail[w + 2 + h..];
+                    continue;
+                }
+            }
+        }
+        if google {
+            if let Some(tail) = rest.strip_prefix("=s") {
+                let s = digits(tail);
+                if s > 0 {
+                    out.push_str(&format!("=s{px}"));
+                    rest = &tail[s..];
+                    continue;
+                }
+            }
+        }
+        let c = rest.chars().next().unwrap();
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
 }
 
 fn configure_style(ctx: &egui::Context) {
@@ -3098,4 +3160,36 @@ fn load_artwork(url: &str) -> anyhow::Result<(egui::ColorImage, egui::ColorImage
         ),
         egui::ColorImage::from_rgba_unmultiplied([96, 96], &blurred),
     ))
+}
+
+#[cfg(test)]
+mod artwork_tests {
+    use super::artwork_at;
+
+    #[test]
+    fn artwork_is_requested_at_the_drawn_size() {
+        assert_eq!(
+            artwork_at(
+                "https://lh3.googleusercontent.com/abc=w544-h544-l90-rj",
+                120
+            ),
+            "https://lh3.googleusercontent.com/abc=w120-h120-l90-rj"
+        );
+        assert_eq!(
+            artwork_at(
+                "https://yt3.ggpht.com/ytc/AIdro_x123=s88-c-k-c0x00ffffff-no-rj",
+                240
+            ),
+            "https://yt3.ggpht.com/ytc/AIdro_x123=s240-c-k-c0x00ffffff-no-rj"
+        );
+        // `=s<N>` only means size on Google image hosts; video thumbnails are left alone.
+        assert_eq!(
+            artwork_at("https://i.ytimg.com/vi/abc/hqdefault.jpg?sqp=s12", 120),
+            "https://i.ytimg.com/vi/abc/hqdefault.jpg?sqp=s12"
+        );
+        assert_eq!(
+            artwork_at("https://example.test/w720-h720.jpg", 544),
+            "https://example.test/w544-h544.jpg"
+        );
+    }
 }

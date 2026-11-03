@@ -1108,13 +1108,20 @@ pub fn cookie_file() -> Result<Option<CookieFile>> {
         use std::os::unix::fs::PermissionsExt;
         f.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
-    for pair in s.cookie.split(';') {
-        if let Some((n, v)) = pair.trim().split_once('=') {
-            writeln!(f, ".youtube.com\tTRUE\t/\tTRUE\t0\t{n}\t{v}")?;
-        }
-    }
+    f.write_all(netscape_cookies(&s.cookie).as_bytes())?;
     f.sync_all()?;
     Ok(Some(CookieFile { path }))
+}
+/// yt-dlp rejects a cookies file without the Netscape header ("does not look like a Netscape
+/// format cookies file"), which made every signed-in playback fail.
+fn netscape_cookies(header: &str) -> String {
+    let mut out = String::from("# Netscape HTTP Cookie File\n");
+    for pair in header.split(';') {
+        if let Some((n, v)) = pair.trim().split_once('=') {
+            out.push_str(&format!(".youtube.com\tTRUE\t/\tTRUE\t0\t{n}\t{v}\n"));
+        }
+    }
+    out
 }
 fn secret_path() -> Result<PathBuf> {
     Ok(auth_dir()?.join("session.json"))
@@ -1235,6 +1242,17 @@ pub(crate) fn dpapi(encrypt: bool, input: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookie_file_is_netscape_format_for_yt_dlp() {
+        assert_eq!(
+            netscape_cookies("SID=abc; __Secure-3PSID=x=y;broken; HSID=h"),
+            "# Netscape HTTP Cookie File\n\
+             .youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n\
+             .youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PSID\tx=y\n\
+             .youtube.com\tTRUE\t/\tTRUE\t0\tHSID\th\n"
+        );
+    }
     #[test]
     fn default_login_uses_os_handler_with_fixed_url() {
         let command = default_browser_command();
