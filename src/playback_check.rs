@@ -30,10 +30,13 @@ fn wait_for(
         let state = player
             .poll()
             .ok_or_else(|| anyhow!("Player exited during {label}"))?;
+        if let Some(error) = player.take_error() {
+            bail!("mpv command failed during {label}: {error}");
+        }
         if state.errored {
             bail!("Audio decoding or output failed during {label}");
         }
-        if condition(state) {
+        if condition(state) && state.pending_commands == 0 {
             return Ok(state);
         }
         if state.ended {
@@ -48,7 +51,8 @@ fn wait_for(
 
 fn check(source: &str) -> Result<Value> {
     let mut player = Player::new();
-    player.load(source, 15.0, 1.0)?;
+    let audio = crate::store::Library::load(&crate::store::data_path())?.audio;
+    player.load_with_audio(source, 15.0, 1.0, &audio)?;
     let initial = wait_for(&mut player, 60, "decoding and audio output", |s| {
         s.position > 0.1 && s.duration > 2.0 && s.audio_sample_rate > 0
     })?;

@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $work = Join-Path $env:TEMP ('BitChord portable playback test '+[Guid]::NewGuid().ToString('N'))
 $saved = @{}
-foreach ($key in @('PATH','BITCHORD_MPV','BITCHORD_YTDLP','BITCHORD_AUDIO_OUTPUT')) {
+foreach ($key in @('PATH','BITCHORD_MPV','BITCHORD_YTDLP','BITCHORD_AUDIO_OUTPUT','BITCHORD_DATA_DIR')) {
     $saved[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
 }
 try {
@@ -23,6 +23,7 @@ try {
     $env:BITCHORD_MPV = $null
     $env:BITCHORD_YTDLP = $null
     $env:BITCHORD_AUDIO_OUTPUT = if ($RealAudio) { $null } else { 'null' }
+    $env:BITCHORD_DATA_DIR = Join-Path $work 'isolated library'
     $wav = Join-Path $work '440 Hz test tone.wav'
     $writer = New-Object IO.BinaryWriter ([IO.File]::Create($wav))
     try {

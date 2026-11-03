@@ -11,6 +11,13 @@ pub struct Track {
     pub source: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TimedWord {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
 impl Track {
     pub fn key(&self) -> &str {
         if self.id.is_empty() {

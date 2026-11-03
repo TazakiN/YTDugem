@@ -11,10 +11,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod lyrics;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LyricLine {
     pub time: f64,
     pub text: String,
+    pub words: Vec<crate::model::TimedWord>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -74,25 +77,61 @@ fn client() -> Result<reqwest::blocking::Client> {
         .build()?)
 }
 
-fn innertube_value(endpoint: &str, mut body: Value) -> Result<Value> {
-    let mut context = json!({"client":{"clientName":"WEB_REMIX","clientVersion":"1.20260601.01.00","hl":"en","gl":"US"}});
-    if let Some(user) = crate::auth::snapshot().and_then(|s| s.context_user()) {
-        context["user"] = user;
-    }
-    body["context"] = context;
+static SIGN_IN_REJECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True once since YouTube last refused the saved sign-in (expired or signed-out cookies).
+pub fn take_sign_in_rejected() -> bool {
+    SIGN_IN_REJECTED.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+fn send_innertube(
+    endpoint: &str,
+    body: &Value,
+    session: Option<&crate::auth::Session>,
+) -> Result<(reqwest::StatusCode, Value)> {
+    let response = innertube_request(endpoint, body, session)?.send()?;
+    let status = response.status();
+    Ok((status, response.json().unwrap_or(Value::Null)))
+}
+
+pub(crate) fn innertube_request(
+    endpoint: &str,
+    body: &Value,
+    session: Option<&crate::auth::Session>,
+) -> Result<reqwest::blocking::RequestBuilder> {
+    let mut body = body.clone();
+    body["context"] = match session {
+        Some(session) => session.context(),
+        None => {
+            json!({"client":{"clientName":"WEB_REMIX","clientVersion":"1.20260601.01.00","hl":"en","gl":"US"}})
+        }
+    };
     let request = client()?
         .post(format!(
             "https://music.youtube.com/youtubei/v1/{endpoint}?prettyPrint=false"
         ))
-        .header("Origin", "https://music.youtube.com")
         .json(&body);
-    let request = match crate::auth::snapshot() {
+    // `apply` adds its own Origin; a second Origin header makes Google answer 400.
+    Ok(match session {
         Some(session) => session.apply(request),
-        None => request,
-    };
-    let response: Value = request.send()?.error_for_status()?.json()?;
-    if response.get("error").is_some() {
-        bail!("YouTube Music request failed");
+        None => request.header("Origin", "https://music.youtube.com"),
+    })
+}
+
+fn innertube_value(endpoint: &str, body: Value) -> Result<Value> {
+    let session = crate::auth::snapshot();
+    let (mut status, mut response) = send_innertube(endpoint, &body, session.as_ref())?;
+    if session.is_some() && status == reqwest::StatusCode::UNAUTHORIZED {
+        // The saved cookies no longer sign in; still show public music.
+        SIGN_IN_REJECTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        (status, response) = send_innertube(endpoint, &body, None)?;
+    }
+    if !status.is_success() || response.get("error").is_some() {
+        let detail = response
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("no details");
+        bail!("YouTube Music {endpoint} request failed ({status}): {detail}");
     }
     Ok(response)
 }
@@ -253,6 +292,9 @@ fn collect_cards(v: &Value, out: &mut Vec<ShelfItem>) {
         _ => {}
     }
 }
+/// Upstream `YtMusicRepository.HOME_SUPPLEMENT_BROWSE_IDS` (shared-jvm `<clinit>`).
+pub const HOME_SUPPLEMENT_BROWSE_IDS: [&str; 2] = ["FEmusic_new_releases", "FEmusic_explore"];
+
 pub fn home() -> Result<HomeFeed> {
     let v = innertube_value("browse", json!({"browseId":"FEmusic_home"}))?;
     Ok(parse_home(&v))
@@ -270,12 +312,6 @@ pub fn recent() -> Result<Vec<Track>> {
         return Ok(vec![]);
     }
     innertube("browse", json!({"browseId":"FEmusic_history"}))
-}
-pub fn library() -> Result<Vec<HomeShelf>> {
-    if crate::auth::snapshot().is_none() {
-        return Ok(vec![]);
-    }
-    home_supplement("FEmusic_library_landing")
 }
 pub fn collection(browse_id: &str, params: Option<&str>) -> Result<Collection> {
     let mut b = json!({"browseId":browse_id});
@@ -505,7 +541,7 @@ fn files(path: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<()> {
     Ok(())
 }
 
-fn run(command: &mut Command, timeout: Duration) -> Result<std::process::Output> {
+pub(crate) fn run(command: &mut Command, timeout: Duration) -> Result<std::process::Output> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -617,42 +653,18 @@ pub fn import_local(path: &Path) -> Result<Vec<Track>> {
     Ok(tracks)
 }
 
+#[allow(dead_code)] // Public compatibility entry point retained for existing callers.
 pub fn lyrics(track: &Track) -> Result<Vec<LyricLine>> {
-    let response = client()?
-        .get("https://lrclib.net/api/search")
-        .query(&[("track_name", &track.title), ("artist_name", &track.artist)])
-        .send()?
-        .error_for_status()?;
-    let mut results: Vec<Value> = response.json()?;
-    if results.is_empty() {
-        let title = track.title.split(" (").next().unwrap_or(&track.title);
-        let artist = track
-            .artist
-            .split([',', '&'])
-            .next()
-            .unwrap_or(&track.artist);
-        results = client()?
-            .get("https://lrclib.net/api/search")
-            .query(&[("q", format!("{title} {artist}"))])
-            .send()?
-            .error_for_status()?
-            .json()?;
-    }
-    let item = results
-        .iter()
-        .min_by(|a, b| {
-            let score = |v: &Value| (v["duration"].as_f64().unwrap_or(0.0) - track.duration).abs();
-            score(a).total_cmp(&score(b))
-        })
-        .ok_or_else(|| anyhow!("No lyrics found for this track"))?;
-    let text = item["syncedLyrics"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .or_else(|| item["plainLyrics"].as_str())
-        .ok_or_else(|| anyhow!("This track has no lyrics"))?;
-    Ok(parse_lyrics(text))
+    Ok(lyrics::lookup(
+        track,
+        &crate::store::lyrics_order_default(),
+        &crate::store::lyrics_order_default(),
+        Some("lrclib"),
+    )?
+    .lines)
 }
 
+#[cfg(test)]
 fn parse_lyrics(text: &str) -> Vec<LyricLine> {
     let mut lines = vec![];
     for line in text.lines() {
@@ -676,6 +688,7 @@ fn parse_lyrics(text: &str) -> Vec<LyricLine> {
             lines.push(LyricLine {
                 time,
                 text: rest.trim().to_owned(),
+                words: vec![],
             });
         }
     }
@@ -687,6 +700,7 @@ fn parse_lyrics(text: &str) -> Vec<LyricLine> {
             .map(|l| LyricLine {
                 time: 0.0,
                 text: l.to_owned(),
+                words: vec![],
             })
             .collect();
     }
@@ -774,11 +788,13 @@ mod tests {
             vec![
                 LyricLine {
                     time: 1.2,
-                    text: "hello".into()
+                    text: "hello".into(),
+                    words: vec![],
                 },
                 LyricLine {
                     time: 2.3,
-                    text: "hello".into()
+                    text: "hello".into(),
+                    words: vec![],
                 }
             ]
         );

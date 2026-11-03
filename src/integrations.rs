@@ -72,7 +72,6 @@ impl Integrations {
         }
     }
 
-    #[cfg(test)]
     pub fn available(&self) -> bool {
         self.controls.is_some()
     }

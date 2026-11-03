@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build a portable Windows ZIP with pinned, checksum-verified audio tools.
 
-First cross-build YTDugem.exe, then run this script with 7zz or 7z on PATH.
-Set SEVENZIP to override the archive extractor. No machine-wide installation.
+Build YTDugem.exe, then run this script. Set SEVENZIP to override the archive
+extractor. No machine-wide installation.
 """
 import hashlib
 import json
@@ -52,15 +52,29 @@ def fetch(url, digest):
     return path
 
 
-def main():
-    binary = ROOT / "target/x86_64-pc-windows-gnu/release/ytdugem.exe"
-    if not binary.is_file():
-        binary = ROOT / "target/release/ytdugem.exe"
-    if not binary.is_file():
-        raise RuntimeError("Build the Windows release executable first")
+def windows_binary(root, is_windows):
+    release = root / "target/release/ytdugem.exe"
+    cross = root / "target/x86_64-pc-windows-gnu/release/ytdugem.exe"
+    candidates = (release, cross) if is_windows else (cross, release)
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def extract_7z(archive, destination):
     sevenzip = os.environ.get("SEVENZIP") or shutil.which("7zz") or shutil.which("7z")
-    if not sevenzip:
-        raise RuntimeError("Install 7zip or set SEVENZIP to its executable")
+    if sevenzip:
+        subprocess.run([sevenzip, "x", "-y", "-bso0", f"-o{destination}", str(archive)], check=True)
+        return
+    tar = shutil.which("tar")
+    if tar:
+        subprocess.run([tar, "-xf", str(archive), "-C", str(destination)], check=True)
+        return
+    raise RuntimeError("Install 7zip, set SEVENZIP, or install tar with 7z support")
+
+
+def main():
+    binary = windows_binary(ROOT, os.name == "nt")
+    if binary is None:
+        raise RuntimeError("Build the Windows release executable first")
     CACHE.mkdir(parents=True, exist_ok=True)
     TOOLS.mkdir(parents=True, exist_ok=True)
     manifest = {}
@@ -76,7 +90,7 @@ def main():
             with zipfile.ZipFile(archive) as source:
                 source.extractall(extracted)
         else:
-            subprocess.run([sevenzip, "x", "-y", "-bso0", f"-o{extracted}", str(archive)], check=True)
+            extract_7z(archive, extracted)
         for path in extracted.rglob("*"):
             if not path.is_file():
                 continue
@@ -115,7 +129,7 @@ def main():
                     if item == "tools" and file.suffix.lower() == ".exe" and file.name.lower() not in EXECUTABLES:
                         continue
                     bundle.write(file, Path("YTDugem") / file.relative_to(DIST))
-        for item in ("Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "src", "assets", "scripts", "packaging"):
+        for item in ("Cargo.toml", "Cargo.lock", "build.rs", "README.md", "AGENTS.md", "LICENSE", "docs", "src", "assets", "scripts", "packaging"):
             path = ROOT / item
             for file in ([path] if path.is_file() else path.rglob("*")):
                 if file.is_file() and "__pycache__" not in file.parts:

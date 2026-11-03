@@ -16,6 +16,8 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --locked -- -D warnings
       - run: cargo build --release --locked
+      - name: Check Windows packaging selection and extraction commands
+        run: python scripts/test-package-windows.py
       - name: Package Windows audio tools
         if: runner.os == 'Windows'
         env:

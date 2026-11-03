@@ -1,5 +1,6 @@
 use crate::{
-    auth::{self, Account},
+    auth::{self, Account, SavedAccount},
+    discord::Presence,
     integrations::{Integrations, MediaEvent},
     model::{clock, Track},
     player::{Player, PlayerStatus},
@@ -9,6 +10,7 @@ use crate::{
 };
 use eframe::egui::{self, Align, Color32, FontId, Pos2, Rect, RichText, Stroke, Vec2};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -53,12 +55,17 @@ enum Event {
     Recents(u64, Result<Vec<Track>, String>),
     Collection(u64, Result<Collection, String>),
     Imported(Result<Vec<Track>, String>),
-    Lyrics(String, Result<Vec<LyricLine>, String>),
+    Lyrics(u64, String, Result<services::lyrics::Lyrics, String>),
     Downloaded(Result<PathBuf, String>),
     Account(u64, Result<Account, String>),
+    SavedAccounts(u64, Result<Vec<SavedAccount>, String>),
+    AccountRemoved(u64, Result<(), String>),
+    LyricsKeys(u64, Result<Vec<(String, bool)>, String>),
+    LyricsKeySaved(u64, String, Result<bool, String>),
+    AudioDevices(Result<Vec<(String, String)>, String>),
     BrowserOpened(u64, Result<(), String>),
     Artwork(String, Result<(egui::ColorImage, egui::ColorImage), String>),
-    Radio(String, Result<Vec<Track>, String>),
+    Radio(u64, String, Result<Vec<Track>, String>),
 }
 
 pub struct YTDugem {
@@ -98,6 +105,9 @@ pub struct YTDugem {
     repeat: u8,
     lyrics: Vec<LyricLine>,
     lyrics_message: String,
+    lyrics_provider: String,
+    lyrics_override: Option<String>,
+    lyrics_request: u64,
     follow_lyrics: bool,
     active_lyric: Option<usize>,
     cover: Option<egui::TextureHandle>,
@@ -109,16 +119,77 @@ pub struct YTDugem {
     stop_after_track: bool,
     account: Option<Account>,
     account_open: bool,
+    adding_account: bool,
     cookie_input: String,
     account_busy: bool,
     account_request: u64,
+    saved_accounts: Vec<SavedAccount>,
+    saved_accounts_request: u64,
+    radio_request: u64,
+    lyric_keys: BTreeMap<String, bool>,
+    lyric_key_inputs: BTreeMap<String, String>,
+    lyric_keys_loaded: bool,
+    lyric_keys_busy: bool,
+    audio_devices: Vec<(String, String)>,
+    audio_devices_loading: bool,
+    audio_devices_loaded: bool,
+    lyric_keys_request: u64,
     login_cancel: Arc<AtomicBool>,
     last_poll: Instant,
     now_origin: String,
     radio_pending: bool,
+    discord: Presence,
+    /// `--screenshot FILE`: save the window after `SCREENSHOT_FRAMES` frames, then exit.
+    screenshot: Option<PathBuf>,
+    screenshot_requested: bool,
+    frames: u32,
 }
 
+const SCREENSHOT_FRAMES: u32 = 120;
+
 impl YTDugem {
+    pub fn with_screenshot(mut self, path: Option<PathBuf>) -> Self {
+        self.screenshot = path;
+        self
+    }
+    fn screenshot_step(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.screenshot.clone() else {
+            return;
+        };
+        self.frames += 1;
+        // Frames come fast while spinners animate; also give artwork a few seconds to arrive.
+        if self.frames >= SCREENSHOT_FRAMES
+            && ctx.input(|i| i.time) >= 6.0
+            && !self.screenshot_requested
+        {
+            self.screenshot_requested = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        }
+        let image = ctx.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = image {
+            let [w, h] = image.size;
+            let rgba: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = image::save_buffer(
+                &path,
+                &rgba,
+                w as u32,
+                h as u32,
+                image::ExtendedColorType::Rgba8,
+            ) {
+                eprintln!("YTDugem: could not save screenshot: {e}");
+            }
+            self.screenshot = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         configure_style(&cc.egui_ctx);
         let path = store::data_path();
@@ -189,6 +260,9 @@ impl YTDugem {
             repeat: 0,
             lyrics: vec![],
             lyrics_message: String::new(),
+            lyrics_provider: String::new(),
+            lyrics_override: None,
+            lyrics_request: 0,
             follow_lyrics: true,
             active_lyric: None,
             cover: None,
@@ -200,13 +274,29 @@ impl YTDugem {
             stop_after_track: false,
             account,
             account_open: false,
+            adding_account: false,
             cookie_input: String::new(),
             account_busy: false,
             account_request: 0,
+            saved_accounts: vec![],
+            saved_accounts_request: 0,
+            radio_request: 0,
+            lyric_keys: BTreeMap::new(),
+            lyric_key_inputs: BTreeMap::new(),
+            lyric_keys_loaded: false,
+            lyric_keys_busy: false,
+            audio_devices: vec![],
+            audio_devices_loading: false,
+            audio_devices_loaded: false,
+            lyric_keys_request: 0,
             login_cancel: Arc::new(AtomicBool::new(false)),
             last_poll: Instant::now(),
             now_origin: "Home".into(),
             radio_pending: false,
+            discord: Presence::new(),
+            screenshot: None,
+            screenshot_requested: false,
+            frames: 0,
         };
         app.load_home();
         app
@@ -215,6 +305,13 @@ impl YTDugem {
         if !self.read_only {
             if let Err(e) = self.library.save(&self.path) {
                 self.message = format!("Could not save library: {e:#}");
+            }
+        }
+    }
+    fn apply_audio_settings(&mut self) {
+        if self.player.is_active() {
+            if let Err(error) = self.player.set_audio_filter(&self.library.audio) {
+                self.message = format!("Could not update audio filter: {error:#}");
             }
         }
     }
@@ -237,12 +334,14 @@ impl YTDugem {
         self.recents.clear();
         self.home_token = None;
         self.home_more = false;
-        self.home_pending = 3 + 2 * usize::from(self.account.is_some());
+        // Upstream loadHome: Home, signed-in Recently played, then HOME_SUPPLEMENT_BROWSE_IDS.
+        self.home_pending =
+            1 + services::HOME_SUPPLEMENT_BROWSE_IDS.len() + usize::from(self.account.is_some());
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(Event::Home(id, services::home().map_err(err)));
         });
-        for endpoint in ["FEmusic_new_releases", "FEmusic_explore"] {
+        for endpoint in services::HOME_SUPPLEMENT_BROWSE_IDS {
             let tx = self.tx.clone();
             std::thread::spawn(move || {
                 let _ = tx.send(Event::Supplement(
@@ -252,10 +351,6 @@ impl YTDugem {
             });
         }
         if self.account.is_some() {
-            let tx = self.tx.clone();
-            std::thread::spawn(move || {
-                let _ = tx.send(Event::Supplement(id, services::library().map_err(err)));
-            });
             let tx = self.tx.clone();
             std::thread::spawn(move || {
                 let _ = tx.send(Event::Recents(id, services::recent().map_err(err)));
@@ -346,6 +441,7 @@ impl YTDugem {
     }
     fn play(&mut self, t: Track) {
         self.play_request += 1;
+        self.lyrics_request += 1;
         let id = self.play_request;
         self.loading = true;
         self.player.stop();
@@ -353,13 +449,59 @@ impl YTDugem {
             paused: true,
             ..Default::default()
         };
-        let (volume, speed) = (self.library.volume, self.library.speed);
+        let (volume, speed, audio) = (
+            self.library.volume,
+            self.library.speed,
+            self.library.audio.clone(),
+        );
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let mut p = Player::new();
-            let r = p.load(&t.source, volume, speed).map(|_| p).map_err(err);
+            let r = p
+                .load_with_audio(&t.source, volume, speed, &audio)
+                .map(|_| p)
+                .map_err(err);
             let _ = tx.send(Event::Playing(id, t, r));
         });
+    }
+    fn request_lyrics(&mut self, only: Option<String>) {
+        if !self.library.lyrics_enabled {
+            self.lyrics_message = "Lyrics are disabled in Settings".into();
+            return;
+        }
+        let Some(song) = self.current.clone() else {
+            return;
+        };
+        self.lyrics_request += 1;
+        let request = self.lyrics_request;
+        let key = song.key().to_owned();
+        self.lyrics.clear();
+        self.lyrics_provider.clear();
+        self.lyrics_message = "Finding lyrics…".into();
+        let (enabled, order) = (
+            self.library.lyrics_sources.clone(),
+            self.library.lyrics_order.clone(),
+        );
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result =
+                services::lyrics::lookup(&song, &enabled, &order, only.as_deref()).map_err(err);
+            let _ = tx.send(Event::Lyrics(request, key, result));
+        });
+    }
+    fn lyrics_settings_changed(&mut self, reload: bool) {
+        self.lyrics_request += 1;
+        self.lyrics.clear();
+        self.lyrics_provider.clear();
+        self.active_lyric = None;
+        self.lyrics_message = if self.library.lyrics_enabled {
+            String::new()
+        } else {
+            "Lyrics are disabled in Settings".into()
+        };
+        if reload && self.library.lyrics_enabled {
+            self.request_lyrics(None);
+        }
     }
     fn playing(&mut self, t: Track, result: Result<Player, String>) {
         self.loading = false;
@@ -370,18 +512,11 @@ impl YTDugem {
                 self.status = PlayerStatus::default();
                 self.lyrics.clear();
                 self.active_lyric = None;
-                self.lyrics_message = "Finding lyrics…".into();
+                self.lyrics_override = None;
+                self.lyrics_request += 1;
                 self.cover = None;
                 self.backdrop = None;
                 self.radio_pending = false;
-                let tx = self.tx.clone();
-                let song = t.clone();
-                std::thread::spawn(move || {
-                    let _ = tx.send(Event::Lyrics(
-                        song.key().into(),
-                        services::lyrics(&song).map_err(err),
-                    ));
-                });
                 if t.thumbnail.starts_with("https://") {
                     let tx = self.tx.clone();
                     let song = t.clone();
@@ -393,6 +528,12 @@ impl YTDugem {
                     });
                 }
                 self.current = Some(t);
+                self.discord.clear();
+                if self.library.lyrics_enabled {
+                    self.request_lyrics(None);
+                } else {
+                    self.lyrics_message = "Lyrics are disabled in Settings".into();
+                }
                 self.save();
             }
             Err(e) => self.message = format!("Playback failed: {e}"),
@@ -455,14 +596,141 @@ impl YTDugem {
         }
         if let Some(t) = self.current.clone() {
             self.radio_pending = true;
+            self.radio_request += 1;
+            let request = self.radio_request;
             let tx = self.tx.clone();
             std::thread::spawn(move || {
                 let _ = tx.send(Event::Radio(
+                    request,
                     t.key().into(),
                     services::radio(&t.id).map_err(err),
                 ));
             });
         }
+    }
+    fn invalidate_account_results(&mut self) {
+        self.request += 1;
+        self.home_request += 1;
+        self.collection_request += 1;
+        self.lyrics_request += 1;
+        self.radio_request += 1;
+        self.busy = false;
+        self.results.clear();
+        self.submitted_query.clear();
+        self.home.clear();
+        self.recents.clear();
+        self.home_token = None;
+        self.home_more = false;
+        self.home_pending = 0;
+        self.collection = None;
+        self.lyrics.clear();
+        self.lyrics_provider.clear();
+        self.lyrics_message.clear();
+        self.active_lyric = None;
+        self.radio_pending = false;
+    }
+    fn sync_account(&mut self) {
+        self.invalidate_account_results();
+        self.account = auth::current_account();
+        self.adding_account = false;
+        self.load_home();
+        self.request_lyrics(self.lyrics_override.clone());
+    }
+    fn open_accounts(&mut self) {
+        self.account_open = true;
+        self.saved_accounts_request += 1;
+        let request = self.saved_accounts_request;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Event::SavedAccounts(
+                request,
+                auth::saved_accounts().map_err(err),
+            ));
+        });
+    }
+    fn select_account(&mut self, id: String) {
+        if self.account_busy {
+            return;
+        }
+        self.account_busy = true;
+        self.account_request += 1;
+        let request = self.account_request;
+        self.login_cancel = Arc::new(AtomicBool::new(false));
+        let cancel = self.login_cancel.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Event::Account(
+                request,
+                auth::select_account(&id, &cancel).map_err(err),
+            ));
+        });
+    }
+    fn remove_account(&mut self, id: String) {
+        if self.account_busy {
+            return;
+        }
+        self.account_busy = true;
+        self.account_request += 1;
+        let request = self.account_request;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Event::AccountRemoved(
+                request,
+                auth::remove_account(&id).map_err(err),
+            ));
+        });
+    }
+    fn load_lyrics_keys(&mut self) {
+        if self.lyric_keys_loaded || self.lyric_keys_busy {
+            return;
+        }
+        self.lyric_keys_busy = true;
+        self.lyric_keys_request += 1;
+        let request = self.lyric_keys_request;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let ids: Vec<String> = services::lyrics::PROVIDERS
+                .iter()
+                .filter_map(|provider| provider.key_id)
+                .map(str::to_owned)
+                .collect();
+            let result = ids
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(|id| services::lyrics::key_configured(&id).map(|configured| (id, configured)))
+                .collect::<anyhow::Result<Vec<_>>>()
+                .map_err(err);
+            let _ = tx.send(Event::LyricsKeys(request, result));
+        });
+    }
+    fn load_audio_devices(&mut self) {
+        if self.audio_devices_loading || self.audio_devices_loaded {
+            return;
+        }
+        self.audio_devices_loading = true;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Event::AudioDevices(
+                crate::player::audio_devices().map_err(err),
+            ));
+        });
+    }
+    fn save_lyrics_key(&mut self, key: String) {
+        if self.lyric_keys_busy {
+            return;
+        }
+        self.lyric_keys_busy = true;
+        self.lyric_keys_request += 1;
+        let request = self.lyric_keys_request;
+        let value = self.lyric_key_inputs.get(&key).cloned().unwrap_or_default();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = services::lyrics::save_key(&key, &value)
+                .and_then(|()| services::lyrics::key_configured(&key))
+                .map_err(err);
+            let _ = tx.send(Event::LyricsKeySaved(request, key, result));
+        });
     }
     fn previous(&mut self) {
         if self.status.position > 3.0 && self.player.is_active() {
@@ -496,6 +764,7 @@ impl YTDugem {
         self.player.stop();
         self.status.paused = true;
         self.status.ended = true;
+        self.discord.clear();
     }
     fn download(&mut self, t: Track) {
         if self.downloading {
@@ -557,6 +826,7 @@ impl YTDugem {
                     }
                 }
                 Event::Home(id, r) if id == self.home_request => {
+                    let first_page = !self.home_more;
                     if self.home_more {
                         self.home_more = false;
                     } else {
@@ -565,7 +835,14 @@ impl YTDugem {
                     match r {
                         Ok(feed) => {
                             self.home_token = feed.continuation;
-                            merge_shelves(&mut self.home, feed.shelves);
+                            if first_page {
+                                // Supplements may arrive first; Home's own shelves lead.
+                                let supplements = std::mem::take(&mut self.home);
+                                merge_shelves(&mut self.home, feed.shelves);
+                                merge_shelves(&mut self.home, supplements);
+                            } else {
+                                merge_shelves(&mut self.home, feed.shelves);
+                            }
                         }
                         Err(e) => {
                             if self.home.is_empty() {
@@ -627,10 +904,14 @@ impl YTDugem {
                         Err(e) => self.message = e,
                     }
                 }
-                Event::Lyrics(key, r) if self.current.as_ref().is_some_and(|t| t.key() == key) => {
+                Event::Lyrics(id, key, r)
+                    if id == self.lyrics_request
+                        && self.current.as_ref().is_some_and(|t| t.key() == key) =>
+                {
                     match r {
-                        Ok(lines) => {
-                            self.lyrics = lines;
+                        Ok(found) => {
+                            self.lyrics = found.lines;
+                            self.lyrics_provider = found.provider.into();
                             self.lyrics_message.clear();
                         }
                         Err(e) => self.lyrics_message = e,
@@ -653,23 +934,84 @@ impl YTDugem {
                 Event::BrowserOpened(id, r) if id == self.account_request => {
                     self.account_busy = false;
                     self.message = match r {
-                        Ok(()) => "Sign in to YouTube Music in your browser, then paste your cookies below to connect YTDugem. Opening the browser does not connect your account automatically.".into(),
+                        Ok(()) => "The default browser only opened YouTube Music. Use Automatic sign-in for secure capture, or paste cookies below.".into(),
                         Err(e) => e,
                     };
                 }
-                Event::Account(id, r) if id == self.account_request => {
-                    self.account_busy = false;
+                Event::Account(id, r)
+                    if accepts_account_result(id, self.account_request, r.is_ok()) =>
+                {
+                    if id == self.account_request {
+                        self.account_busy = false;
+                    }
                     match r {
-                        Ok(a) => {
-                            self.account = Some(a);
-                            self.account_open = false;
-                            self.message = "Signed in to YouTube Music".into();
-                            self.load_home();
+                        Ok(_) => {
+                            self.sync_account();
+                            if id == self.account_request {
+                                self.account_open = false;
+                                self.message = "Signed in to YouTube Music".into();
+                            }
                         }
                         Err(e) => self.message = e,
                     }
                 }
-                Event::Radio(key, r) if self.current.as_ref().is_some_and(|t| t.key() == key) => {
+                Event::SavedAccounts(id, r) if id == self.saved_accounts_request => match r {
+                    Ok(accounts) => self.saved_accounts = accounts,
+                    Err(e) => self.message = e,
+                },
+                Event::AccountRemoved(id, r)
+                    if accepts_account_result(id, self.account_request, r.is_ok()) =>
+                {
+                    if id == self.account_request {
+                        self.account_busy = false;
+                    }
+                    match r {
+                        Ok(()) => {
+                            self.sync_account();
+                            if id == self.account_request {
+                                self.open_accounts();
+                                self.message = "Saved account removed".into();
+                            }
+                        }
+                        Err(e) => self.message = e,
+                    }
+                }
+                Event::LyricsKeys(id, r) if id == self.lyric_keys_request => {
+                    self.lyric_keys_busy = false;
+                    match r {
+                        Ok(keys) => {
+                            self.lyric_keys = keys.into_iter().collect();
+                            self.lyric_keys_loaded = true;
+                        }
+                        Err(e) => self.message = e,
+                    }
+                }
+                Event::LyricsKeySaved(id, key, r) if id == self.lyric_keys_request => {
+                    self.lyric_keys_busy = false;
+                    match r {
+                        Ok(configured) => {
+                            self.lyric_keys.insert(key.clone(), configured);
+                            self.lyric_key_inputs.remove(&key);
+                            self.lyric_keys_loaded = true;
+                            self.lyrics_settings_changed(true);
+                        }
+                        Err(e) => self.message = e,
+                    }
+                }
+                Event::AudioDevices(result) => {
+                    self.audio_devices_loading = false;
+                    self.audio_devices_loaded = true;
+                    match result {
+                        Ok(devices) => self.audio_devices = devices,
+                        Err(error) => {
+                            self.message = format!("Could not enumerate mpv audio devices: {error}")
+                        }
+                    }
+                }
+                Event::Radio(id, key, r)
+                    if id == self.radio_request
+                        && self.current.as_ref().is_some_and(|t| t.key() == key) =>
+                {
                     self.radio_pending = false;
                     match r {
                         Ok(mut ts) => {
@@ -690,6 +1032,9 @@ impl YTDugem {
             self.last_poll = Instant::now();
             if let Some(s) = self.player.poll() {
                 self.status = s;
+                if let Some(error) = self.player.take_error() {
+                    self.message = error;
+                }
                 if s.errored {
                     self.stop();
                     self.message="Audio could not be opened. Check your connection or sign-in, then try again.".into();
@@ -702,6 +1047,27 @@ impl YTDugem {
             self.sleep_until = None;
             self.stop();
             self.message = "Sleep timer finished".into();
+        }
+        if self.library.discord_enabled {
+            if let Some(track) = self
+                .current
+                .as_ref()
+                .filter(|_| !self.status.paused && !self.status.ended)
+            {
+                let mut track = track.clone();
+                if self.status.duration > 0.0 {
+                    track.duration = self.status.duration;
+                }
+                self.discord.publish(
+                    &track,
+                    self.status.position,
+                    self.library.speed,
+                    &self.library.discord_activity_name,
+                    self.library.discord_buttons,
+                );
+            } else {
+                self.discord.clear();
+            }
         }
         for event in self.integrations.poll() {
             match event {
@@ -738,6 +1104,23 @@ impl YTDugem {
 
 fn err(e: anyhow::Error) -> String {
     format!("{e:#}")
+}
+
+fn accepts_account_result(request: u64, current: u64, succeeded: bool) -> bool {
+    // A completed credential change survives dialog cancellation; read the current backend state.
+    request == current || succeeded
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::accepts_account_result;
+
+    #[test]
+    fn committed_account_changes_are_reconciled_after_dialog_cancellation() {
+        assert!(accepts_account_result(1, 2, true));
+        assert!(!accepts_account_result(1, 2, false));
+        assert!(accepts_account_result(2, 2, false));
+    }
 }
 
 impl YTDugem {
@@ -1108,7 +1491,7 @@ impl YTDugem {
                     )
                     .clicked()
                     {
-                        self.account_open = true;
+                        self.open_accounts();
                     }
                 });
             },
@@ -1302,6 +1685,9 @@ impl YTDugem {
             ),
             |ui| {
                 ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                // The 34 px slot is narrower than the padded label; wrapping split the dots.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                ui.spacing_mut().button_padding = Vec2::new(6.0, 4.0);
                 ui.menu_button("···", |ui| self.track_menu(ui, track));
             },
         );
@@ -1539,9 +1925,285 @@ impl YTDugem {
                 }
             }
             Page::Settings => {
+                self.load_lyrics_keys();
+                self.load_audio_devices();
                 ui.label(heading("Settings", 26.0));
                 ui.add_space(16.0);
-                ui.checkbox(&mut self.library.autoplay, "Autoplay similar music");
+                if ui
+                    .checkbox(&mut self.library.autoplay, "Autoplay similar music")
+                    .changed()
+                {
+                    self.save();
+                }
+                if ui
+                    .checkbox(
+                        &mut self.library.discord_enabled,
+                        "Enable Discord Rich Presence",
+                    )
+                    .changed()
+                {
+                    self.save();
+                    if !self.library.discord_enabled {
+                        self.discord.clear();
+                    }
+                }
+                if self.library.discord_enabled {
+                    ui.label(match self.discord.status() {
+                        crate::discord::Status::Idle => {
+                            "Discord: no active playback (Windows desktop only)".to_owned()
+                        }
+                        crate::discord::Status::Waiting => {
+                            "Discord: waiting for acknowledgement".to_owned()
+                        }
+                        crate::discord::Status::Connected => "Discord: connected".to_owned(),
+                        crate::discord::Status::Error(ref e) => format!("Discord: {e}"),
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Activity name");
+                        if ui
+                            .text_edit_singleline(&mut self.library.discord_activity_name)
+                            .changed()
+                        {
+                            self.save();
+                        }
+                    });
+                    for i in 0..2 {
+                        if ui
+                            .checkbox(
+                                &mut self.library.discord_buttons[i],
+                                if i == 0 {
+                                    "Show YouTube Music button"
+                                } else {
+                                    "Show BitChord button"
+                                },
+                            )
+                            .changed()
+                        {
+                            self.save();
+                        }
+                    }
+                }
+                if ui
+                    .checkbox(&mut self.library.lyrics_enabled, "Enable lyrics lookup")
+                    .changed()
+                {
+                    self.save();
+                    self.lyrics_settings_changed(true);
+                }
+                ui.label(heading("Lyrics providers", 18.0));
+                let ordered = services::lyrics::ordered(&self.library.lyrics_order);
+                for (index, provider) in ordered.iter().enumerate() {
+                    let mut enabled = self
+                        .library
+                        .lyrics_sources
+                        .iter()
+                        .any(|id| id == provider.id);
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut enabled, provider.label).changed() {
+                            if enabled
+                                && !self
+                                    .library
+                                    .lyrics_sources
+                                    .iter()
+                                    .any(|id| id == provider.id)
+                            {
+                                self.library.lyrics_sources.push(provider.id.into());
+                            } else {
+                                self.library.lyrics_sources.retain(|id| id != provider.id);
+                            }
+                            self.save();
+                            self.lyrics_settings_changed(true);
+                        }
+                        ui.label(RichText::new(provider.detail).color(MUTED));
+                        if ui.small_button("↑").clicked() && index > 0 {
+                            let mut ids: Vec<_> = ordered.iter().map(|p| p.id.to_owned()).collect();
+                            ids.swap(index, index - 1);
+                            self.library.lyrics_order = ids;
+                            self.save();
+                            self.lyrics_settings_changed(true);
+                        }
+                        if ui.small_button("↓").clicked() && index + 1 < ordered.len() {
+                            let mut ids: Vec<_> = ordered.iter().map(|p| p.id.to_owned()).collect();
+                            ids.swap(index, index + 1);
+                            self.library.lyrics_order = ids;
+                            self.save();
+                            self.lyrics_settings_changed(true);
+                        }
+                    });
+                }
+                let key_ids: Vec<String> = services::lyrics::PROVIDERS
+                    .iter()
+                    .filter_map(|provider| provider.key_id)
+                    .map(str::to_owned)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                for key in key_ids {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{key} API key"));
+                        let input = self.lyric_key_inputs.entry(key.clone()).or_default();
+                        ui.add(
+                            egui::TextEdit::singleline(input)
+                                .password(true)
+                                .hint_text("Paste key to replace"),
+                        );
+                        let configured = self.lyric_keys.get(&key).copied().unwrap_or(false);
+                        ui.label(
+                            RichText::new(if configured { "Configured" } else { "Not set" })
+                                .color(MUTED),
+                        );
+                        let label = if input.trim().is_empty() && configured {
+                            "Remove"
+                        } else {
+                            "Save"
+                        };
+                        if ui
+                            .add_enabled(!self.lyric_keys_busy, egui::Button::new(label))
+                            .clicked()
+                        {
+                            self.save_lyrics_key(key.clone());
+                        }
+                    });
+                }
+                if ui.button("Reset lyric providers").clicked() {
+                    self.library.lyrics_order = store::lyrics_order_default();
+                    self.library.lyrics_sources = store::lyrics_order_default();
+                    self.library.lyrics_enabled = true;
+                    self.save();
+                    self.lyrics_settings_changed(true);
+                }
+                ui.separator();
+                ui.label(heading("Audio output", 18.0));
+                let selected = self.library.audio.output_device.clone();
+                egui::ComboBox::from_id_salt("audio-output-device")
+                    .selected_text(if selected.is_empty() {
+                        "System default"
+                    } else {
+                        self.audio_devices
+                            .iter()
+                            .find(|(id, _)| id == &selected)
+                            .map_or("Unavailable device", |(_, name)| name.as_str())
+                    })
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(selected.is_empty(), "System default")
+                            .clicked()
+                        {
+                            self.library.audio.output_device.clear();
+                            self.save();
+                        }
+                        for (id, name) in self.audio_devices.clone() {
+                            if ui.selectable_label(selected == id, name.clone()).clicked() {
+                                self.library.audio.output_device = id;
+                                self.save();
+                            }
+                        }
+                    });
+                if self.audio_devices_loading {
+                    ui.spinner();
+                    ui.label(RichText::new("Reading devices from mpv…").color(MUTED));
+                } else if ui.button("Refresh audio devices").clicked() {
+                    self.audio_devices_loaded = false;
+                    self.load_audio_devices();
+                }
+                ui.label(
+                    RichText::new("Output changes apply when the next track starts.").color(MUTED),
+                );
+                #[cfg(windows)]
+                if ui
+                    .checkbox(
+                        &mut self.library.audio.wasapi_exclusive,
+                        "Prefer WASAPI exclusive output",
+                    )
+                    .changed()
+                {
+                    self.save();
+                    self.message =
+                        "WASAPI exclusive preference applies when the next track starts.".into();
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(
+                            &mut self.library.audio.equalizer_enabled,
+                            "Enable equalizer",
+                        )
+                        .changed()
+                    {
+                        self.library.audio.sanitize();
+                        self.save();
+                        self.apply_audio_settings();
+                    }
+                    if ui.button("Reset EQ").clicked() {
+                        self.library.audio.equalizer_enabled = false;
+                        self.library.audio.equalizer_bands = vec![0.0; 7];
+                        self.library.audio.stereo_balance = 0.0;
+                        self.save();
+                        self.apply_audio_settings();
+                    }
+                });
+                let current_preset = store::audio_presets()
+                    .iter()
+                    .find(|(_, bands)| self.library.audio.equalizer_bands.as_slice() == bands)
+                    .map_or("Custom", |(name, _)| *name);
+                egui::ComboBox::from_id_salt("equalizer-preset")
+                    .selected_text(current_preset)
+                    .show_ui(ui, |ui| {
+                        for (name, bands) in store::audio_presets() {
+                            if ui
+                                .selectable_label(current_preset == *name, *name)
+                                .clicked()
+                            {
+                                self.library.audio.equalizer_bands = bands.to_vec();
+                                self.library.audio.equalizer_enabled = true;
+                                self.save();
+                                self.apply_audio_settings();
+                            }
+                        }
+                    });
+                for (index, frequency) in [
+                    "60 Hz", "150 Hz", "400 Hz", "1 kHz", "2.5 kHz", "6 kHz", "14 kHz",
+                ]
+                .iter()
+                .enumerate()
+                {
+                    let mut gain = self.library.audio.equalizer_bands[index];
+                    ui.horizontal(|ui| {
+                        ui.label(*frequency);
+                        if ui
+                            .add(egui::Slider::new(&mut gain, -12.0..=12.0).suffix(" dB"))
+                            .changed()
+                        {
+                            self.library.audio.equalizer_bands[index] = gain;
+                            self.library.audio.equalizer_enabled = true;
+                            self.save();
+                            self.apply_audio_settings();
+                        }
+                    });
+                }
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.library.audio.stereo_balance, -1.0..=1.0)
+                            .text("Stereo balance"),
+                    )
+                    .changed()
+                {
+                    self.library.audio.sanitize();
+                    self.save();
+                    self.apply_audio_settings();
+                }
+                ui.label(RichText::new("Bands and balance update the active mpv filter chain. Output device and WASAPI mode apply to the next track.").color(MUTED));
+                ui.label(
+                    RichText::new(format!(
+                        "System media controls: {}",
+                        if self.integrations.available() {
+                            "available"
+                        } else {
+                            "unavailable"
+                        }
+                    ))
+                    .color(MUTED),
+                );
                 ui.horizontal(|ui| {
                     ui.label("Playback speed");
                     if ui
@@ -1577,22 +2239,49 @@ impl YTDugem {
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                if let Some(a) = &self.account {
+                ui.label(heading("Saved accounts", 16.0));
+                for saved in self.saved_accounts.clone() {
+                    ui.horizontal(|ui| {
+                        let label = format!("{}{}", saved.account.name, if saved.active { " · Active" } else { "" });
+                        if ui.add_enabled(!saved.active && !self.account_busy, egui::Button::new(label)).clicked() {
+                            self.select_account(saved.id.clone());
+                        }
+                        if !saved.account.email.is_empty() {
+                            ui.label(RichText::new(&saved.account.email).color(MUTED));
+                        }
+                        if ui.add_enabled(!self.account_busy, egui::Button::new("Remove")).clicked() {
+                            self.remove_account(saved.id);
+                        }
+                    });
+                }
+                if let Some(a) = self.account.clone() {
                     ui.label(heading(&a.name, 20.0));
                     if !a.email.is_empty() {
                         ui.label(RichText::new(&a.email).color(MUTED));
                     }
+                    if !self.adding_account && ui.button("Add another account").clicked() {
+                        self.adding_account = true;
+                    }
                     if ui.button("Sign out").clicked() {
                         self.login_cancel.store(true, Ordering::SeqCst);
                         self.account_request += 1;
-                        self.account = None;
-                        if let Err(e) = auth::logout() {
-                            self.message = format!("Sign out failed: {e:#}");
+                        match auth::logout() {
+                            Ok(()) => {
+                                self.account = None;
+                                self.adding_account = false;
+                                self.invalidate_account_results();
+                                self.load_home();
+                                self.message = "Signed out".into();
+                                self.open_accounts();
+                            }
+                            Err(e) => self.message = format!("Sign out failed: {e:#}"),
                         }
-                        self.load_home();
-                        self.message = "Signed out".into();
                     }
-                } else {
+                }
+                if self.account.is_none() || self.adding_account {
+                    if self.account.is_some() && ui.button("Stop adding account").clicked() {
+                        self.adding_account = false;
+                    }
                     ui.label("Sign in to access your YouTube Music library and history.");
                     if ui
                         .add_enabled(!self.account_busy, egui::Button::new("Open default browser"))
@@ -1600,7 +2289,7 @@ impl YTDugem {
                     {
                         self.open_default_login();
                     }
-                    ui.label("Sign in to YouTube Music in your browser, then paste your cookies below to connect YTDugem.");
+                    ui.label("Automatic sign-in opens an isolated browser window. Finish signing in there, then CLOSE that window to finish secure cookie capture. The default-browser option only opens the site.");
                     if ui
                         .add_enabled(!self.account_busy, egui::Button::new("Automatic sign-in (Chrome/Edge/Chromium)"))
                         .clicked()
@@ -1615,6 +2304,7 @@ impl YTDugem {
                         .show(ui, |ui| {
                             ui.add(
                                 egui::TextEdit::multiline(&mut self.cookie_input)
+                                    .password(true)
                                     .desired_rows(4)
                                     .desired_width(420.0),
                             );
@@ -1841,6 +2531,42 @@ impl YTDugem {
                         self.volume_slider(&mut panel, right.width(), "expanded-volume");
                     }
                     PlayerTab::Lyrics => {
+                        panel.horizontal(|ui| {
+                            ui.label("Lyrics source");
+                            let selected = self.lyrics_override.as_deref().unwrap_or("auto");
+                            egui::ComboBox::from_id_salt("lyrics-provider")
+                                .selected_text(if selected == "auto" {
+                                    "Automatic (enabled order)"
+                                } else {
+                                    services::lyrics::PROVIDERS
+                                        .iter()
+                                        .find(|p| p.id == selected)
+                                        .map_or(selected, |p| p.label)
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.lyrics_override,
+                                        None,
+                                        "Automatic (enabled order)",
+                                    );
+                                    for provider in services::lyrics::PROVIDERS {
+                                        ui.selectable_value(
+                                            &mut self.lyrics_override,
+                                            Some(provider.id.to_owned()),
+                                            provider.label,
+                                        );
+                                    }
+                                });
+                            if ui.button("Load").clicked() {
+                                self.request_lyrics(self.lyrics_override.clone());
+                            }
+                            if !self.lyrics_provider.is_empty() {
+                                ui.label(
+                                    RichText::new(format!("From {}", self.lyrics_provider))
+                                        .color(MUTED),
+                                );
+                            }
+                        });
                         egui::ScrollArea::vertical()
                             .max_height(right.height())
                             .stick_to_bottom(false)
@@ -1856,20 +2582,58 @@ impl YTDugem {
                                     if active {
                                         active_idx = Some(i);
                                     }
-                                    let r = u.add(
-                                        egui::Label::new(
-                                            heading(&line.text, if active { 38.0 } else { 28.0 })
+                                    let r = if line.words.is_empty() {
+                                        let r = u.add(
+                                            egui::Label::new(
+                                                heading(
+                                                    &line.text,
+                                                    if active { 38.0 } else { 28.0 },
+                                                )
                                                 .color(if active {
                                                     WHITE
                                                 } else {
                                                     Color32::from_gray(145)
                                                 }),
-                                        )
-                                        .sense(egui::Sense::click()),
-                                    );
-                                    if r.clicked() {
-                                        seek_to = Some(line.time);
-                                    }
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        );
+                                        if r.clicked() {
+                                            seek_to = Some(line.time);
+                                        }
+                                        r
+                                    } else {
+                                        u.horizontal_wrapped(|u| {
+                                            for word in &line.words {
+                                                let word_active = self.status.position
+                                                    >= word.start
+                                                    && self.status.position < word.end;
+                                                let r = u.add(
+                                                    egui::Label::new(
+                                                        heading(
+                                                            &word.text,
+                                                            if word_active {
+                                                                38.0
+                                                            } else if active {
+                                                                30.0
+                                                            } else {
+                                                                24.0
+                                                            },
+                                                        )
+                                                        .color(if word_active {
+                                                            WHITE
+                                                        } else {
+                                                            Color32::from_gray(145)
+                                                        }),
+                                                    )
+                                                    .sense(egui::Sense::click()),
+                                                );
+                                                if r.clicked() {
+                                                    seek_to = Some(word.start);
+                                                }
+                                            }
+                                        })
+                                        .response
+                                    };
                                     if active && self.follow_lyrics && self.active_lyric != Some(i)
                                     {
                                         r.scroll_to_me(Some(egui::Align::Center));
@@ -1890,6 +2654,9 @@ impl YTDugem {
                                         })
                                         .color(MUTED),
                                     );
+                                    if u.button("Retry lyrics").clicked() {
+                                        self.request_lyrics(self.lyrics_override.clone());
+                                    }
                                 }
                             });
                     }
@@ -2004,6 +2771,9 @@ impl YTDugem {
 impl eframe::App for YTDugem {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.events(ctx);
+        if services::take_sign_in_rejected() {
+            self.message = "Your YouTube sign-in has expired, so public music is shown. Open your account to sign in again.".into();
+        }
         let typing = ctx.wants_keyboard_input();
         let (search, local, quit, escape) = ctx.input_mut(|i| {
             (
@@ -2109,6 +2879,7 @@ impl eframe::App for YTDugem {
         }
         self.account_dialog(ctx);
         ctx.request_repaint_after(Duration::from_millis(100));
+        self.screenshot_step(ctx);
     }
 }
 
@@ -2208,6 +2979,30 @@ fn configure_style(ctx: &egui::Context) {
         .get_mut(&egui::FontFamily::Proportional)
         .unwrap()
         .insert(0, "inter".into());
+    // Inter has no CJK glyphs; fall back to fonts Windows ships so Japanese/Chinese/Korean
+    // titles render instead of empty boxes. One font per script, first one found wins.
+    let groups: [&[&str]; 3] = [
+        &[
+            r"C:\Windows\Fonts\YuGothM.ttc",
+            r"C:\Windows\Fonts\meiryo.ttc",
+            r"C:\Windows\Fonts\msgothic.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        ],
+        &[r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simsun.ttc"],
+        &[r"C:\Windows\Fonts\malgun.ttf"],
+    ];
+    for (i, paths) in groups.iter().enumerate() {
+        if let Some(bytes) = paths.iter().find_map(|p| std::fs::read(p).ok()) {
+            let name = format!("cjk-{i}");
+            fonts
+                .font_data
+                .insert(name.clone(), Arc::new(egui::FontData::from_owned(bytes)));
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                fonts.families.entry(family).or_default().push(name.clone());
+            }
+        }
+    }
     let mut bold = vec!["inter-semibold".into()];
     bold.extend(fonts.families[&egui::FontFamily::Proportional].clone());
     fonts

@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod auth;
+mod discord;
 mod integrations;
 mod model;
 mod playback_check;
@@ -23,6 +24,12 @@ fn main() -> eframe::Result {
         return playback_check::run(&args[2].to_string_lossy(), std::path::Path::new(&args[3]))
             .map_err(|e| eframe::Error::AppCreation(e.into()));
     }
+    let screenshot = match args.iter().position(|s| s == "--screenshot") {
+        Some(i) => Some(std::path::PathBuf::from(args.get(i + 1).ok_or_else(
+            || eframe::Error::AppCreation("Usage: YTDugem --screenshot FILE.png".into()),
+        )?)),
+        None => None,
+    };
     #[cfg(target_os = "linux")]
     if std::env::var_os("WSL_DISTRO_NAME").is_some()
         && std::env::var("BITCHORD_WSL_COMPAT").as_deref() != Ok("0")
@@ -53,8 +60,9 @@ fn main() -> eframe::Result {
         .with_title("YTDugem")
         .with_decorations(false)
         .with_app_id("in.ytdugem.desktop")
-        .with_inner_size([1320.0, 850.0])
-        .with_min_inner_size([960.0, 640.0]);
+        // Upstream Main.kt: rememberWindowState(1220.dp x 780.dp), MIN_WINDOW_*_DP = 900 x 600.
+        .with_inner_size([1220.0, 780.0])
+        .with_min_inner_size([900.0, 600.0]);
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }
@@ -65,6 +73,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "YTDugem",
         options,
-        Box::new(|cc| Ok(Box::new(ui::YTDugem::new(cc)))),
+        Box::new(|cc| Ok(Box::new(ui::YTDugem::new(cc).with_screenshot(screenshot)))),
     )
 }
