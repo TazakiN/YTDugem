@@ -2027,9 +2027,12 @@ fn parse_ttml(raw: &str) -> Option<Vec<LyricLine>> {
 }
 
 fn ttml_words(body: &str) -> Vec<TimedWord> {
-    fn leaves(raw: &str, out: &mut Vec<(String, f64, f64)>) {
+    // `gap`: whitespace seen between spans since the last leaf. Apple-style TTML puts the space
+    // between words outside the spans (`<span>Hello</span> <span>world</span>`).
+    fn leaves(raw: &str, out: &mut Vec<(String, f64, f64, bool)>, gap: &mut bool) {
         let mut rest = raw;
         while let Some(open) = rest.find("<span") {
+            *gap |= strip_tags(&rest[..open]).chars().any(char::is_whitespace);
             rest = &rest[open..];
             let Some(gt) = rest.find('>') else { return };
             let attrs = &rest[5..gt];
@@ -2063,14 +2066,14 @@ fn ttml_words(body: &str) -> Vec<TimedWord> {
             };
             let inner = &rest[inner_start..close];
             if inner.contains("<span") {
-                leaves(inner, out);
+                leaves(inner, out, gap);
             } else if let Some(start) = attribute(attrs, "begin").and_then(parse_clock) {
                 let end_time = attribute(attrs, "end")
                     .and_then(parse_clock)
                     .unwrap_or(start);
                 let text = decode_xml(&strip_tags(inner));
                 if !text.trim().is_empty() {
-                    out.push((text, start, end_time.max(start)));
+                    out.push((text, start, end_time.max(start), std::mem::take(gap)));
                 }
             }
             rest = &rest[end..];
@@ -2078,12 +2081,13 @@ fn ttml_words(body: &str) -> Vec<TimedWord> {
     }
 
     let mut runs = Vec::new();
-    leaves(body, &mut runs);
+    leaves(body, &mut runs, &mut false);
     let mut words: Vec<TimedWord> = Vec::new();
     let mut previous_space = false;
-    for (text, start, end) in runs {
+    for (text, start, end, gap) in runs {
         let boundary = words.is_empty()
             || previous_space
+            || gap
             || text.chars().next().is_some_and(char::is_whitespace);
         if boundary {
             words.push(TimedWord {
@@ -2123,7 +2127,10 @@ fn parse_clock(value: &str) -> Option<f64> {
             ((0.0..60.0).contains(&m) && (0.0..60.0).contains(&s))
                 .then_some(h * 3600.0 + m * 60.0 + s)
         } else {
-            None
+            // `m:ss.fff`, as lrc.red writes every time past the first minute ("1:05.231").
+            // Rejecting it gave those lines time 0 and sorted the chorus above the opening.
+            let (m, s) = (h.parse::<f64>().ok()?, rest.parse::<f64>().ok()?);
+            (0.0..60.0).contains(&s).then_some(m * 60.0 + s)
         }
     } else {
         value.parse().ok()
@@ -2284,6 +2291,13 @@ mod tests {
         assert_eq!(result[0].words[1].start, 1.3);
         assert!(parse_ttml(r#"<tt><body><p begin="NaNs">bad</p></body></tt>"#).is_some());
         assert_eq!(parse_clock("-00:00:01.0"), None);
+        assert_eq!(parse_clock("1:05.231"), Some(65.231));
+        assert_eq!(parse_clock("1:65"), None);
+        // lrc.red: plain seconds for the first minute, `m:ss.fff` after it; order must hold.
+        let lines = parse_ttml(r#"<tt><body><p begin="58.783"><span begin="58.783" end="59.1">opening</span></p><p begin="1:05.231"><span begin="1:05.231" end="1:06">chorus</span></p></body></tt>"#).unwrap();
+        assert_eq!(lines[0].text, "opening");
+        assert_eq!(lines[1].time, 65.231);
+        assert_eq!(lines[1].words[0].start, 65.231);
     }
 
     #[test]
@@ -2581,6 +2595,11 @@ mod tests {
         assert_eq!(lines[0].words.len(), 2);
         assert_eq!(lines[0].words[0].start, 1.0);
         assert_eq!(lines[0].words[0].end, 1.7);
+        // lrc.red/Apple style: the space between words sits between the spans.
+        let lines = parse_ttml(r#"<tt><body><p begin="1s"><span begin="1s" end="1.5s">Terdengar</span> <span begin="1.5s" end="2s">lirih</span> <span begin="2s" end="2.4s"><span begin="2s" end="2.2s">bisik</span><span begin="2.2s" end="2.4s">anmu</span></span></p></body></tt>"#).unwrap();
+        assert_eq!(lines[0].text, "Terdengar lirih bisikanmu");
+        assert_eq!(lines[0].words.len(), 3);
+        assert_eq!(lines[0].words[2].start, 2.0);
     }
 
     #[test]

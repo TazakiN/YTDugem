@@ -23,6 +23,8 @@ pub enum Icon {
     Headphones,
     User,
     Back,
+    Collapse,
+    Raise,
     Close,
     Minimize,
     Maximize,
@@ -263,6 +265,8 @@ pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
             );
         }
         Icon::Back => path(&[(0.65, 0.13), (0.28, 0.5), (0.65, 0.87)], false, false),
+        Icon::Collapse => path(&[(0.15, 0.36), (0.5, 0.68), (0.85, 0.36)], false, false),
+        Icon::Raise => path(&[(0.15, 0.64), (0.5, 0.32), (0.85, 0.64)], false, false),
         Icon::Close => {
             line((0.2, 0.2), (0.8, 0.8));
             line((0.8, 0.2), (0.2, 0.8));

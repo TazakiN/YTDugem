@@ -37,6 +37,22 @@ pub struct Library {
     pub discord_activity_name: String,
     #[serde(default = "discord_button_defaults")]
     pub discord_buttons: [bool; 2],
+    /// Upstream `crossfade_seconds`: 0 (off) to 12, blended equal-power between tracks.
+    #[serde(default)]
+    pub crossfade_seconds: u8,
+    /// Upstream `keepRunningWhenClosed`: closing the window hides it to the tray instead.
+    #[serde(default)]
+    pub close_to_tray: bool,
+    /// Lyrics translation destination tag; blank follows the Windows display language.
+    #[serde(default)]
+    pub translation_language: String,
+    /// One of `services::DOWNLOAD_FORMATS`; unknown values fall back to `best`.
+    #[serde(default = "download_format_default")]
+    pub download_format: String,
+}
+
+fn download_format_default() -> String {
+    "best".into()
 }
 
 fn discord_button_defaults() -> [bool; 2] {
@@ -272,6 +288,10 @@ impl Default for Library {
             discord_enabled: false,
             discord_activity_name: String::new(),
             discord_buttons: discord_button_defaults(),
+            crossfade_seconds: 0,
+            close_to_tray: false,
+            translation_language: String::new(),
+            download_format: download_format_default(),
             download_dir: directories::UserDirs::new()
                 .and_then(|d| d.audio_dir().map(Path::to_path_buf))
                 .unwrap_or_else(|| PathBuf::from("."))

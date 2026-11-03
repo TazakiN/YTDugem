@@ -1545,6 +1545,9 @@ mod tests {
                         );
                         thread::sleep(Duration::from_millis(10));
                     };
+                    // On Windows an accepted socket inherits the listener's non-blocking mode, and
+                    // `read_exact` then fails with WouldBlock whenever the request is not there yet.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();

@@ -9,6 +9,8 @@ mod player;
 mod runtime;
 mod services;
 mod store;
+#[cfg(windows)]
+mod tray;
 mod ui;
 mod widgets;
 
@@ -24,6 +26,7 @@ fn main() -> eframe::Result {
         return playback_check::run(&args[2].to_string_lossy(), std::path::Path::new(&args[3]))
             .map_err(|e| eframe::Error::AppCreation(e.into()));
     }
+    let open_player = args.iter().any(|s| s == "--screenshot-player");
     let screenshot = match args.iter().position(|s| s == "--screenshot") {
         Some(i) => Some(std::path::PathBuf::from(args.get(i + 1).ok_or_else(
             || eframe::Error::AppCreation("Usage: YTDugem --screenshot FILE.png".into()),
@@ -73,6 +76,12 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "YTDugem",
         options,
-        Box::new(|cc| Ok(Box::new(ui::YTDugem::new(cc).with_screenshot(screenshot)))),
+        Box::new(move |cc| {
+            Ok(Box::new(
+                ui::YTDugem::new(cc)
+                    .with_screenshot(screenshot)
+                    .with_player_open(open_player),
+            ))
+        }),
     )
 }

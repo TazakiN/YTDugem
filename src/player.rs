@@ -16,8 +16,8 @@ const EQ_HZ: [u32; 7] = [60, 150, 400, 1000, 2500, 6000, 14000];
 const MAX_IPC_FRAME: usize = 1024 * 1024;
 
 /// A directly playable YouTube stream and the HTTP headers yt-dlp says it needs.
-#[derive(Debug, PartialEq)]
-struct Stream {
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stream {
     url: String,
     headers: Vec<(String, String)>,
 }
@@ -28,6 +28,15 @@ struct Stream {
 /// refuses the stream until `available_at`. A cookie-less `visionos` extraction yields the Opus
 /// audio in ~3 s with no wait. Anything it cannot play (age-restricted, members-only, private)
 /// returns `None`, and the caller falls back to the signed-in hook.
+/// The fast-path stream for a YouTube source; `None` for anything else or when it cannot be
+/// resolved (playback then falls back to mpv's signed-in yt-dlp hook). Blocks; call off the GUI.
+pub fn resolve_stream(source: &str) -> Option<Stream> {
+    (source.starts_with("https://music.youtube.com/")
+        || source.starts_with("https://www.youtube.com/"))
+    .then(|| resolve_youtube(source))
+    .flatten()
+}
+
 fn resolve_youtube(source: &str) -> Option<Stream> {
     let ytdlp = std::env::var_os("BITCHORD_YTDLP").unwrap_or_else(|| "yt-dlp".into());
     let mut cmd = Command::new(ytdlp);
@@ -238,6 +247,19 @@ impl Player {
         speed: f64,
         audio: &crate::store::AudioSettings,
     ) -> Result<()> {
+        self.load_prepared(source, None, volume, speed, audio)
+    }
+
+    /// As [`Self::load_with_audio`], with a stream already resolved by [`resolve_stream`] (the
+    /// upcoming track is prepared while the current one plays, so Next skips extraction).
+    pub fn load_prepared(
+        &mut self,
+        source: &str,
+        prepared: Option<Stream>,
+        volume: f64,
+        speed: f64,
+        audio: &crate::store::AudioSettings,
+    ) -> Result<()> {
         self.stop();
         if source.trim().is_empty() {
             bail!("audio source is empty");
@@ -300,13 +322,7 @@ impl Player {
             self.socket_dir = socket_dir;
         }
 
-        let stream = if source.starts_with("https://music.youtube.com/")
-            || source.starts_with("https://www.youtube.com/")
-        {
-            resolve_youtube(source)
-        } else {
-            None
-        };
+        let stream = prepared.or_else(|| resolve_stream(source));
 
         let mpv = std::env::var_os("BITCHORD_MPV").unwrap_or_else(|| "mpv".into());
         let mut cmd = Command::new(mpv);
@@ -1060,6 +1076,60 @@ mod tests {
         p.stop();
         assert!(p.poll().is_none());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "requires mpv, yt-dlp and internet access to YouTube Music"]
+    fn prepared_streams_start_fast_and_overlap_for_crossfade() {
+        std::env::set_var("BITCHORD_AUDIO_OUTPUT", "null");
+        let audible = |p: &mut Player, until: Instant| loop {
+            let s = p.poll().expect("mpv exited");
+            assert!(!s.errored, "stream could not be opened");
+            if s.position > 0.1 {
+                return s;
+            }
+            assert!(Instant::now() < until, "stream did not start");
+            thread::sleep(Duration::from_millis(20));
+        };
+        let a = "https://music.youtube.com/watch?v=4D7u5KF7SP8";
+        let b = "https://music.youtube.com/watch?v=dQw4w9WgXcQ";
+        let started = Instant::now();
+        let stream = resolve_stream(b).expect("fast-path resolution failed");
+        println!("prepare: {:.2}s", started.elapsed().as_secs_f32());
+
+        let mut outgoing = Player::new();
+        outgoing.load(a, 50.0, 1.0).unwrap();
+        audible(&mut outgoing, Instant::now() + Duration::from_secs(45));
+
+        // What the UI does at a crossfade: start the prepared track silent beside the old one.
+        let started = Instant::now();
+        let mut incoming = Player::new();
+        incoming
+            .load_prepared(b, Some(stream), 0.0, 1.0, &Default::default())
+            .unwrap();
+        audible(&mut incoming, Instant::now() + Duration::from_secs(20));
+        let open = started.elapsed().as_secs_f32();
+        println!("prepared stream audible after {open:.2}s");
+        assert!(
+            open < 2.5,
+            "a prepared stream should skip extraction: {open:.2}s"
+        );
+
+        for t in [0.25_f32, 0.5, 1.0] {
+            let (old, new) = crate::ui::fade_gains(t);
+            outgoing.volume(50.0 * old).unwrap();
+            incoming.volume(50.0 * new).unwrap();
+        }
+        thread::sleep(Duration::from_millis(400));
+        let (o, i) = (outgoing.poll().unwrap(), incoming.poll().unwrap());
+        println!(
+            "volumes after blend: outgoing={:.1} incoming={:.1}",
+            o.volume, i.volume
+        );
+        assert!(o.volume < 1.0 && (i.volume - 50.0).abs() < 0.5);
+        assert!(!o.ended && !i.ended, "both players run during the blend");
+        outgoing.stop();
+        incoming.stop();
     }
 
     #[test]

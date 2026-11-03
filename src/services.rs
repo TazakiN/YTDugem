@@ -12,6 +12,7 @@ use std::{
 };
 
 pub mod lyrics;
+pub mod translate;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LyricLine {
@@ -68,6 +69,12 @@ pub struct Collection {
     pub thumbnail: String,
     pub tracks: Vec<Track>,
     pub continuation: Option<String>,
+    /// The playlist id (without the `VL` browse prefix) when this collection is a playlist.
+    pub playlist_id: Option<String>,
+    /// The account owns it: YouTube sends an editable header only to the owner.
+    pub editable: bool,
+    /// Video id to the playlist entry id (`playlistSetVideoId`) that removal needs.
+    pub set_ids: std::collections::HashMap<String, String>,
 }
 
 fn client() -> Result<reqwest::blocking::Client> {
@@ -319,7 +326,9 @@ pub fn collection(browse_id: &str, params: Option<&str>) -> Result<Collection> {
         b["params"] = json!(p)
     };
     let v = innertube_value("browse", b)?;
-    Ok(parse_collection(&v))
+    let mut collection = parse_collection(&v);
+    collection.playlist_id = browse_id.strip_prefix("VL").map(str::to_owned);
+    Ok(collection)
 }
 pub fn collection_more(token: &str) -> Result<Collection> {
     let v = innertube_value("browse", json!({"continuation":token}))?;
@@ -338,8 +347,160 @@ fn parse_collection(v: &Value) -> Collection {
         thumbnail: thumbnails(header),
         tracks,
         continuation: continuation(v),
+        playlist_id: None,
+        editable: find_renderer(v, "musicEditablePlaylistDetailHeaderRenderer").is_some(),
+        set_ids: set_ids(v),
     }
 }
+/// `playlistItemData` of every playlist row: video id to its entry id. Only rows actually in a
+/// playlist carry one (upstream `InnertubeParser`).
+fn set_ids(v: &Value) -> std::collections::HashMap<String, String> {
+    fn walk(v: &Value, out: &mut std::collections::HashMap<String, String>) {
+        match v {
+            Value::Object(map) => {
+                if let Some(data) = map.get("playlistItemData") {
+                    if let (Some(video), Some(set)) = (
+                        data["videoId"].as_str(),
+                        data["playlistSetVideoId"].as_str(),
+                    ) {
+                        out.entry(video.to_owned())
+                            .or_insert_with(|| set.to_owned());
+                    }
+                }
+                map.values().for_each(|x| walk(x, out));
+            }
+            Value::Array(items) => items.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    walk(v, &mut out);
+    out
+}
+
+/// Playlists in the signed-in account's library (`FEmusic_liked_playlists`): its own and those
+/// it saved. The grid's "New playlist" tile has no browse id and is left out.
+pub fn library_playlists() -> Result<Vec<ShelfItem>> {
+    let v = account_call("browse", json!({"browseId": "FEmusic_liked_playlists"}))?;
+    let mut items = vec![];
+    collect_cards(&v, &mut items);
+    items.retain(|i| i.browse_id.as_deref().is_some_and(|b| b.starts_with("VL")));
+    let mut seen = HashSet::new();
+    items.retain(|i| seen.insert(i.browse_id.clone()));
+    Ok(items)
+}
+
+/// Privacy choices for a new playlist: (API value, label).
+pub const PLAYLIST_PRIVACY: [(&str, &str); 3] = [
+    ("PRIVATE", "Private"),
+    ("UNLISTED", "Unlisted"),
+    ("PUBLIC", "Public"),
+];
+
+/// Create a playlist, optionally seeded with `video_ids` in the same request; returns its id.
+pub fn create_playlist(title: &str, privacy: &str, video_ids: &[String]) -> Result<String> {
+    let title = title.trim();
+    if title.is_empty() {
+        bail!("A playlist needs a name");
+    }
+    if !PLAYLIST_PRIVACY.iter().any(|(p, _)| *p == privacy) {
+        bail!("Unknown playlist privacy {privacy}");
+    }
+    let mut body = json!({"title": title, "description": "", "privacyStatus": privacy});
+    if !video_ids.is_empty() {
+        body["videoIds"] = json!(video_ids);
+    }
+    let v = account_call("playlist/create", body)?;
+    // Normally top-level; sometimes only inside the navigation command (upstream).
+    v["playlistId"]
+        .as_str()
+        .or_else(|| find_string(&v, "playlistId"))
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("Playlist created but YouTube returned no id"))
+}
+
+pub fn delete_playlist(playlist_id: &str) -> Result<()> {
+    account_call(
+        "playlist/delete",
+        json!({"playlistId": playlist_id.trim_start_matches("VL")}),
+    )
+    .map(|_| ())
+}
+
+pub fn rename_playlist(playlist_id: &str, name: &str) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("A playlist needs a name");
+    }
+    edit_playlist(
+        playlist_id,
+        json!([{"action": "ACTION_SET_PLAYLIST_NAME", "playlistName": name}]),
+    )
+    .map(|_| ())
+}
+
+/// Add a track; returns the new entry's set-video-id when YouTube reports it, so the row can be
+/// removed again without reopening the playlist.
+pub fn add_to_playlist(playlist_id: &str, video_id: &str) -> Result<Option<String>> {
+    let v = edit_playlist(
+        playlist_id,
+        json!([{"action": "ACTION_ADD_VIDEO", "addedVideoId": video_id}]),
+    )?;
+    Ok(v["playlistEditResults"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.get("playlistEditVideoAddedResultData"))
+        .find(|d| d["videoId"].as_str() == Some(video_id))
+        .and_then(|d| d["setVideoId"].as_str())
+        .map(str::to_owned))
+}
+
+pub fn remove_from_playlist(playlist_id: &str, video_id: &str, set_id: &str) -> Result<()> {
+    edit_playlist(
+        playlist_id,
+        json!([{"action": "ACTION_REMOVE_VIDEO", "setVideoId": set_id, "removedVideoId": video_id}]),
+    )
+    .map(|_| ())
+}
+
+/// `browse/edit_playlist` answers 200 with a non-success `status` when it refuses (usually a
+/// playlist the account saved but does not own), so the body is checked too.
+fn edit_playlist(playlist_id: &str, actions: Value) -> Result<Value> {
+    let v = account_call(
+        "browse/edit_playlist",
+        json!({"playlistId": playlist_id.trim_start_matches("VL"), "actions": actions}),
+    )?;
+    edit_status(&v)?;
+    Ok(v)
+}
+
+fn edit_status(v: &Value) -> Result<()> {
+    match v["status"].as_str() {
+        None | Some("STATUS_SUCCEEDED") => Ok(()),
+        Some(status) => bail!("YouTube Music refused the playlist edit ({status}); only playlists you own can be edited"),
+    }
+}
+
+/// A request that only makes sense signed in: never retried anonymously.
+fn account_call(endpoint: &str, body: Value) -> Result<Value> {
+    let session = crate::auth::snapshot()
+        .ok_or_else(|| anyhow!("Sign in to YouTube Music to use your playlists"))?;
+    let (status, response) = send_innertube(endpoint, &body, Some(&session))?;
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        SIGN_IN_REJECTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        bail!("Your YouTube sign-in has expired; sign in again to edit playlists");
+    }
+    if !status.is_success() || response.get("error").is_some() {
+        let detail = response
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("no details");
+        bail!("YouTube Music {endpoint} request failed ({status}): {detail}");
+    }
+    Ok(response)
+}
+
 fn find_renderer<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     match v {
         Value::Object(map) => map
@@ -542,6 +703,17 @@ fn files(path: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<()> {
 }
 
 pub(crate) fn run(command: &mut Command, timeout: Duration) -> Result<std::process::Output> {
+    run_streaming(command, timeout, None, &mut |_| {})
+}
+
+/// As [`run`], handing each stdout line to `on_line` as it arrives; setting `cancel` kills the
+/// process.
+pub(crate) fn run_streaming(
+    command: &mut Command,
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<std::process::Output> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -556,24 +728,37 @@ pub(crate) fn run(command: &mut Command, timeout: Duration) -> Result<std::proce
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     // Drain both pipes while waiting: a full pipe must not deadlock a download.
-    let out = thread::spawn(move || {
-        let mut bytes = vec![];
-        stdout
-            .take(8 * 1024 * 1024)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-    });
-    let err = thread::spawn(move || {
-        let mut bytes = vec![];
-        stderr
-            .take(8 * 1024 * 1024)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-    });
+    // Lines from either stream are handed to `on_line` (yt-dlp reports progress on stderr when
+    // `--print` makes it quiet).
+    let (lines_tx, lines) = std::sync::mpsc::channel::<String>();
+    let read = |pipe: Box<dyn Read + Send>, tx: std::sync::mpsc::Sender<String>| {
+        thread::spawn(move || {
+            use std::io::BufRead;
+            let mut bytes = vec![];
+            let mut reader = std::io::BufReader::new(pipe.take(8 * 1024 * 1024));
+            let mut line = String::new();
+            while reader.read_line(&mut line)? > 0 {
+                bytes.extend_from_slice(line.as_bytes());
+                let _ = tx.send(line.trim_end().to_owned());
+                line.clear();
+            }
+            Ok::<_, std::io::Error>(bytes)
+        })
+    };
+    let out = read(Box::new(stdout), lines_tx.clone());
+    let err = read(Box::new(stderr), lines_tx);
     let start = Instant::now();
     let status = loop {
+        for line in lines.try_iter() {
+            on_line(&line);
+        }
         if let Some(status) = child.try_wait()? {
             break status;
+        }
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Cancelled");
         }
         if start.elapsed() > timeout {
             let _ = child.kill();
@@ -582,11 +767,15 @@ pub(crate) fn run(command: &mut Command, timeout: Duration) -> Result<std::proce
         }
         thread::sleep(Duration::from_millis(25));
     };
+    let stdout = out
+        .join()
+        .map_err(|_| anyhow!("Audio output reader failed"))??;
+    for line in lines.try_iter() {
+        on_line(&line);
+    }
     Ok(std::process::Output {
         status,
-        stdout: out
-            .join()
-            .map_err(|_| anyhow!("Audio output reader failed"))??,
+        stdout,
         stderr: err
             .join()
             .map_err(|_| anyhow!("Audio error reader failed"))??,
@@ -707,7 +896,35 @@ fn parse_lyrics(text: &str) -> Vec<LyricLine> {
     lines
 }
 
+/// Download formats offered in Settings: (id, label). `best` keeps YouTube's own audio
+/// (usually Opus) without re-encoding, which is what upstream's quality-first default amounts to
+/// with a YouTube source.
+pub const DOWNLOAD_FORMATS: [(&str, &str); 3] = [
+    ("best", "Original (best quality, no re-encode)"),
+    ("mp3", "MP3 (320 kbps, re-encoded)"),
+    ("m4a", "M4A / AAC (re-encoded)"),
+];
+
+#[cfg(test)]
 pub fn download(track: &Track, directory: &Path) -> Result<PathBuf> {
+    download_with(
+        track,
+        directory,
+        "mp3",
+        &std::sync::atomic::AtomicBool::new(false),
+        &mut |_| {},
+    )
+}
+
+/// Download `track` into `directory` as `format` (see [`DOWNLOAD_FORMATS`]), reporting progress
+/// as a 0..=1 fraction. Setting `cancel` kills the transfer and returns an error.
+pub fn download_with(
+    track: &Track,
+    directory: &Path,
+    format: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+    progress: &mut dyn FnMut(f32),
+) -> Result<PathBuf> {
     fs::create_dir_all(directory)?;
     let directory = fs::canonicalize(directory)?;
     let local = Path::new(&track.source);
@@ -729,58 +946,191 @@ pub fn download(track: &Track, directory: &Path) -> Result<PathBuf> {
     if !track.source.starts_with("https://") {
         bail!("Only local files and HTTPS media can be downloaded");
     }
+    let format = DOWNLOAD_FORMATS
+        .iter()
+        .find(|(id, _)| *id == format)
+        .map_or("best", |(id, _)| id);
+    // As for playback: the cookie-less `visionos` client yields the real audio stream quickly;
+    // signed-in extraction often only offers a 360p video (format 18), whose audio is poorer.
+    // Restricted tracks fail the first attempt and are retried with the account.
+    let fast = download_attempt(track, &directory, format, false, cancel, progress);
+    match fast {
+        Ok(path) => Ok(path),
+        Err(_) if cancel.load(std::sync::atomic::Ordering::SeqCst) => bail!("Download cancelled"),
+        Err(_) => download_attempt(track, &directory, format, true, cancel, progress),
+    }
+}
+
+fn download_attempt(
+    track: &Track,
+    directory: &Path,
+    format: &str,
+    signed_in: bool,
+    cancel: &std::sync::atomic::AtomicBool,
+    progress: &mut dyn FnMut(f32),
+) -> Result<PathBuf> {
     let program = std::env::var_os("BITCHORD_YTDLP").unwrap_or_else(|| "yt-dlp".into());
     let mut command = Command::new(program);
-    let cookies = crate::auth::cookie_file()?;
+    let cookies = if signed_in {
+        crate::auth::cookie_file()?
+    } else {
+        command.args(["--extractor-args", "youtube:player_client=visionos"]);
+        None
+    };
     if let Some(ref file) = cookies {
         command.arg("--cookies").arg(file.path());
     }
+    command.args([
+        "--no-warnings",
+        // `--print` implies `--quiet`, which hides progress; `--progress` brings it back (on stderr).
+        "--progress",
+        "--newline",
+        "--progress-template",
+        "download:YTDUGEM-PROGRESS %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s",
+        "--no-playlist",
+        "--no-overwrites",
+        "--restrict-filenames",
+        "--socket-timeout",
+        "20",
+        "--retries",
+        "2",
+        "-f",
+        "bestaudio/best",
+        "-x",
+        "--audio-format",
+        format,
+    ]);
+    if format == "mp3" {
+        command.args(["--audio-quality", "0"]);
+    }
     command
-        .args([
-            "--no-warnings",
-            "--no-progress",
-            "--no-playlist",
-            "--no-overwrites",
-            "--restrict-filenames",
-            "--socket-timeout",
-            "20",
-            "--retries",
-            "2",
-            "-x",
-            "--audio-format",
-            "mp3",
-            "--audio-quality",
-            "0",
-            "--embed-metadata",
-            "--print",
-            "after_move:filepath",
-            "-o",
-        ])
+        .args(["--embed-metadata", "--print", "after_move:filepath", "-o"])
         .arg(directory.join("%(title).150B [%(id)s].%(ext)s"))
         .arg("--")
         .arg(&track.source);
-    let out = run(&mut command, Duration::from_secs(600))?;
+    let out = run_streaming(
+        &mut command,
+        Duration::from_secs(900),
+        Some(cancel),
+        &mut |line| {
+            if let Some(fraction) = parse_progress(line) {
+                progress(fraction);
+            }
+        },
+    )?;
     if !out.status.success() {
         bail!(
             "Download failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .filter(|l| !l.starts_with("YTDUGEM-PROGRESS") && !l.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
     let path = String::from_utf8_lossy(&out.stdout)
         .lines()
-        .last()
+        .rfind(|l| !l.starts_with("YTDUGEM-PROGRESS"))
         .map(PathBuf::from)
         .filter(|p| p.is_file())
         .ok_or_else(|| anyhow!("Download completed but no audio file was reported"))?;
-    if !fs::canonicalize(&path)?.starts_with(&directory) {
+    if !fs::canonicalize(&path)?.starts_with(directory) {
         bail!("Download reported a path outside your download folder");
     }
+    progress(1.0);
     Ok(path)
+}
+
+/// `YTDUGEM-PROGRESS <downloaded> <total>` from the progress template; "NA" when unknown.
+fn parse_progress(line: &str) -> Option<f32> {
+    let mut parts = line.strip_prefix("YTDUGEM-PROGRESS ")?.split_whitespace();
+    let done: f64 = parts.next()?.parse().ok()?;
+    let total: f64 = parts.next()?.parse().ok()?;
+    (total > 0.0).then(|| (done / total).clamp(0.0, 1.0) as f32)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires yt-dlp, FFmpeg and internet access to YouTube"]
+    fn downloads_with_progress_and_cancels() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = std::env::temp_dir().join(format!("ytdugem-dl-{}", std::process::id()));
+        let track = Track {
+            id: "jNQXAC9IVRw".into(),
+            source: "https://music.youtube.com/watch?v=jNQXAC9IVRw".into(),
+            ..Default::default()
+        };
+        let mut seen = vec![];
+        let started = Instant::now();
+        let path = download_with(&track, &dir, "best", &AtomicBool::new(false), &mut |f| {
+            seen.push(f)
+        })
+        .unwrap();
+        println!(
+            "downloaded {} in {:.1}s, {} progress updates, last {:?}",
+            path.display(),
+            started.elapsed().as_secs_f32(),
+            seen.len(),
+            seen.last()
+        );
+        assert!(path.is_file() && fs::metadata(&path).unwrap().len() > 10_000);
+        assert_eq!(seen.last(), Some(&1.0));
+        assert!(seen.windows(2).all(|w| w[0] <= w[1] || w[1] == 0.0));
+
+        let cancel = AtomicBool::new(false);
+        let started = Instant::now();
+        let other = Track {
+            id: "dQw4w9WgXcQ".into(),
+            source: "https://music.youtube.com/watch?v=dQw4w9WgXcQ".into(),
+            ..Default::default()
+        };
+        let result = download_with(&other, &dir, "mp3", &cancel, &mut |_| {
+            cancel.store(true, Ordering::SeqCst)
+        });
+        println!(
+            "cancelled after {:.1}s: {:?}",
+            started.elapsed().as_secs_f32(),
+            result.as_ref().err()
+        );
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn owned_playlists_expose_entry_ids_and_refusals_are_errors() {
+        let owned = json!({
+            "header":{"musicEditablePlaylistDetailHeaderRenderer":{"header":{"musicResponsiveHeaderRenderer":{"title":{"simpleText":"Mine"}}}}},
+            "contents":[{"musicResponsiveListItemRenderer":{
+                "playlistItemData":{"videoId":"abcdefghijk","playlistSetVideoId":"SET1"},
+                "flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Song"}]}}}],
+                "overlay":{"musicItemThumbnailOverlayRenderer":{"content":{"musicPlayButtonRenderer":{"playNavigationEndpoint":{"watchEndpoint":{"videoId":"abcdefghijk"}}}}}}
+            }}]
+        });
+        let c = parse_collection(&owned);
+        assert!(c.editable);
+        assert_eq!(
+            c.set_ids.get("abcdefghijk").map(String::as_str),
+            Some("SET1")
+        );
+        let saved =
+            json!({"header":{"musicResponsiveHeaderRenderer":{"title":{"simpleText":"Theirs"}}}});
+        assert!(!parse_collection(&saved).editable);
+
+        assert!(edit_status(&json!({"status":"STATUS_SUCCEEDED"})).is_ok());
+        assert!(edit_status(&json!({})).is_ok());
+        assert!(edit_status(&json!({"status":"STATUS_FAILED"})).is_err());
+    }
+
+    #[test]
+    fn parses_download_progress_template() {
+        assert_eq!(parse_progress("YTDUGEM-PROGRESS 512 1024"), Some(0.5));
+        assert_eq!(parse_progress("YTDUGEM-PROGRESS 2048 1024.0"), Some(1.0));
+        assert_eq!(parse_progress("YTDUGEM-PROGRESS 100 NA"), None);
+        assert_eq!(parse_progress("YTDUGEM-PROGRESS 0 0"), None);
+        assert_eq!(parse_progress(r"C:\Music\song.opus"), None);
+    }
     #[test]
     fn parses_lyrics_and_rejects_invalid_timestamps() {
         assert_eq!(
