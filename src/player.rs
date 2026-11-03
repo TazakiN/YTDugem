@@ -22,21 +22,74 @@ pub struct Stream {
     headers: Vec<(String, String)>,
 }
 
-/// Fast path for YouTube playback. Letting mpv's yt-dlp hook extract with the account cookies
-/// takes ~11 s to first audio: yt-dlp drops its quickest client (`visionos` accepts no cookies),
-/// the remaining clients are slower, often only offer a 360p video (format 18), and YouTube then
-/// refuses the stream until `available_at`. A cookie-less `visionos` extraction yields the Opus
-/// audio in ~3 s with no wait. Anything it cannot play (age-restricted, members-only, private)
-/// returns `None`, and the caller falls back to the signed-in hook.
+/// How long a resolved stream is reused (Meiro's `urlTTL`). YouTube's media URLs stay valid for
+/// hours; half an hour keeps replays, Previous and re-picks instant without leaning on that.
+const STREAM_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// Resolved streams by video ID, so playing a track again needs no request at all.
+static STREAMS: std::sync::Mutex<Vec<(String, Stream, Instant)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// The fast-path stream for a YouTube source; `None` for anything else or when it cannot be
 /// resolved (playback then falls back to mpv's signed-in yt-dlp hook). Blocks; call off the GUI.
+///
+/// In order, as Meiro resolves audio: a stream resolved in the last half hour; one InnerTube
+/// `player` request as the visionOS app (~0.2–0.4 s); yt-dlp with that same client (~3 s, it
+/// knows more ways to ask).
 pub fn resolve_stream(source: &str) -> Option<Stream> {
-    (source.starts_with("https://music.youtube.com/")
-        || source.starts_with("https://www.youtube.com/"))
-    .then(|| resolve_youtube(source))
-    .flatten()
+    let id = video_id(source)?;
+    if let Some(stream) = cached_stream(&id) {
+        return Some(stream);
+    }
+    let stream = match crate::services::audio_stream(&id) {
+        Ok((url, _)) => Some(Stream {
+            url,
+            headers: vec![(
+                "User-Agent".into(),
+                crate::services::BROWSER_USER_AGENT.into(),
+            )],
+        }),
+        Err(_) => resolve_youtube(source),
+    }?;
+    if let Ok(mut cache) = STREAMS.lock() {
+        cache.retain(|(key, _, at)| *key != id && at.elapsed() < STREAM_TTL);
+        cache.push((id, stream.clone(), Instant::now()));
+    }
+    Some(stream)
 }
 
+/// Drop a cached stream that turned out not to play, so the next try resolves it afresh.
+pub fn forget_stream(source: &str) {
+    if let (Some(id), Ok(mut cache)) = (video_id(source), STREAMS.lock()) {
+        cache.retain(|(key, _, _)| *key != id);
+    }
+}
+
+fn cached_stream(id: &str) -> Option<Stream> {
+    let cache = STREAMS.lock().ok()?;
+    cache
+        .iter()
+        .find(|(key, _, at)| key == id && at.elapsed() < STREAM_TTL)
+        .map(|(_, stream, _)| stream.clone())
+}
+
+/// The video ID of a YouTube Music or YouTube watch URL.
+fn video_id(source: &str) -> Option<String> {
+    let rest = source
+        .strip_prefix("https://music.youtube.com/watch?")
+        .or_else(|| source.strip_prefix("https://www.youtube.com/watch?"))?;
+    rest.split('&')
+        .find_map(|pair| pair.strip_prefix("v="))
+        .filter(|id| id.len() == 11)
+        .map(str::to_owned)
+}
+
+/// Fallback: yt-dlp's cookie-less `visionos` extraction. Letting mpv's yt-dlp hook extract with
+/// the account cookies takes ~11 s to first audio: yt-dlp drops its quickest client (`visionos`
+/// accepts no cookies), the remaining clients are slower, often only offer a 360p video
+/// (format 18), and YouTube then refuses the stream until `available_at`. Anything this cannot
+/// play (age-restricted, members-only, private) returns `None`, and the caller falls back to the
+/// signed-in hook.
 fn resolve_youtube(source: &str) -> Option<Stream> {
     let ytdlp = std::env::var_os("BITCHORD_YTDLP").unwrap_or_else(|| "yt-dlp".into());
     let mut cmd = Command::new(ytdlp);
@@ -1130,6 +1183,51 @@ mod tests {
         assert!(!o.ended && !i.ended, "both players run during the blend");
         outgoing.stop();
         incoming.stop();
+    }
+
+    #[test]
+    fn video_ids_come_from_watch_urls_only() {
+        use super::video_id;
+        assert_eq!(
+            video_id("https://music.youtube.com/watch?v=dQw4w9WgXcQ").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(
+            video_id("https://www.youtube.com/watch?list=PL1&v=dQw4w9WgXcQ&t=3").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(video_id("https://music.youtube.com/watch?v=short"), None);
+        assert_eq!(video_id(r"C:\Music\song.mp3"), None);
+    }
+
+    #[test]
+    #[ignore = "requires mpv and internet access to YouTube Music"]
+    fn selecting_a_track_to_audible_audio() {
+        std::env::set_var("BITCHORD_AUDIO_OUTPUT", "null");
+        let source = "https://music.youtube.com/watch?v=4D7u5KF7SP8";
+        for label in ["cold", "cached"] {
+            let started = Instant::now();
+            let stream = resolve_stream(source).expect("resolve failed");
+            let resolved = started.elapsed().as_secs_f32();
+            let mut p = Player::new();
+            p.load_prepared(source, Some(stream), 50.0, 1.0, &Default::default())
+                .unwrap();
+            let until = Instant::now() + Duration::from_secs(20);
+            loop {
+                let s = p.poll().expect("mpv exited");
+                assert!(!s.errored, "stream could not be opened");
+                if s.position > 0.05 {
+                    break;
+                }
+                assert!(Instant::now() < until, "no audio");
+                thread::sleep(Duration::from_millis(10));
+            }
+            println!(
+                "{label}: resolved {resolved:.2}s, audible {:.2}s after selection",
+                started.elapsed().as_secs_f32()
+            );
+            p.stop();
+        }
     }
 
     #[test]

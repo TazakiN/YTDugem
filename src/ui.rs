@@ -2775,6 +2775,10 @@ impl YTDugem {
                     self.message = error;
                 }
                 if s.errored {
+                    // A cached stream URL that failed must not be reused on the next try.
+                    if let Some(t) = &self.current {
+                        crate::player::forget_stream(&t.source);
+                    }
                     self.stop();
                     self.message="Audio could not be opened. Check your connection or sign-in, then try again.".into();
                 } else if s.ended {
