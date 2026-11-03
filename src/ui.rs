@@ -4031,6 +4031,90 @@ impl YTDugem {
             _ => self.lyrics_panel(ui, inner),
         }
     }
+    /// The lyrics source beside the heading: the provider in use (or the one asked for), which
+    /// opens the list of sources in place; picking one loads the lyrics from it.
+    fn lyrics_source_picker(&mut self, ui: &mut egui::Ui) {
+        let label = if !self.lyrics_provider.is_empty() {
+            self.lyrics_provider.clone()
+        } else {
+            self.lyrics_override
+                .as_deref()
+                .and_then(|id| services::lyrics::PROVIDERS.iter().find(|p| p.id == id))
+                .map_or("Automatic".to_owned(), |p| p.label.to_owned())
+        };
+        let font = FontId::proportional(13.0);
+        let galley = ui.painter().layout_no_wrap(label, font, MUTED);
+        let size = Vec2::new(galley.size().x + 30.0, 26.0);
+        let (rect, chip) = ui.allocate_exact_size(size, egui::Sense::click());
+        let popup = ui.make_persistent_id("lyrics-source-popup");
+        let open = ui.memory(|m| m.is_popup_open(popup));
+        let lit = chip.hovered() || open;
+        if lit {
+            ui.painter()
+                .rect_filled(rect, 13.0, Color32::from_white_alpha(16));
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let color = if lit { WHITE } else { MUTED };
+        ui.painter().galley(
+            Pos2::new(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+        widgets::paint(
+            ui.painter(),
+            Icon::Collapse,
+            Rect::from_center_size(
+                Pos2::new(rect.right() - 12.0, rect.center().y),
+                Vec2::splat(10.0),
+            ),
+            color,
+        );
+        let chip = chip.on_hover_text("Choose where the lyrics come from");
+        if chip.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup));
+        }
+        let mut pick = None;
+        egui::popup_below_widget(
+            ui,
+            popup,
+            &chip,
+            egui::PopupCloseBehavior::CloseOnClick,
+            |ui| {
+                ui.set_min_width(230.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.spacing_mut().button_padding = Vec2::new(8.0, 5.0);
+                // Fits under the name rather than being pushed up over it: the list scrolls.
+                let room = ui.ctx().screen_rect().bottom() - chip.rect.bottom() - 24.0;
+                egui::ScrollArea::vertical()
+                    .max_height(room.max(120.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(230.0);
+                        let current = self.lyrics_override.clone();
+                        if ui
+                            .selectable_label(current.is_none(), "Automatic (enabled order)")
+                            .clicked()
+                        {
+                            pick = Some(None);
+                        }
+                        ui.separator();
+                        for provider in services::lyrics::PROVIDERS {
+                            let chosen = current.as_deref() == Some(provider.id);
+                            if ui
+                                .selectable_label(chosen, provider.label)
+                                .on_hover_text(provider.detail)
+                                .clicked()
+                            {
+                                pick = Some(Some(provider.id.to_owned()));
+                            }
+                        }
+                    });
+            },
+        );
+        if let Some(choice) = pick {
+            self.lyrics_override = choice.clone();
+            self.request_lyrics(choice);
+        }
+    }
     fn lyrics_panel(&mut self, ui: &mut egui::Ui, rect: Rect) {
         region(ui, rect, |panel| {
             soft_controls(panel);
@@ -4039,71 +4123,51 @@ impl YTDugem {
                 egui::Layout::left_to_right(Align::Center),
                 |ui| {
                     ui.label(heading("Lyrics", 18.0));
-                    if !self.lyrics_provider.is_empty() {
-                        ui.label(
-                            RichText::new(format!("· {}", self.lyrics_provider))
-                                .color(MUTED)
-                                .size(13.0),
-                        );
-                    }
-                    if !self.lyrics.is_empty() {
-                        ui.add_space(6.0);
-                        let on = self.show_translation;
-                        if ui
-                            .selectable_label(on, toggle_text("Translate", on))
-                            .on_hover_text("Show the lyrics in your translation language")
-                            .clicked()
-                        {
-                            self.show_translation = !on;
-                            if self.show_translation {
-                                self.request_translation();
-                            }
-                        }
-                        if self.show_translation && self.translating {
-                            ui.spinner();
-                        } else if let Some((_, _, Translation::SameLanguage(_))) =
-                            self.translation.as_ref().filter(|_| self.show_translation)
-                        {
-                            ui.label(
-                                RichText::new("Already in your language")
-                                    .color(MUTED)
-                                    .size(12.0),
-                            );
-                        }
-                    }
+                    ui.add_space(4.0);
+                    self.lyrics_source_picker(ui);
                     ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
                         if ui
-                            .add_enabled(self.current.is_some(), egui::Button::new("Reload"))
-                            .on_hover_text("Search the selected source again")
+                            .add_enabled_ui(self.current.is_some(), |ui| {
+                                widgets::button(ui, Icon::Refresh, 32.0, false, "Reload lyrics")
+                            })
+                            .inner
                             .clicked()
                         {
                             self.request_lyrics(self.lyrics_override.clone());
                         }
-                        let selected = self.lyrics_override.as_deref().unwrap_or("auto");
-                        egui::ComboBox::from_id_salt("lyrics-provider")
-                            .width(150.0)
-                            .selected_text(if selected == "auto" {
-                                "Automatic"
-                            } else {
-                                services::lyrics::PROVIDERS
-                                    .iter()
-                                    .find(|p| p.id == selected)
-                                    .map_or(selected, |p| p.label)
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.lyrics_override,
-                                    None,
-                                    "Automatic (enabled order)",
-                                );
-                                for provider in services::lyrics::PROVIDERS {
-                                    ui.selectable_value(
-                                        &mut self.lyrics_override,
-                                        Some(provider.id.to_owned()),
-                                        provider.label,
-                                    );
+                        if !self.lyrics.is_empty() {
+                            let on = self.show_translation;
+                            if widgets::button(
+                                ui,
+                                Icon::Translate,
+                                32.0,
+                                on,
+                                if on {
+                                    "Show the original lyrics"
+                                } else {
+                                    "Translate the lyrics"
+                                },
+                            )
+                            .clicked()
+                            {
+                                self.show_translation = !on;
+                                if self.show_translation {
+                                    self.request_translation();
                                 }
-                            });
+                            }
+                            if self.show_translation && self.translating {
+                                ui.spinner();
+                            } else if let Some((_, _, Translation::SameLanguage(_))) =
+                                self.translation.as_ref().filter(|_| self.show_translation)
+                            {
+                                ui.label(
+                                    RichText::new("Already in your language")
+                                        .color(MUTED)
+                                        .size(12.0),
+                                );
+                            }
+                        }
                     });
                 },
             );

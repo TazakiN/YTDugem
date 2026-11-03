@@ -25,6 +25,8 @@ pub enum Icon {
     Back,
     Collapse,
     Raise,
+    Translate,
+    Refresh,
     Close,
 }
 
@@ -190,18 +192,22 @@ pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
             line((0.65, 0.3), (0.59, 0.55));
         }
         Icon::Heart => {
-            let pts = (0..40)
-                .map(|i| {
-                    let t = i as f32 * std::f32::consts::TAU / 40.0;
-                    let x = 16.0 * t.sin().powi(3);
-                    let y = 13.0 * t.cos()
-                        - 5.0 * (2.0 * t).cos()
-                        - 2.0 * (3.0 * t).cos()
-                        - (4.0 * t).cos();
-                    point(0.5 + x / 35.0, 0.43 - y / 35.0)
-                })
-                .collect();
-            p.add(egui::Shape::closed_line(pts, Stroke::new(1.8_f32, color)));
+            // Two open halves, notch to tip. As one closed line, the stroke's miter joins at the
+            // notch and the tip shot out as long spikes that read as stray lines.
+            let at = |i: usize| {
+                let t = i as f32 * std::f32::consts::TAU / 40.0;
+                let x = 16.0 * t.sin().powi(3);
+                let y = 13.0 * t.cos()
+                    - 5.0 * (2.0 * t).cos()
+                    - 2.0 * (3.0 * t).cos()
+                    - (4.0 * t).cos();
+                point(0.5 + x / 35.0, 0.43 - y / 35.0)
+            };
+            let stroke = Stroke::new(1.8_f32, color);
+            p.add(egui::Shape::line((0..=20).map(at).collect(), stroke));
+            p.add(egui::Shape::line((20..=40).map(at).collect(), stroke));
+            p.circle_filled(at(0), 0.9, color);
+            p.circle_filled(at(20), 0.9, color);
         }
         Icon::Volume => {
             path(
@@ -266,6 +272,40 @@ pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
         Icon::Back => path(&[(0.65, 0.13), (0.28, 0.5), (0.65, 0.87)], false, false),
         Icon::Collapse => path(&[(0.15, 0.36), (0.5, 0.68), (0.85, 0.36)], false, false),
         Icon::Raise => path(&[(0.15, 0.64), (0.5, 0.32), (0.85, 0.64)], false, false),
+        Icon::Translate => {
+            // The common "文A" translation glyph; the bundled fonts include CJK.
+            p.text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                "文A",
+                egui::FontId::proportional(r.height() * 0.95),
+                color,
+            );
+        }
+        Icon::Refresh => {
+            // A circular arrow: an open arc with its head at the top right.
+            let centre = point(0.5, 0.5);
+            let radius = r.width() * 0.36;
+            let at = |deg: f32| {
+                let a = deg.to_radians();
+                Pos2::new(centre.x + radius * a.cos(), centre.y + radius * a.sin())
+            };
+            let arc: Vec<Pos2> = (0..=24)
+                .map(|i| at(-60.0 + 290.0 * i as f32 / 24.0))
+                .collect();
+            p.add(egui::Shape::line(arc, Stroke::new(1.8_f32, color)));
+            let tip = at(-60.0);
+            let s = r.width() * 0.2;
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    tip + Vec2::new(-s * 0.2, -s),
+                    tip + Vec2::new(s, 0.1 * s),
+                    tip + Vec2::new(-s * 0.6, s * 0.55),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+        }
         Icon::Close => {
             line((0.2, 0.2), (0.8, 0.8));
             line((0.8, 0.2), (0.2, 0.8));
