@@ -101,6 +101,152 @@ fn send_innertube(
     Ok((status, response.json().unwrap_or(Value::Null)))
 }
 
+/// The user agent for YouTube's media servers, as a desktop browser sends it.
+pub const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const VISIONOS_VERSION: &str = "1.02";
+const VISIONOS_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+
+/// The anonymous visit the player requests belong to. YouTube answers a player request that
+/// carries no visitor with a bot check, so one is fetched once and reused.
+static VISITOR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+fn visitor_data(client: &reqwest::blocking::Client) -> Result<String> {
+    if let Some(v) = VISITOR
+        .lock()
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.clone())
+    {
+        return Ok(v);
+    }
+    let body = json!({"context": {"client": {
+        "clientName": "WEB_REMIX", "clientVersion": "1.20260601.01.00", "hl": "en", "gl": "US"
+    }}});
+    let response: Value = client
+        .post("https://music.youtube.com/youtubei/v1/visitor_id?prettyPrint=false")
+        .header("Origin", "https://music.youtube.com")
+        .header("User-Agent", BROWSER_USER_AGENT)
+        .json(&body)
+        .send()?
+        .error_for_status()?
+        .json()?;
+    let visitor = response
+        .pointer("/responseContext/visitorData")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow!("YouTube returned no visitor ID"))?
+        .to_owned();
+    if let Ok(mut slot) = VISITOR.lock() {
+        *slot = visitor.clone();
+    }
+    Ok(visitor)
+}
+
+/// A direct URL of `video_id`'s best audio and its length in seconds, the way Meiro's
+/// `AudioStream` gets it (https://github.com/elianiva/meiro, GPL-3.0, `youtube/playback.go`):
+/// one anonymous InnerTube `player` request as the visionOS YouTube app,
+/// the same client yt-dlp's fast path uses, without starting yt-dlp (about 1.5 s of process
+/// start-up on Windows, plus its extraction). The URL is probed before it is handed out, because
+/// the media server now and then refuses one the player just gave.
+pub fn audio_stream(video_id: &str) -> Result<(String, f64)> {
+    if !valid_video_id(video_id) {
+        bail!("Not a YouTube video ID: {video_id}");
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let visitor = visitor_data(&client)?;
+    let body = json!({
+        "videoId": video_id,
+        "contentCheckOk": true,
+        "racyCheckOk": true,
+        "context": {"client": {
+            "clientName": "VISIONOS",
+            "clientVersion": VISIONOS_VERSION,
+            "hl": "en",
+            "gl": "US",
+            "visitorData": visitor,
+            "deviceMake": "Apple",
+            "deviceModel": "RealityDevice17,1",
+            "userAgent": VISIONOS_USER_AGENT,
+            "osName": "visionOS",
+            "osVersion": "26.5.23O471",
+        }},
+    });
+    let response: Value = client
+        .post("https://music.youtube.com/youtubei/v1/player?prettyPrint=false")
+        .header("User-Agent", VISIONOS_USER_AGENT)
+        .header("Origin", "https://music.youtube.com")
+        .header("Referer", "https://music.youtube.com/")
+        .header("X-YouTube-Client-Name", "101")
+        .header("X-YouTube-Client-Version", VISIONOS_VERSION)
+        .header("X-Goog-Visitor-Id", visitor)
+        .json(&body)
+        .send()?
+        .error_for_status()?
+        .json()?;
+    let (url, seconds) = parse_audio_stream(&response)?;
+    let probe = client
+        .get(&url)
+        .header("Range", "bytes=0-0")
+        .header("User-Agent", BROWSER_USER_AGENT)
+        .send()?;
+    let status = probe.status();
+    if status != reqwest::StatusCode::PARTIAL_CONTENT && status != reqwest::StatusCode::OK {
+        bail!("The audio stream answers HTTP {status}");
+    }
+    Ok((url, seconds))
+}
+
+/// The audio-only format of the highest bitrate that has a direct URL, as yt-dlp's `bestaudio`
+/// picks it: in the track's own language, and not the dynamic-range-compressed copy YouTube
+/// lists beside it (upstream Meiro `parseAudioStream`).
+fn parse_audio_stream(response: &Value) -> Result<(String, f64)> {
+    let status = response
+        .pointer("/playabilityStatus/status")
+        .and_then(Value::as_str);
+    if status != Some("OK") {
+        let reason = response
+            .pointer("/playabilityStatus/reason")
+            .and_then(Value::as_str)
+            .unwrap_or("no reason given");
+        bail!(
+            "YouTube will not play this here ({}): {reason}",
+            status.unwrap_or("no status")
+        );
+    }
+    let mut best: Option<(&str, i64, f64)> = None;
+    for format in response
+        .pointer("/streamingData/adaptiveFormats")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let audio = format["mimeType"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("audio/"));
+        let url = format["url"].as_str().filter(|u| u.starts_with("https://"));
+        let dub = format["audioTrack"].is_object()
+            && !format["audioTrack"]["audioIsDefault"]
+                .as_bool()
+                .unwrap_or(false);
+        let drc = format["isDrc"].as_bool().unwrap_or(false);
+        let bitrate = format["bitrate"].as_i64().unwrap_or(0);
+        let (Some(url), true, false, false) = (url, audio, dub, drc) else {
+            continue;
+        };
+        if best.is_none_or(|(_, b, _)| bitrate > b) {
+            let ms = format["approxDurationMs"]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            best = Some((url, bitrate, ms / 1000.0));
+        }
+    }
+    best.map(|(url, _, seconds)| (url.to_owned(), seconds))
+        .ok_or_else(|| anyhow!("The player lists no audio with a direct URL"))
+}
+
 pub(crate) fn innertube_request(
     endpoint: &str,
     body: &Value,
@@ -1198,6 +1344,46 @@ mod tests {
             ["aku milikmu", "aku milikmu dewa 19"]
         );
         assert!(parse_suggestions(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn picks_the_best_plain_audio_format_like_meiro() {
+        let response = json!({
+            "playabilityStatus": {"status": "OK"},
+            "streamingData": {"adaptiveFormats": [
+                {"mimeType": "video/mp4", "bitrate": 900000, "url": "https://v/video"},
+                {"mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 130000, "url": "https://v/opus", "approxDurationMs": "212000"},
+                {"mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 140000, "url": "https://v/drc", "isDrc": true},
+                {"mimeType": "audio/mp4", "bitrate": 150000, "url": "https://v/dub", "audioTrack": {"audioIsDefault": false}},
+                {"mimeType": "audio/mp4", "bitrate": 128000, "url": "https://v/aac", "approxDurationMs": "212000"},
+                {"mimeType": "audio/webm", "bitrate": 999999, "signatureCipher": "s=..."}
+            ]}
+        });
+        assert_eq!(
+            parse_audio_stream(&response).unwrap(),
+            ("https://v/opus".to_owned(), 212.0)
+        );
+        let refused =
+            json!({"playabilityStatus": {"status": "LOGIN_REQUIRED", "reason": "Sign in"}});
+        assert!(parse_audio_stream(&refused)
+            .unwrap_err()
+            .to_string()
+            .contains("Sign in"));
+    }
+
+    #[test]
+    #[ignore = "requires internet access to YouTube Music; no account"]
+    fn live_direct_audio_stream() {
+        for _ in 0..2 {
+            let started = Instant::now();
+            let (url, seconds) = audio_stream("dQw4w9WgXcQ").unwrap();
+            println!(
+                "direct resolve {:.2}s, {seconds:.0}s long, {}",
+                started.elapsed().as_secs_f32(),
+                &url[..60]
+            );
+            assert!(seconds > 200.0);
+        }
     }
 
     #[test]
