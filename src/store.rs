@@ -215,11 +215,9 @@ fn save_key_at(path: &Path, key_id: &str, value: &str) -> Result<()> {
     } else {
         keys.insert(id.to_owned(), value.trim().to_owned());
     }
-    let mut bytes = serde_json::to_vec(&keys)?;
+    let bytes = serde_json::to_vec(&keys)?;
     #[cfg(windows)]
-    {
-        bytes = crate::auth::dpapi(true, &bytes)?;
-    }
+    let bytes = crate::auth::dpapi(true, &bytes)?;
     let temp = path.with_extension("tmp");
     {
         use std::io::Write;
