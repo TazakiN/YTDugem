@@ -1,5 +1,5 @@
 use crate::{
-    auth::{self, Account, SavedAccount},
+    auth::{self, Account},
     discord::Presence,
     integrations::{Integrations, MediaEvent},
     model::{clock, Track},
@@ -25,6 +25,9 @@ const BG: Color32 = Color32::from_rgb(29, 31, 27);
 const SIDE: Color32 = Color32::from_rgb(21, 22, 19);
 const MUTED: Color32 = Color32::from_rgb(150, 151, 147);
 const WHITE: Color32 = Color32::from_rgb(244, 244, 242);
+/// Calls to action and progress in dialogs.
+const ACCENT: Color32 = Color32::from_rgb(178, 208, 158);
+const ERROR: Color32 = Color32::from_rgb(232, 120, 110);
 
 #[derive(Clone, PartialEq, Hash)]
 enum Page {
@@ -65,13 +68,19 @@ enum Event {
     /// A finished download (track key), already imported into local music.
     Downloaded(String, Result<Vec<Track>, String>),
     DownloadProgress(String, f32),
-    Account(u64, Result<Account, String>),
-    SavedAccounts(u64, Result<Vec<SavedAccount>, String>),
-    AccountRemoved(u64, Result<(), String>),
+    /// A sign-in or channel switch finished.
+    SignedIn(u64, Result<Account, String>),
+    /// A browser's session and the accounts it can act as, for the account picker.
+    BrowserImported(
+        u64,
+        &'static str,
+        Result<(String, Vec<auth::Channel>), String>,
+    ),
+    /// The saved session was checked at start-up; `true` with the error when YouTube retired it.
+    Renewed(Result<Account, (bool, String)>),
     LyricsKeys(u64, Result<Vec<(String, bool)>, String>),
     LyricsKeySaved(u64, String, Result<bool, String>),
     AudioDevices(Result<Vec<(String, String)>, String>),
-    BrowserOpened(u64, Result<(), String>),
     Artwork(String, Result<(egui::ColorImage, egui::ColorImage), String>),
     Radio(u64, String, Result<Vec<Track>, String>),
 }
@@ -126,13 +135,12 @@ pub struct YTDugem {
     sleep_until: Option<Instant>,
     stop_after_track: bool,
     account: Option<Account>,
-    account_open: bool,
-    adding_account: bool,
-    cookie_input: String,
-    account_busy: bool,
+    /// The sign-in dialog while it is open.
+    sign_in: SignIn,
     account_request: u64,
-    saved_accounts: Vec<SavedAccount>,
-    saved_accounts_request: u64,
+    /// The accounts and channels the session can act as, and which one it does.
+    channels: Vec<auth::Channel>,
+    source: auth::Source,
     radio_request: u64,
     lyric_keys: BTreeMap<String, bool>,
     lyric_key_inputs: BTreeMap<String, String>,
@@ -142,7 +150,6 @@ pub struct YTDugem {
     audio_devices_loading: bool,
     audio_devices_loaded: bool,
     lyric_keys_request: u64,
-    login_cancel: Arc<AtomicBool>,
     last_poll: Instant,
     now_origin: String,
     radio_pending: bool,
@@ -265,7 +272,7 @@ impl YTDugem {
             Ok(a) => a,
             Err(_) => {
                 message =
-                    "Saved sign-in could not be restored. Open your account to sign in again."
+                    "The saved sign-in could not be opened. Sign in again from the account menu."
                         .into();
                 None
             }
@@ -334,13 +341,10 @@ impl YTDugem {
             sleep_until: None,
             stop_after_track: false,
             account,
-            account_open: false,
-            adding_account: false,
-            cookie_input: String::new(),
-            account_busy: false,
+            sign_in: SignIn::default(),
             account_request: 0,
-            saved_accounts: vec![],
-            saved_accounts_request: 0,
+            channels: vec![],
+            source: auth::Source::default(),
             radio_request: 0,
             lyric_keys: BTreeMap::new(),
             lyric_key_inputs: BTreeMap::new(),
@@ -350,7 +354,6 @@ impl YTDugem {
             audio_devices_loading: false,
             audio_devices_loaded: false,
             lyric_keys_request: 0,
-            login_cancel: Arc::new(AtomicBool::new(false)),
             last_poll: Instant::now(),
             now_origin: "Home".into(),
             radio_pending: false,
@@ -389,6 +392,15 @@ impl YTDugem {
             translation_request: 0,
             settings_query: String::new(),
         };
+        if app.account.is_some() {
+            // The saved session is shown at once and checked with YouTube in the background;
+            // one YouTube retired is read again from its browser or ends (Meiro `renewSession`).
+            let tx = app.tx.clone();
+            std::thread::spawn(move || {
+                let result = auth::renew().map_err(|e| (e.is::<auth::SessionGone>(), err(e)));
+                let _ = tx.send(Event::Renewed(result));
+            });
+        }
         app.load_home();
         app
     }
@@ -759,53 +771,9 @@ impl YTDugem {
     fn sync_account(&mut self) {
         self.invalidate_account_results();
         self.account = auth::current_account();
-        self.adding_account = false;
+        (self.channels, self.source) = auth::current_channels();
         self.load_home();
         self.request_lyrics(self.lyrics_override.clone());
-    }
-    fn open_accounts(&mut self) {
-        self.account_open = true;
-        self.saved_accounts_request += 1;
-        let request = self.saved_accounts_request;
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(Event::SavedAccounts(
-                request,
-                auth::saved_accounts().map_err(err),
-            ));
-        });
-    }
-    fn select_account(&mut self, id: String) {
-        if self.account_busy {
-            return;
-        }
-        self.account_busy = true;
-        self.account_request += 1;
-        let request = self.account_request;
-        self.login_cancel = Arc::new(AtomicBool::new(false));
-        let cancel = self.login_cancel.clone();
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(Event::Account(
-                request,
-                auth::select_account(&id, &cancel).map_err(err),
-            ));
-        });
-    }
-    fn remove_account(&mut self, id: String) {
-        if self.account_busy {
-            return;
-        }
-        self.account_busy = true;
-        self.account_request += 1;
-        let request = self.account_request;
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(Event::AccountRemoved(
-                request,
-                auth::remove_account(&id).map_err(err),
-            ));
-        });
     }
     fn load_lyrics_keys(&mut self) {
         if self.lyric_keys_loaded || self.lyric_keys_busy {
@@ -2458,41 +2426,502 @@ impl YTDugem {
         }
         self.pump_downloads();
     }
-    fn open_default_login(&mut self) {
-        if self.account_busy {
+    /// Opens the sign-in dialog (Meiro `openSignIn`).
+    fn open_sign_in(&mut self) {
+        if self.sign_in.open {
             return;
         }
-        self.account_busy = true;
+        self.sign_in = SignIn {
+            open: true,
+            ..Default::default()
+        };
+    }
+    /// Closes the dialog and stops what it started; a session that check was about to save is
+    /// not kept (Meiro `dismissSignIn`).
+    fn dismiss_sign_in(&mut self) {
+        if self.sign_in.busy {
+            self.sign_in.cancel.store(true, Ordering::SeqCst);
+            auth::cancel_sign_in();
+        }
         self.account_request += 1;
-        self.message = "Opening your default browser…".into();
-        let id = self.account_request;
-        let tx = self.tx.clone();
+        self.sign_in = SignIn::default();
+    }
+    /// Starts one sign-in task; its outcome comes back as `Event::SignedIn`.
+    fn start_sign_in(
+        &mut self,
+        job: impl FnOnce(&AtomicBool, u64) -> anyhow::Result<Account> + Send + 'static,
+    ) {
+        self.account_request += 1;
+        let request = self.account_request;
+        self.sign_in.busy = true;
+        self.sign_in.err.clear();
+        self.sign_in.import_failed.clear();
+        self.sign_in.cancel = Arc::new(AtomicBool::new(false));
+        let (cancel, tx) = (self.sign_in.cancel.clone(), self.tx.clone());
+        let generation = auth::generation();
         std::thread::spawn(move || {
-            let _ = tx.send(Event::BrowserOpened(
-                id,
-                auth::open_default_login().map_err(err),
+            let _ = tx.send(Event::SignedIn(
+                request,
+                job(&cancel, generation).map_err(err),
             ));
         });
     }
-    fn login(&mut self, browser: bool) {
-        if self.account_busy {
+    /// The user signs in in a browser window of YTDugem's own (Meiro `windowSignIn`).
+    fn window_sign_in(&mut self) {
+        if self.sign_in.busy {
             return;
         }
-        self.account_busy = true;
+        self.sign_in.in_window = true;
+        self.start_sign_in(|cancel, generation| {
+            let cookie = auth::window_sign_in(cancel)?;
+            auth::sign_in(&cookie, &auth::Source::default(), generation)
+        });
+    }
+    /// Tries the pasted Cookie header (Meiro `submitSignIn`).
+    fn submit_sign_in(&mut self) {
+        if self.sign_in.busy {
+            return;
+        }
+        let cookie = match auth::pasted_cookie(&self.sign_in.cookie) {
+            Ok(cookie) => cookie,
+            Err(e) => {
+                self.sign_in.err = e.to_string();
+                return;
+            }
+        };
+        self.start_sign_in(move |_, generation| {
+            auth::sign_in(&cookie, &auth::Source::default(), generation)
+        });
+    }
+    /// Reads a browser's accounts without choosing or saving one (Meiro `importSignIn`).
+    fn import_sign_in(&mut self, browser: &'static str) {
+        if self.sign_in.busy {
+            return;
+        }
         self.account_request += 1;
-        let id = self.account_request;
-        self.login_cancel = Arc::new(AtomicBool::new(false));
-        let cancel = self.login_cancel.clone();
-        let input = std::mem::take(&mut self.cookie_input);
+        let request = self.account_request;
+        self.sign_in.busy = true;
+        self.sign_in.err.clear();
+        self.sign_in.import_failed.clear();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let r = if browser {
-                auth::browser_login(cancel)
-            } else {
-                auth::connect(&input, &cancel)
-            };
-            let _ = tx.send(Event::Account(id, r.map_err(err)));
+            let result = auth::import_browser(browser).and_then(|cookie| {
+                let accounts = auth::sign_in_accounts(&cookie)?;
+                Ok((cookie, accounts))
+            });
+            let _ = tx.send(Event::BrowserImported(
+                request,
+                browser,
+                result.map_err(err),
+            ));
         });
+    }
+    /// Signs in as the account or channel picked from an imported browser session.
+    fn pick_account(&mut self, channel: auth::Channel) {
+        let cookie = self.sign_in.imported.clone();
+        let source = auth::Source {
+            account_index: channel.account_index,
+            channel: channel.channel_id,
+            browser: self.sign_in.source.to_owned(),
+            email: channel.email,
+        };
+        self.start_sign_in(move |_, generation| auth::sign_in(&cookie, &source, generation));
+    }
+    fn signed_in(&mut self, request: u64, result: Result<Account, String>) {
+        let ours = request == self.account_request;
+        match result {
+            Ok(account) => {
+                self.sync_account();
+                if ours {
+                    self.sign_in = SignIn::default();
+                }
+                self.message = format!("Signed in as {}", account.name);
+            }
+            Err(e) if ours => {
+                self.sign_in.busy = false;
+                self.sign_in.in_window = false;
+                if self.sign_in.accounts.is_none() {
+                    // A failed import or paste points at pasting instead.
+                    self.sign_in.import_failed = self.sign_in.source.to_owned();
+                }
+                self.sign_in.err = e;
+            }
+            Err(_) => {}
+        }
+    }
+    /// Acts as another of the session's accounts or channels (Meiro `switchChannel`).
+    fn switch_channel(&mut self, channel: auth::Channel) {
+        self.account_request += 1;
+        let request = self.account_request;
+        let tx = self.tx.clone();
+        self.message = format!("Switching to {}…", channel.label());
+        std::thread::spawn(move || {
+            let _ = tx.send(Event::SignedIn(
+                request,
+                auth::switch_channel(&channel).map_err(err),
+            ));
+        });
+    }
+    fn sign_out(&mut self) {
+        self.dismiss_sign_in();
+        match auth::logout() {
+            Ok(()) => {
+                self.sync_account();
+                self.message = "Signed out".into();
+            }
+            Err(e) => self.message = format!("Sign out failed: {e:#}"),
+        }
+    }
+    /// The account's picture in the top bar, which opens a menu of the account, its channels,
+    /// the settings and the sign-in (Meiro `accountButton`).
+    fn account_button(&mut self, ui: &mut egui::Ui) {
+        let (rect, response) = ui.allocate_exact_size(Vec2::splat(34.0), egui::Sense::click());
+        let popup = ui.make_persistent_id("account-menu");
+        let open = ui.memory(|m| m.is_popup_open(popup));
+        if response.hovered() || open {
+            ui.painter()
+                .circle_filled(rect.center(), 17.0, Color32::from_white_alpha(18));
+        }
+        let picture = Rect::from_center_size(rect.center(), Vec2::splat(28.0));
+        match &self.account {
+            Some(a) => avatar(ui, &a.thumbnail, &a.name, picture),
+            None => {
+                ui.painter()
+                    .circle_filled(picture.center(), 14.0, Color32::from_white_alpha(22));
+                widgets::paint(ui.painter(), Icon::User, picture.shrink(7.0), MUTED);
+            }
+        }
+        let response = response.on_hover_text("Account");
+        if response.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup));
+        }
+        let mut action = None;
+        egui::popup_below_widget(
+            ui,
+            popup,
+            &response,
+            egui::PopupCloseBehavior::CloseOnClickOutside,
+            |ui| {
+                ui.set_min_width(260.0);
+                if let Some(a) = &self.account {
+                    ui.add_space(4.0);
+                    ui.add(egui::Label::new(heading(&a.name, 15.0)).truncate());
+                    if !a.email.is_empty() {
+                        ui.add(
+                            egui::Label::new(RichText::new(&a.email).size(12.5).color(MUTED))
+                                .truncate(),
+                        );
+                    }
+                    ui.separator();
+                    // Only when the cookies can act as more than one account or channel.
+                    if self.channels.len() >= 2 {
+                        ui.label(RichText::new("Account / channel").size(12.0).color(MUTED));
+                        let has_selected = self
+                            .channels
+                            .iter()
+                            .any(|c| c.selected && c.account_index == self.source.account_index);
+                        for channel in &self.channels {
+                            let selected = channel.account_index == self.source.account_index
+                                && if has_selected {
+                                    channel.selected
+                                } else {
+                                    !self.source.channel.is_empty()
+                                        && channel.channel_id == self.source.channel
+                                };
+                            let text = format!(
+                                "{}  {}",
+                                if selected { "✓" } else { "   " },
+                                channel.label()
+                            );
+                            let row = ui.add_enabled(
+                                !channel.disabled,
+                                egui::Button::new(text).frame(false),
+                            );
+                            if row.clicked() && !selected {
+                                action = Some(AccountAction::Switch(channel.clone()));
+                            }
+                        }
+                        ui.separator();
+                    }
+                }
+                if ui.add(egui::Button::new("Settings").frame(false)).clicked() {
+                    action = Some(AccountAction::Settings);
+                }
+                let (label, act) = if self.account.is_some() {
+                    ("Sign out", AccountAction::SignOut)
+                } else {
+                    ("Sign in", AccountAction::SignIn)
+                };
+                if ui.add(egui::Button::new(label).frame(false)).clicked() {
+                    action = Some(act);
+                }
+            },
+        );
+        if let Some(action) = action {
+            ui.memory_mut(|m| m.close_popup());
+            match action {
+                AccountAction::Switch(channel) => self.switch_channel(channel),
+                AccountAction::Settings => self.navigate(Page::Settings),
+                AccountAction::SignOut => self.sign_out(),
+                AccountAction::SignIn => self.open_sign_in(),
+            }
+        }
+    }
+    /// The sign-in dialog (Meiro `signInDialog`): a browser window first, and under Advanced an
+    /// import from a browser the user already uses, or a pasted Cookie header.
+    fn sign_in_dialog(&mut self, ctx: &egui::Context) {
+        if !self.sign_in.open {
+            return;
+        }
+        if self.sign_in.accounts.is_some() {
+            self.account_picker(ctx);
+            return;
+        }
+        let busy = self.sign_in.busy;
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::new("sign-in"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                dialog_frame(ui, |ui| {
+                    let (badge, _) =
+                        ui.allocate_exact_size(Vec2::splat(56.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(badge, 16.0, Color32::from_rgb(58, 64, 52));
+                    widgets::paint(ui.painter(), Icon::User, badge.shrink(16.0), WHITE);
+                    ui.add_space(12.0);
+                    ui.label(heading("Sign in to YouTube Music", 22.0));
+                    ui.add_space(6.0);
+                    muted(ui, "YTDugem opens a separate browser window where you sign in to your Google account. YTDugem never sees your password. It keeps the session of that window, which gives it the same account access as a browser, and closes the window. Your own browser is not used.");
+                    ui.add_space(12.0);
+                    if ui
+                        .add_enabled(
+                            !busy,
+                            egui::Button::new(
+                                RichText::new("Sign in with a browser window")
+                                    .size(15.0)
+                                    .color(Color32::from_rgb(20, 21, 19)),
+                            )
+                            .fill(Color32::from_gray(236))
+                            .corner_radius(20.0)
+                            .min_size(Vec2::new(ui.available_width(), 44.0)),
+                        )
+                        .clicked()
+                    {
+                        self.window_sign_in();
+                    }
+                    if self.sign_in.in_window {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(
+                                "Finish signing in in the window that opened. YTDugem closes it for you.",
+                            )
+                            .color(ACCENT),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    let chevron = if self.sign_in.advanced { "⌃" } else { "⌄" };
+                    if ui
+                        .add(egui::Button::new(format!("Advanced {chevron}")).frame(false))
+                        .clicked()
+                    {
+                        self.sign_in.advanced = !self.sign_in.advanced;
+                    }
+                    if self.sign_in.advanced {
+                        self.sign_in_advanced(ui, busy);
+                    }
+                    ui.add_space(8.0);
+                    muted(ui, "YTDugem saves the session in its data folder, encrypted with a key that Windows Credential Manager keeps for your user. Sign out to remove the saved copy.");
+                    if !self.sign_in.err.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(&self.sign_in.err).color(ERROR));
+                    }
+                    ui.add_space(12.0);
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        // Only the pasted header needs a button of its own: the window and an
+                        // import start as soon as they are picked.
+                        if self.sign_in.advanced
+                            && ui
+                                .add_enabled(
+                                    !busy && !self.sign_in.cookie.trim().is_empty(),
+                                    egui::Button::new("Sign in"),
+                                )
+                                .clicked()
+                        {
+                            self.submit_sign_in();
+                        }
+                        if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                            close = true;
+                        }
+                        if busy {
+                            ui.spinner();
+                        }
+                    });
+                });
+            });
+        if close || modal.should_close() {
+            self.dismiss_sign_in();
+        }
+    }
+    fn sign_in_advanced(&mut self, ui: &mut egui::Ui, busy: bool) {
+        muted(ui, "Or use a browser you are already signed in with. This copy can stop working when that browser renews its cookies. Sign in at https://music.youtube.com there first, then pick it:");
+        ui.add_space(6.0);
+        let picker = ui.add_enabled(!busy, egui::Button::new("Import from a browser  ⌄"));
+        let popup = ui.make_persistent_id("import-browsers");
+        if picker.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup));
+        }
+        let mut chosen = None;
+        egui::popup_below_widget(
+            ui,
+            popup,
+            &picker,
+            egui::PopupCloseBehavior::CloseOnClick,
+            |ui| {
+                ui.set_min_width(200.0);
+                let browsers = auth::browsers();
+                if browsers.is_empty() {
+                    ui.label(RichText::new("No supported browser was found").color(MUTED));
+                }
+                for browser in browsers {
+                    if ui
+                        .add(egui::Button::new(browser.label).frame(false))
+                        .clicked()
+                    {
+                        chosen = Some(browser.label);
+                    }
+                }
+            },
+        );
+        if let Some(label) = chosen {
+            self.sign_in.source = label;
+            self.import_sign_in(label);
+        }
+        if !self.sign_in.import_failed.is_empty() {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "Importing from {} did not work. Paste the Cookie header instead.",
+                    self.sign_in.import_failed
+                ))
+                .strong()
+                .color(ACCENT),
+            );
+        }
+        ui.add_space(6.0);
+        muted(ui, "To paste it: open music.youtube.com while signed in, open your browser's developer tools (F12) and go to the Network tab, reload, pick a request to music.youtube.com, and copy the value of its Cookie request header.");
+        ui.add_space(6.0);
+        egui::Frame::new()
+            .fill(Color32::from_rgb(40, 42, 38))
+            .stroke(Stroke::new(1.0_f32, Color32::from_gray(62)))
+            .corner_radius(10.0)
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(96.0)
+                    .id_salt("cookie-box")
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.sign_in.cookie)
+                                .password(true)
+                                .hint_text(RichText::new("Paste the Cookie header").color(MUTED))
+                                .frame(false)
+                                .desired_rows(3)
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
+            });
+    }
+    /// Keeps an imported browser session private until the user chooses the Google account and
+    /// channel to act as (Meiro `signInAccountPicker`).
+    fn account_picker(&mut self, ctx: &egui::Context) {
+        let busy = self.sign_in.busy;
+        let mut picked = None;
+        let (mut back, mut close) = (false, false);
+        let accounts = self.sign_in.accounts.clone().unwrap_or_default();
+        let modal = egui::Modal::new(egui::Id::new("sign-in-accounts"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                dialog_frame(ui, |ui| {
+                    ui.label(heading("Choose your YouTube account", 22.0));
+                    ui.add_space(6.0);
+                    muted(ui, &format!(
+                        "Choose the account or channel to use from {}. YTDugem remembers your choice.",
+                        self.sign_in.source
+                    ));
+                    ui.add_space(10.0);
+                    for (i, account) in accounts.iter().enumerate() {
+                        let enabled = !busy && !account.disabled;
+                        let (rect, row) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 64.0),
+                            if enabled {
+                                egui::Sense::click()
+                            } else {
+                                egui::Sense::hover()
+                            },
+                        );
+                        let fill = if row.hovered() && enabled { 16 } else { 6 };
+                        ui.painter()
+                            .rect_filled(rect, 12.0, Color32::from_white_alpha(fill));
+                        let avatar_rect = Rect::from_min_size(
+                            rect.min + Vec2::new(12.0, 12.0),
+                            Vec2::splat(40.0),
+                        );
+                        avatar(ui, &account.thumbnail, account.label(), avatar_rect);
+                        let x = avatar_rect.right() + 12.0;
+                        let width = rect.right() - x - 12.0;
+                        let color = if enabled { WHITE } else { MUTED };
+                        fit_text(
+                            ui.painter(),
+                            Pos2::new(x, rect.top() + 22.0),
+                            egui::Align2::LEFT_CENTER,
+                            account.label(),
+                            FontId::new(15.0, egui::FontFamily::Name("bold".into())),
+                            color,
+                            width,
+                        );
+                        fit_text(
+                            ui.painter(),
+                            Pos2::new(x, rect.top() + 43.0),
+                            egui::Align2::LEFT_CENTER,
+                            account.detail(),
+                            FontId::proportional(12.5),
+                            MUTED,
+                            width,
+                        );
+                        if row.clicked() {
+                            picked = Some(i);
+                        }
+                        ui.add_space(6.0);
+                    }
+                    if !self.sign_in.err.is_empty() {
+                        ui.label(RichText::new(&self.sign_in.err).color(ERROR));
+                    }
+                    ui.add_space(10.0);
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                            close = true;
+                        }
+                        if ui
+                            .add_enabled(!busy, egui::Button::new("Back").frame(false))
+                            .clicked()
+                        {
+                            back = true;
+                        }
+                        if busy {
+                            ui.spinner();
+                        }
+                    });
+                });
+            });
+        if let Some(i) = picked {
+            self.pick_account(accounts[i].clone());
+        } else if back {
+            self.sign_in.accounts = None;
+            self.sign_in.imported.clear();
+            self.sign_in.err.clear();
+        } else if close || modal.should_close() {
+            self.dismiss_sign_in();
+        }
     }
     fn events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.rx.try_recv() {
@@ -2670,51 +3099,35 @@ impl YTDugem {
                         egui::TextureOptions::LINEAR,
                     ));
                 }
-                Event::BrowserOpened(id, r) if id == self.account_request => {
-                    self.account_busy = false;
-                    self.message = match r {
-                        Ok(()) => "The default browser only opened YouTube Music. Use Automatic sign-in for secure capture, or paste cookies below.".into(),
-                        Err(e) => e,
-                    };
-                }
-                Event::Account(id, r)
-                    if accepts_account_result(id, self.account_request, r.is_ok()) =>
-                {
-                    if id == self.account_request {
-                        self.account_busy = false;
-                    }
+                Event::SignedIn(id, r) => self.signed_in(id, r),
+                Event::BrowserImported(id, browser, r) if id == self.account_request => {
+                    self.sign_in.busy = false;
                     match r {
-                        Ok(_) => {
-                            self.sync_account();
-                            if id == self.account_request {
-                                self.account_open = false;
-                                self.message = "Signed in to YouTube Music".into();
-                            }
+                        Ok((cookie, accounts)) => {
+                            self.sign_in.imported = cookie;
+                            self.sign_in.source = browser;
+                            self.sign_in.accounts = Some(accounts);
                         }
-                        Err(e) => self.message = e,
+                        Err(e) => {
+                            self.sign_in.import_failed = browser.to_owned();
+                            self.sign_in.err = e;
+                        }
                     }
                 }
-                Event::SavedAccounts(id, r) if id == self.saved_accounts_request => match r {
-                    Ok(accounts) => self.saved_accounts = accounts,
-                    Err(e) => self.message = e,
+                Event::Renewed(r) => match r {
+                    // The same account: only its channels were not known yet.
+                    Ok(a) if self.account.as_ref() == Some(&a) => {
+                        (self.channels, self.source) = auth::current_channels();
+                    }
+                    Ok(_) => self.sync_account(),
+                    // YouTube retired the session and no browser could replace it.
+                    Err((true, e)) => {
+                        self.sync_account();
+                        self.message = e;
+                    }
+                    // Offline or YouTube unreachable: keep the session and check next time.
+                    Err((false, _)) => {}
                 },
-                Event::AccountRemoved(id, r)
-                    if accepts_account_result(id, self.account_request, r.is_ok()) =>
-                {
-                    if id == self.account_request {
-                        self.account_busy = false;
-                    }
-                    match r {
-                        Ok(()) => {
-                            self.sync_account();
-                            if id == self.account_request {
-                                self.open_accounts();
-                                self.message = "Saved account removed".into();
-                            }
-                        }
-                        Err(e) => self.message = e,
-                    }
-                }
                 Event::LyricsKeys(id, r) if id == self.lyric_keys_request => {
                     self.lyric_keys_busy = false;
                     match r {
@@ -2846,23 +3259,6 @@ impl YTDugem {
 
 fn err(e: anyhow::Error) -> String {
     format!("{e:#}")
-}
-
-fn accepts_account_result(request: u64, current: u64, succeeded: bool) -> bool {
-    // A completed credential change survives dialog cancellation; read the current backend state.
-    request == current || succeeded
-}
-
-#[cfg(test)]
-mod account_tests {
-    use super::accepts_account_result;
-
-    #[test]
-    fn committed_account_changes_are_reconciled_after_dialog_cancellation() {
-        assert!(accepts_account_result(1, 2, true));
-        assert!(!accepts_account_result(1, 2, false));
-        assert!(accepts_account_result(2, 2, false));
-    }
 }
 
 impl YTDugem {
@@ -3236,17 +3632,7 @@ impl YTDugem {
                         self.expanded = true;
                         self.tab = PlayerTab::Queue;
                     }
-                    if widgets::button(
-                        ui,
-                        Icon::User,
-                        32.0,
-                        self.account.is_some(),
-                        "YouTube Music account",
-                    )
-                    .clicked()
-                    {
-                        self.open_accounts();
-                    }
+                    self.account_button(ui);
                 });
             },
         );
@@ -3715,119 +4101,6 @@ impl YTDugem {
             }
             Page::Settings => self.settings_view(ui),
         }
-    }
-    fn account_dialog(&mut self, ctx: &egui::Context) {
-        if !self.account_open {
-            return;
-        }
-        let mut open = true;
-        let mut cancel = false;
-        egui::Window::new("YouTube Music account")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label(heading("Saved accounts", 16.0));
-                for saved in self.saved_accounts.clone() {
-                    ui.horizontal(|ui| {
-                        let label = format!("{}{}", saved.account.name, if saved.active { " · Active" } else { "" });
-                        if ui.add_enabled(!saved.active && !self.account_busy, egui::Button::new(label)).clicked() {
-                            self.select_account(saved.id.clone());
-                        }
-                        if !saved.account.email.is_empty() {
-                            ui.label(RichText::new(&saved.account.email).color(MUTED));
-                        }
-                        if ui.add_enabled(!self.account_busy, egui::Button::new("Remove")).clicked() {
-                            self.remove_account(saved.id);
-                        }
-                    });
-                }
-                if let Some(a) = self.account.clone() {
-                    ui.label(heading(&a.name, 20.0));
-                    if !a.email.is_empty() {
-                        ui.label(RichText::new(&a.email).color(MUTED));
-                    }
-                    if !self.adding_account && ui.button("Add another account").clicked() {
-                        self.adding_account = true;
-                    }
-                    if ui.button("Sign out").clicked() {
-                        self.login_cancel.store(true, Ordering::SeqCst);
-                        self.account_request += 1;
-                        match auth::logout() {
-                            Ok(()) => {
-                                self.account = None;
-                                self.adding_account = false;
-                                self.invalidate_account_results();
-                                self.load_home();
-                                self.message = "Signed out".into();
-                                self.open_accounts();
-                            }
-                            Err(e) => self.message = format!("Sign out failed: {e:#}"),
-                        }
-                    }
-                }
-                if self.account.is_none() || self.adding_account {
-                    if self.account.is_some() && ui.button("Stop adding account").clicked() {
-                        self.adding_account = false;
-                    }
-                    ui.label("Sign in to access your YouTube Music library and history.");
-                    if ui
-                        .add_enabled(!self.account_busy, egui::Button::new("Open default browser"))
-                        .clicked()
-                    {
-                        self.open_default_login();
-                    }
-                    ui.label("Automatic sign-in opens an isolated browser window. Finish signing in there, then CLOSE that window to finish secure cookie capture. The default-browser option only opens the site.");
-                    if ui
-                        .add_enabled(!self.account_busy, egui::Button::new("Automatic sign-in (Chrome/Edge/Chromium)"))
-                        .clicked()
-                    {
-                        self.login(true);
-                    }
-                    ui.separator();
-                    ui.label("Or paste a Cookie header, Netscape cookies, or cookie JSON:");
-                    egui::ScrollArea::vertical()
-                        .max_height(120.0)
-                        .id_salt("cookie-input-scroll")
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut self.cookie_input)
-                                    .password(true)
-                                    .desired_rows(4)
-                                    .desired_width(420.0),
-                            );
-                        });
-                    if ui.button("Cancel").clicked() {
-                        self.login_cancel.store(true, Ordering::SeqCst);
-                        self.account_request += 1;
-                        self.account_busy = false;
-                        cancel = true;
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.account_busy && !self.cookie_input.trim().is_empty(),
-                            egui::Button::new("Connect with cookies"),
-                        )
-                        .clicked()
-                    {
-                        self.login(false);
-                    }
-                }
-                if self.account_busy {
-                    ui.spinner();
-                    ui.label("Connecting…");
-                }
-                if !self.message.is_empty() {
-                    ui.label(RichText::new(&self.message).color(MUTED));
-                }
-            });
-        if !open || cancel {
-            self.login_cancel.store(true, Ordering::SeqCst);
-            self.account_request += 1;
-            self.account_busy = false;
-            self.cookie_input.clear();
-        }
-        self.account_open = open && !cancel;
     }
     /// The Now Playing sheet. It rises over the window like upstream's `DesktopPlayerSheet`
     /// (`shown` runs 0 to 1 with the slide) and covers the page; the chevron or Escape lowers it.
@@ -4781,6 +5054,79 @@ enum DownloadState {
     Failed(String),
 }
 
+/// The sign-in dialog, while it is open (Meiro `signInState`).
+#[derive(Default)]
+struct SignIn {
+    open: bool,
+    err: String,
+    /// The pasted Cookie header.
+    cookie: String,
+    /// The browser a session could not be imported from, so the dialog points at pasting.
+    import_failed: String,
+    /// Set while the sign-in window waits for the user.
+    in_window: bool,
+    /// Shows the ways to sign in that copy a session from a browser the user keeps using.
+    advanced: bool,
+    /// The accounts an imported session can act as; the picker shows while this is set.
+    accounts: Option<Vec<auth::Channel>>,
+    /// The imported cookie, kept private until an account is chosen.
+    imported: String,
+    /// The browser it came from.
+    source: &'static str,
+    busy: bool,
+    cancel: Arc<AtomicBool>,
+}
+
+enum AccountAction {
+    Switch(auth::Channel),
+    Settings,
+    SignOut,
+    SignIn,
+}
+
+/// The body of a sign-in dialog, as wide as Meiro's.
+fn dialog_frame(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(520.0);
+            ui.spacing_mut().item_spacing.y = 4.0;
+            add(ui);
+        });
+}
+
+/// A round picture, or the first letter of `name` on a disc when there is none.
+fn avatar(ui: &egui::Ui, url: &str, name: &str, rect: Rect) {
+    let radius = rect.width() / 2.0;
+    if url.starts_with("https://") {
+        egui::Image::new(url)
+            .fit_to_exact_size(rect.size())
+            .corner_radius(radius)
+            .paint_at(ui, rect);
+        return;
+    }
+    ui.painter()
+        .circle_filled(rect.center(), radius, Color32::from_rgb(78, 88, 70));
+    let letter: String = name
+        .chars()
+        .next()
+        .into_iter()
+        .flat_map(char::to_uppercase)
+        .collect();
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        letter,
+        FontId::new(radius, egui::FontFamily::Name("bold".into())),
+        WHITE,
+    );
+}
+
+/// Explanatory text in a dialog.
+fn muted(ui: &mut egui::Ui, text: &str) {
+    ui.add(egui::Label::new(RichText::new(text).color(MUTED).size(13.0)).wrap());
+}
+
 #[derive(Clone, Copy)]
 enum QueueAction {
     Play,
@@ -4824,12 +5170,8 @@ impl eframe::App for YTDugem {
         self.tray_step(ctx);
         if escape {
             self.expanded = false;
-            if self.account_open {
-                self.login_cancel.store(true, Ordering::SeqCst);
-                self.account_request += 1;
-                self.account_busy = false;
-                self.account_open = false;
-                self.cookie_input.clear();
+            if self.sign_in.open {
+                self.dismiss_sign_in();
             }
         }
         ctx.input_mut(|i| {
@@ -4921,7 +5263,7 @@ impl eframe::App for YTDugem {
             self.expanded_view(ctx, shown);
         }
         self.palette(ctx);
-        self.account_dialog(ctx);
+        self.sign_in_dialog(ctx);
         self.playlist_dialog(ctx);
         ctx.request_repaint_after(Duration::from_millis(100));
         self.screenshot_step(ctx);
