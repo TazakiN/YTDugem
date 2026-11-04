@@ -19,6 +19,8 @@ souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"
 sha1 = "0.10"
 hmac = "0.12"
 sha2 = "0.10"
+# The saved sign-in is sealed under a key the system credential store holds (Meiro `secretfile`).
+aes-gcm = "0.10.3"
 base64 = "0.22"
 tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 
@@ -34,7 +36,7 @@ raw-window-handle = "0.6"
 # Windows notification-area icon and its menu (upstream `DesktopTrayMenu`).
 tray-icon = { version = "=0.26.1", default-features = false }
 # Close-to-tray: drop the taskbar button while the window stays (minimized) alive.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security_Credentials", "Win32_UI_WindowsAndMessaging"] }
 
 # `cargo run` stays responsive: image decoding, egui and TLS run optimized even in debug builds.
 [profile.dev.package."*"]
