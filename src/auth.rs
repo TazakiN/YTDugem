@@ -404,9 +404,14 @@ mod secretfile {
     }
 
     pub(super) fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>> {
-        use aes_gcm::{aead::Aead, AeadCore, Aes256Gcm, KeyInit};
+        use aes_gcm::{
+            aead::{Aead, Generate, Nonce},
+            Aes256Gcm, KeyInit,
+        };
         let cipher = Aes256Gcm::new(key.into());
-        let nonce = Aes256Gcm::generate_nonce(&mut aes_gcm::aead::OsRng);
+        // A fresh random 96-bit nonce from the OS CSPRNG (aes-gcm's `getrandom` feature).
+        let nonce = Nonce::<Aes256Gcm>::try_generate()
+            .map_err(|_| anyhow!("Could not encrypt the sign-in"))?;
         let sealed = cipher
             .encrypt(&nonce, plain)
             .map_err(|_| anyhow!("Could not encrypt the sign-in"))?;
@@ -421,13 +426,18 @@ mod secretfile {
     }
 
     pub(super) fn open_with(key: &[u8; 32], sealed: &[u8]) -> Result<Vec<u8>> {
-        use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+        use aes_gcm::{
+            aead::{Aead, Nonce},
+            Aes256Gcm, KeyInit,
+        };
         if sealed.len() < 12 {
             bail!("The saved sign-in is damaged");
         }
         let (nonce, body) = sealed.split_at(12);
+        let nonce = Nonce::<Aes256Gcm>::try_from(nonce)
+            .map_err(|_| anyhow!("The saved sign-in is damaged"))?;
         Aes256Gcm::new(key.into())
-            .decrypt(Nonce::from_slice(nonce), body)
+            .decrypt(&nonce, body)
             .map_err(|_| anyhow!("The saved sign-in could not be opened; sign in again"))
     }
 
@@ -1850,6 +1860,27 @@ mod tests {
             sealed,
             secretfile::seal(&key, b"{\"cookie\":\"SAPISID=x\"}").unwrap()
         );
+    }
+    const LEGACY_SEALED: &str = "a0a1a2a3a4a5a6a7a8a9aaab9f6c185822ae6f9f1100f4a06e15aefe04c92a64b2c1270fe86154b2fcb126951110ade05fb35172a35636";
+    #[test]
+    fn session_sealed_by_the_aes_gcm_0_10_build_still_opens() {
+        // Produced with aes-gcm 0.10.3: key 00..1f, nonce a0..ab, then nonce || ciphertext || tag.
+        let key: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let blob: Vec<u8> = (0..LEGACY_SEALED.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&LEGACY_SEALED[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(blob.len(), 12 + 27 + 16);
+        assert_eq!(
+            secretfile::open_with(&key, &blob).unwrap(),
+            b"ytdugem session test vector"
+        );
+        let mut tampered = blob.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(secretfile::open_with(&key, &tampered).is_err());
+        let mut tampered = blob;
+        tampered[20] ^= 1;
+        assert!(secretfile::open_with(&key, &tampered).is_err());
     }
     #[test]
     fn older_saved_accounts_migrate_to_the_active_one() {
