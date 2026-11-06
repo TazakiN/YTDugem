@@ -4688,7 +4688,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "directories",
  "eframe",
  "egui_extras",
