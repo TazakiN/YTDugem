@@ -4,7 +4,7 @@
 
 Discord Rich Presence has payload tests and actual Windows named-pipe fake-server tests. These use unique test-only endpoints, not a running Discord client or personal account. Run `cargo test --locked discord:: -- --nocapture` to verify handshake, nonce acknowledgements, ping/PONG, activity/clear, timeout, reconnect, malformed frames, coalescing and shutdown. Real Discord profile rendering remains an interactive check.
 
-From the project root, using Rust with MSVC and Python:
+From the project root, using Rust with MSVC and Python. `cargo ci`, `cargo xtask package`, and `cargo xtask smoke [--online] [--real-audio]` wrap the same commands:
 
 ```powershell
 cargo fmt --check

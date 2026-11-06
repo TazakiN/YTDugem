@@ -10,7 +10,7 @@ import tempfile
 import wave
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = Path(os.environ.get("BITCHORD_TEST_OUTPUT", "/tmp/opencode/bitchord-smoke"))
+OUT = Path(os.environ.get("BITCHORD_TEST_OUTPUT") or Path(tempfile.gettempdir()) / "ytdugem-smoke")
 OUT.mkdir(parents=True, exist_ok=True)
 
 

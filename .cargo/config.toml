@@ -1,0 +1,7 @@
+[alias]
+# Run a development task from xtask (ci, package, smoke).
+xtask = "run --locked --quiet --package xtask --"
+# Clippy over the whole workspace, warnings are errors.
+lint = "clippy --workspace --locked -- -D warnings"
+# Full CI sequence: fmt, clippy, tests, release build.
+ci = "xtask ci"
