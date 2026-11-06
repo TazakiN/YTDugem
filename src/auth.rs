@@ -550,6 +550,13 @@ fn open_session(cookie: &str, source: &Source) -> Result<Session> {
             channels: vec![],
         };
         session.account = account_details(&session)?;
+        // Optional: the switcher only adds the channel menu, and the email when the account
+        // menu leaves it out (it does for every account, as of 2026-11).
+        session.channels = sign_in_accounts_as(cookie, source.account_index).unwrap_or_default();
+        if session.account.email.is_empty() {
+            session.account.email =
+                switcher_email(&session.channels, source.account_index).unwrap_or_default();
+        }
         if !source.email.is_empty() {
             if session.account.email.is_empty() {
                 bail!("YouTube returned no email address for the selected Google account; YTDugem could not verify your selection");
@@ -558,14 +565,20 @@ fn open_session(cookie: &str, source: &Source) -> Result<Session> {
                 bail!("YouTube returned a different Google account than the one you selected; YTDugem did not save the session");
             }
         }
-        // Optional: the switcher only adds the channel menu.
-        session.channels = sign_in_accounts_as(cookie, source.account_index).unwrap_or_default();
         Ok(session)
     };
     match open(&source.channel) {
         Err(e) if !source.channel.is_empty() && !e.is::<SessionGone>() => open(""),
         other => other,
     }
+}
+
+/// The email of the account the switcher, asked as `account_index`, marks as the one in use.
+fn switcher_email(channels: &[Channel], account_index: u32) -> Option<String> {
+    channels
+        .iter()
+        .find(|c| c.selected && c.account_index == account_index && !c.email.is_empty())
+        .map(|c| c.email.clone())
 }
 
 fn account_details(session: &Session) -> Result<Account> {
@@ -818,32 +831,46 @@ pub struct Browser {
     /// Where its profiles live, under `%LOCALAPPDATA%` (Chromium) or `%APPDATA%` (Firefox).
     profiles: &'static str,
     firefox: bool,
+    /// yt-dlp knows the browser by `spec` alone. A fork it does not know (Zen) is read through its
+    /// engine's `spec` plus a profile path only: the bare `spec` would name another browser.
+    bare: bool,
 }
 
-const BROWSERS: [Browser; 4] = [
+const BROWSERS: [Browser; 5] = [
     Browser {
         label: "Chrome",
         spec: "chrome",
         profiles: "Google/Chrome/User Data",
         firefox: false,
+        bare: true,
     },
     Browser {
         label: "Edge",
         spec: "edge",
         profiles: "Microsoft/Edge/User Data",
         firefox: false,
+        bare: true,
     },
     Browser {
         label: "Brave",
         spec: "brave",
         profiles: "BraveSoftware/Brave-Browser/User Data",
         firefox: false,
+        bare: true,
     },
     Browser {
         label: "Firefox",
         spec: "firefox",
         profiles: "Mozilla/Firefox/Profiles",
         firefox: true,
+        bare: true,
+    },
+    Browser {
+        label: "Zen",
+        spec: "firefox",
+        profiles: "zen/Profiles",
+        firefox: true,
+        bare: false,
     },
 ];
 
@@ -858,8 +885,15 @@ impl Browser {
     }
     /// The yt-dlp selector of each profile, the default first.
     fn selectors(&self) -> Vec<String> {
-        let mut out = vec![self.spec.to_owned()];
-        let Some(root) = self.root() else { return out };
+        self.selectors_in(self.root())
+    }
+    fn selectors_in(&self, root: Option<PathBuf>) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .bare
+            .then(|| self.spec.to_owned())
+            .into_iter()
+            .collect();
+        let Some(root) = root else { return out };
         let Ok(entries) = fs::read_dir(root) else {
             return out;
         };
@@ -890,7 +924,14 @@ impl Browser {
 pub fn browsers() -> Vec<Browser> {
     BROWSERS
         .into_iter()
-        .filter(|b| cfg!(not(windows)) || b.root().is_some_and(|r| r.is_dir()))
+        .filter(|b| {
+            if cfg!(windows) {
+                b.root().is_some_and(|r| r.is_dir())
+            } else {
+                // Elsewhere only browsers yt-dlp finds by itself; the profile roots are Windows ones.
+                b.bare
+            }
+        })
         .collect()
 }
 
@@ -1582,6 +1623,36 @@ pub(crate) fn dpapi(encrypt: bool, input: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn switcher_email_is_the_selected_row_of_that_account() {
+        let row = |index, selected, email: &str| Channel {
+            account_index: index,
+            selected,
+            email: email.into(),
+            name: "x".into(),
+            ..Default::default()
+        };
+        let rows = [row(0, false, "a@x.com"), row(1, true, "b@x.com")];
+        assert_eq!(switcher_email(&rows, 1).as_deref(), Some("b@x.com"));
+        // The switcher answering as another account must not vouch for this one.
+        assert_eq!(switcher_email(&rows, 0), None);
+        assert_eq!(switcher_email(&[row(0, true, "")], 0), None);
+    }
+
+    #[test]
+    fn zen_is_read_as_firefox_by_profile_path_only() {
+        let zen = BROWSERS.into_iter().find(|b| b.label == "Zen").unwrap();
+        let root = std::env::temp_dir().join(format!("ytdugem-zen-{}", std::process::id()));
+        let profile = root.join("abc.Default (alpha)");
+        fs::create_dir_all(&profile).unwrap();
+        fs::create_dir_all(root.join("no-cookies")).unwrap();
+        fs::write(profile.join("cookies.sqlite"), b"").unwrap();
+        let selectors = zen.selectors_in(Some(root.clone()));
+        let _ = fs::remove_dir_all(&root);
+        // Never the bare "firefox", which would read Firefox's own profile instead.
+        assert_eq!(selectors, [format!("firefox:{}", profile.display())]);
+    }
 
     #[test]
     fn cookie_file_is_netscape_format_for_yt_dlp() {
