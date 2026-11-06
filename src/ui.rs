@@ -17,7 +17,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -30,7 +30,7 @@ const WHITE: Color32 = Color32::from_rgb(244, 244, 242);
 const ACCENT: Color32 = Color32::from_rgb(178, 208, 158);
 const ERROR: Color32 = Color32::from_rgb(232, 120, 110);
 
-#[derive(Clone, PartialEq, Hash)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 enum Page {
     Home,
     Explore,
@@ -178,6 +178,8 @@ pub struct YTDugem {
     /// `--screenshot FILE`: save the window after `SCREENSHOT_FRAMES` frames, then exit.
     screenshot: Option<PathBuf>,
     screenshot_requested: bool,
+    /// Filled by the screenshot callback once the frame has been captured.
+    screenshot_image: Arc<Mutex<Option<Arc<egui::ColorImage>>>>,
     frames: u32,
     /// The upcoming track's resolved stream (key, stream, when), prepared while this one plays.
     prepared: Option<(String, Stream, Instant)>,
@@ -238,14 +240,18 @@ impl YTDugem {
             && !self.screenshot_requested
         {
             self.screenshot_requested = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            let slot = self.screenshot_image.clone();
+            let repaint = ctx.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                egui::ScreenshotCallback::new(move |image| {
+                    if let Ok(mut slot) = slot.lock() {
+                        *slot = Some(image);
+                    }
+                    repaint.request_repaint();
+                }),
+            ));
         }
-        let image = ctx.input(|i| {
-            i.raw.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
+        let image = self.screenshot_image.lock().ok().and_then(|mut s| s.take());
         if let Some(image) = image {
             let [w, h] = image.size;
             let rgba: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
@@ -382,6 +388,7 @@ impl YTDugem {
             quitting: false,
             screenshot: None,
             screenshot_requested: false,
+            screenshot_image: Arc::default(),
             frames: 0,
             prepared: None,
             preparing: None,
@@ -1075,8 +1082,7 @@ impl YTDugem {
         for d in &self.downloads {
             let (rect, _) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 58.0), egui::Sense::hover());
-            ui.painter()
-                .rect_filled(rect, 8.0, Color32::from_white_alpha(6));
+            ui.painter().rect_filled(rect, 8.0, widgets::white_alpha(6));
             let art = Rect::from_min_size(rect.min + Vec2::new(7.0, 7.0), Vec2::splat(44.0));
             draw_cover(ui, &d.track, art, None);
             let x = art.right() + 12.0;
@@ -1114,8 +1120,7 @@ impl YTDugem {
                     Pos2::new(x, rect.bottom() - 6.0),
                     Vec2::new(rect.right() - 90.0 - x, 3.0),
                 );
-                ui.painter()
-                    .rect_filled(bar, 1.5, Color32::from_white_alpha(25));
+                ui.painter().rect_filled(bar, 1.5, widgets::white_alpha(25));
                 ui.painter().rect_filled(
                     Rect::from_min_size(bar.min, Vec2::new(bar.width() * f, 3.0)),
                     1.5,
@@ -1431,7 +1436,7 @@ impl YTDugem {
             self.open_playlist_dialog(PlaylistDialog::AddTo {
                 track: track.clone(),
             });
-            ui.close_menu();
+            ui.close();
         }
     }
     /// Entries that act on the playlist the row is in: remove and move.
@@ -1458,7 +1463,7 @@ impl YTDugem {
                     services::remove_from_playlist(&id, &video_id, &set_id)?;
                     Ok(PlaylistEdit::Removed { id, video_id })
                 });
-                ui.close_menu();
+                ui.close();
             }
             for (label, enabled, up) in [
                 ("Move up", has_previous, true),
@@ -1469,7 +1474,7 @@ impl YTDugem {
                     .clicked()
                 {
                     self.move_account_entry(id.clone(), track.id.clone(), up);
-                    ui.close_menu();
+                    ui.close();
                 }
             }
         }
@@ -1493,12 +1498,12 @@ impl YTDugem {
                     if let Some(to) = target {
                         changed |= self.library.move_in_playlist(i, position, to);
                     }
-                    ui.close_menu();
+                    ui.close();
                 }
             }
             if ui.button("Remove from playlist").clicked() {
                 changed |= self.library.remove_from_playlist(i, track.key());
-                ui.close_menu();
+                ui.close();
             }
             if changed {
                 self.save();
@@ -1753,7 +1758,7 @@ impl YTDugem {
                         seed,
                     } => {
                         let r = ui.add(
-                            egui::TextEdit::singleline(name)
+                            egui::TextEdit::singleline(name).margin(TEXT_MARGIN)
                                 .hint_text("Playlist name")
                                 .desired_width(f32::INFINITY),
                         );
@@ -1778,7 +1783,7 @@ impl YTDugem {
                     PlaylistDialog::Rename { name, .. }
                     | PlaylistDialog::RenameLocal { name, .. } => {
                         let r =
-                            ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+                            ui.add(egui::TextEdit::singleline(name).margin(TEXT_MARGIN).desired_width(f32::INFINITY));
                         r.request_focus();
                         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             act = DialogAct::Submit;
@@ -1786,7 +1791,7 @@ impl YTDugem {
                     }
                     PlaylistDialog::Description { text, .. } => {
                         ui.add(
-                            egui::TextEdit::multiline(text)
+                            egui::TextEdit::multiline(text).margin(TEXT_MARGIN)
                                 .hint_text("Description")
                                 .desired_rows(4)
                                 .desired_width(f32::INFINITY),
@@ -2106,10 +2111,11 @@ impl YTDugem {
                             let (r, _) =
                                 ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
                             widgets::paint(ui.painter(), Icon::Search, r, MUTED);
-                            ui.add(
+                            muted_hint(
+                                ui,
                                 egui::TextEdit::singleline(&mut self.settings_query)
                                     .hint_text(RichText::new("Search settings").color(MUTED))
-                                    .frame(false)
+                                    .frame(bare_text_frame())
                                     .desired_width(220.0),
                             );
                         });
@@ -2486,6 +2492,7 @@ impl YTDugem {
                             }
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.download_path)
+                                    .margin(TEXT_MARGIN)
                                     .desired_width(300.0),
                             );
                         },
@@ -2537,6 +2544,7 @@ impl YTDugem {
                                     egui::TextEdit::singleline(
                                         &mut self.library.discord_activity_name,
                                     )
+                                    .margin(TEXT_MARGIN)
                                     .desired_width(240.0),
                                 )
                                 .changed()
@@ -2713,6 +2721,7 @@ impl YTDugem {
                     let input = self.lyric_key_inputs.entry(key.to_owned()).or_default();
                     ui.add(
                         egui::TextEdit::singleline(input)
+                            .margin(TEXT_MARGIN)
                             .password(true)
                             .hint_text(if configured {
                                 "Paste to replace"
@@ -2813,7 +2822,7 @@ impl YTDugem {
                     .unwrap_or_else(|| self.palette_query.clone()),
             );
         }
-        let modal = egui::Modal::new(egui::Id::new("global-search"))
+        let modal = egui::Modal::new(egui::Id::unique("global-search"))
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(560.0);
@@ -2828,12 +2837,13 @@ impl YTDugem {
                             let (r, _) =
                                 ui.allocate_exact_size(Vec2::splat(20.0), egui::Sense::hover());
                             widgets::paint(ui.painter(), Icon::Search, r, MUTED);
-                            let field = ui.add(
+                            let field = muted_hint(
+                                ui,
                                 egui::TextEdit::singleline(&mut self.palette_query)
-                                    .id(egui::Id::new("palette-input"))
-                                    .hint_text(RichText::new("Search YouTube Music").color(MUTED))
+                                    .id(egui::Id::unique("palette-input"))
+                                    .hint_text(RichText::new("Search YouTube Music").size(18.0).color(MUTED))
                                     .font(FontId::proportional(18.0))
-                                    .frame(false)
+                                    .frame(bare_text_frame())
                                     .desired_width(f32::INFINITY),
                             );
                             if self.palette_focus {
@@ -2868,7 +2878,7 @@ impl YTDugem {
                             let lit = self.palette_selected == Some(i) || response.hovered();
                             if lit {
                                 ui.painter()
-                                    .rect_filled(rect, 8.0, Color32::from_white_alpha(14));
+                                    .rect_filled(rect, 8.0, widgets::white_alpha(14));
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
                             let icon = Rect::from_min_size(rect.min + Vec2::new(10.0, 9.0), Vec2::splat(16.0));
@@ -3058,27 +3068,26 @@ impl YTDugem {
     fn account_button(&mut self, ui: &mut egui::Ui) {
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(34.0), egui::Sense::click());
         let popup = ui.make_persistent_id("account-menu");
-        let open = ui.memory(|m| m.is_popup_open(popup));
+        let open = egui::Popup::is_id_open(ui.ctx(), popup);
         if response.hovered() || open {
             ui.painter()
-                .circle_filled(rect.center(), 17.0, Color32::from_white_alpha(18));
+                .circle_filled(rect.center(), 17.0, widgets::white_alpha(18));
         }
         let picture = Rect::from_center_size(rect.center(), Vec2::splat(28.0));
         match &self.account {
             Some(a) => avatar(ui, &a.thumbnail, &a.name, picture),
             None => {
                 ui.painter()
-                    .circle_filled(picture.center(), 14.0, Color32::from_white_alpha(22));
+                    .circle_filled(picture.center(), 14.0, widgets::white_alpha(22));
                 widgets::paint(ui.painter(), Icon::User, picture.shrink(7.0), MUTED);
             }
         }
         let response = response.on_hover_text("Account");
         if response.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(popup));
+            egui::Popup::toggle_id(ui.ctx(), popup);
         }
         let mut action = None;
-        egui::popup_below_widget(
-            ui,
+        popup_below_widget(
             popup,
             &response,
             egui::PopupCloseBehavior::CloseOnClickOutside,
@@ -3139,7 +3148,7 @@ impl YTDugem {
             },
         );
         if let Some(action) = action {
-            ui.memory_mut(|m| m.close_popup());
+            egui::Popup::close_id(ui.ctx(), popup);
             match action {
                 AccountAction::Switch(channel) => self.switch_channel(channel),
                 AccountAction::Settings => self.navigate(Page::Settings),
@@ -3160,7 +3169,7 @@ impl YTDugem {
         }
         let busy = self.sign_in.busy;
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new("sign-in"))
+        let modal = egui::Modal::new(egui::Id::unique("sign-in"))
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 dialog_frame(ui, |ui| {
@@ -3249,11 +3258,10 @@ impl YTDugem {
         let picker = ui.add_enabled(!busy, egui::Button::new("Import from a browser  ⌄"));
         let popup = ui.make_persistent_id("import-browsers");
         if picker.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(popup));
+            egui::Popup::toggle_id(ui.ctx(), popup);
         }
         let mut chosen = None;
-        egui::popup_below_widget(
-            ui,
+        popup_below_widget(
             popup,
             &picker,
             egui::PopupCloseBehavior::CloseOnClick,
@@ -3301,11 +3309,12 @@ impl YTDugem {
                     .max_height(96.0)
                     .id_salt("cookie-box")
                     .show(ui, |ui| {
-                        ui.add(
+                        muted_hint(
+                            ui,
                             egui::TextEdit::multiline(&mut self.sign_in.cookie)
                                 .password(true)
                                 .hint_text(RichText::new("Paste the Cookie header").color(MUTED))
-                                .frame(false)
+                                .frame(bare_text_frame())
                                 .desired_rows(3)
                                 .desired_width(f32::INFINITY),
                         );
@@ -3319,7 +3328,7 @@ impl YTDugem {
         let mut picked = None;
         let (mut back, mut close) = (false, false);
         let accounts = self.sign_in.accounts.clone().unwrap_or_default();
-        let modal = egui::Modal::new(egui::Id::new("sign-in-accounts"))
+        let modal = egui::Modal::new(egui::Id::unique("sign-in-accounts"))
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 dialog_frame(ui, |ui| {
@@ -3342,7 +3351,7 @@ impl YTDugem {
                         );
                         let fill = if row.hovered() && enabled { 16 } else { 6 };
                         ui.painter()
-                            .rect_filled(rect, 12.0, Color32::from_white_alpha(fill));
+                            .rect_filled(rect, 12.0, widgets::white_alpha(fill));
                         let avatar_rect = Rect::from_min_size(
                             rect.min + Vec2::new(12.0, 12.0),
                             Vec2::splat(40.0),
@@ -3418,12 +3427,12 @@ impl YTDugem {
                         }
                     }
                 }
-                Event::Suggestions(id, query, r) if id == self.palette_request => {
-                    if query == self.palette_query.trim() {
-                        self.palette_loading = false;
-                        self.palette_suggestions = r.unwrap_or_default();
-                        self.palette_selected = None;
-                    }
+                Event::Suggestions(id, query, r)
+                    if id == self.palette_request && query == self.palette_query.trim() =>
+                {
+                    self.palette_loading = false;
+                    self.palette_suggestions = r.unwrap_or_default();
+                    self.palette_selected = None;
                 }
                 Event::PlaylistEdited(r) => self.playlist_edited(r),
                 Event::BulkTracks(action, origin, r) => {
@@ -3794,10 +3803,10 @@ impl YTDugem {
                             widgets::paint(ui.painter(), Icon::Search, r, MUTED);
                             let response = ui.add(
                                 egui::TextEdit::singleline(&mut self.query)
-                                    .id(egui::Id::new("search_input"))
+                                    .id(egui::Id::unique("search_input"))
                                     .desired_width(rect.width() - 78.0)
                                     .hint_text("Search")
-                                    .frame(false),
+                                    .frame(bare_text_frame()),
                             );
                             if response.lost_focus()
                                 && ui.input(|s| s.key_pressed(egui::Key::Enter))
@@ -3839,7 +3848,7 @@ impl YTDugem {
                 self.navigate(page);
                 if self.page == Page::Search {
                     ui.ctx()
-                        .memory_mut(|m| m.request_focus(egui::Id::new("search_input")));
+                        .memory_mut(|m| m.request_focus(egui::Id::unique("search_input")));
                 }
             }
             y += 40.0;
@@ -4245,12 +4254,12 @@ impl YTDugem {
         if ui.button("Play next").clicked() {
             self.library.queue.insert(0, track.clone());
             self.save();
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Add to queue").clicked() {
             self.library.queue.push(track.clone());
             self.save();
-            ui.close_menu();
+            ui.close();
         }
         let liked = self.library.liked.iter().any(|t| t.key() == track.key());
         if ui
@@ -4263,12 +4272,12 @@ impl YTDugem {
         {
             self.library.like(track);
             self.save();
-            ui.close_menu();
+            ui.close();
         }
         self.playlist_menu(ui, track);
         if ui.button("Download audio").clicked() {
             self.download(track.clone());
-            ui.close_menu();
+            ui.close();
         }
         self.playlist_row_menu(ui, track);
     }
@@ -4285,11 +4294,8 @@ impl YTDugem {
             .as_ref()
             .is_some_and(|t| t.key() == track.key());
         if response.hovered() || active {
-            ui.painter().rect_filled(
-                rect,
-                5.0,
-                Color32::from_white_alpha(if active { 15 } else { 8 }),
-            );
+            ui.painter()
+                .rect_filled(rect, 5.0, widgets::white_alpha(if active { 15 } else { 8 }));
         }
         let offset = if let Some(i) = index {
             ui.painter().text(
@@ -4687,9 +4693,10 @@ impl YTDugem {
                 ui.horizontal(|ui| {
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut self.import_path)
+                            .margin(TEXT_MARGIN)
                             .desired_width(500.0)
                             .hint_text("Audio file or folder path")
-                            .id(egui::Id::new("local-import")),
+                            .id(egui::Id::unique("local-import")),
                     );
                     if ui.button("Import").clicked()
                         || r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
@@ -4737,9 +4744,9 @@ impl YTDugem {
     /// The Now Playing sheet. It rises over the window like upstream's `DesktopPlayerSheet`
     /// (`shown` runs 0 to 1 with the slide) and covers the page; the chevron or Escape lowers it.
     fn expanded_view(&mut self, ctx: &egui::Context, shown: f32) {
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         let top = screen.top() + (1.0 - shown) * screen.height();
-        egui::Area::new(egui::Id::new("player-sheet"))
+        egui::Area::new(egui::Id::unique("player-sheet"))
             .order(egui::Order::Middle)
             .fixed_pos(Pos2::new(screen.left(), top))
             .movable(false)
@@ -4895,19 +4902,18 @@ impl YTDugem {
                 Vec2::new(item, 28.0),
             );
             let selected = self.tab == *tab;
-            let response = ui.interact(r, ui.id().with(("sheet-tab", i)), egui::Sense::click());
+            let response = ui.interact(
+                r,
+                ui.scope_id().with(("sheet-tab", i)),
+                egui::Sense::click(),
+            );
             response.widget_info(|| {
-                egui::WidgetInfo::selected(
-                    egui::WidgetType::SelectableLabel,
-                    true,
-                    selected,
-                    *label,
-                )
+                egui::WidgetInfo::selected(egui::Role::Button, true, selected, *label)
             });
             if selected {
                 painter.rect_filled(r, 14.0, Color32::from_gray(236));
             } else if response.hovered() {
-                painter.rect_filled(r, 14.0, Color32::from_white_alpha(14));
+                painter.rect_filled(r, 14.0, widgets::white_alpha(14));
             }
             painter.text(
                 r.center(),
@@ -4947,7 +4953,7 @@ impl YTDugem {
             (None, Some(t)) => draw_image(ui, &t.thumbnail, art, None),
             (None, None) => {
                 ui.painter()
-                    .rect_filled(art, radius, Color32::from_white_alpha(12));
+                    .rect_filled(art, radius, widgets::white_alpha(12));
                 widgets::paint(
                     ui.painter(),
                     Icon::Logo,
@@ -5103,7 +5109,7 @@ impl YTDugem {
         let playing = !self.status.paused && !self.status.ended;
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
-                egui::WidgetType::Button,
+                egui::Role::Button,
                 !self.loading,
                 if playing {
                     "Pause · Space"
@@ -5168,11 +5174,11 @@ impl YTDugem {
         let size = Vec2::new(galley.size().x + 30.0, 26.0);
         let (rect, chip) = ui.allocate_exact_size(size, egui::Sense::click());
         let popup = ui.make_persistent_id("lyrics-source-popup");
-        let open = ui.memory(|m| m.is_popup_open(popup));
+        let open = egui::Popup::is_id_open(ui.ctx(), popup);
         let lit = chip.hovered() || open;
         if lit {
             ui.painter()
-                .rect_filled(rect, 13.0, Color32::from_white_alpha(16));
+                .rect_filled(rect, 13.0, widgets::white_alpha(16));
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         let color = if lit { WHITE } else { MUTED };
@@ -5192,45 +5198,39 @@ impl YTDugem {
         );
         let chip = chip.on_hover_text("Choose where the lyrics come from");
         if chip.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(popup));
+            egui::Popup::toggle_id(ui.ctx(), popup);
         }
         let mut pick = None;
-        egui::popup_below_widget(
-            ui,
-            popup,
-            &chip,
-            egui::PopupCloseBehavior::CloseOnClick,
-            |ui| {
-                ui.set_min_width(230.0);
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.spacing_mut().button_padding = Vec2::new(8.0, 5.0);
-                // Fits under the name rather than being pushed up over it: the list scrolls.
-                let room = ui.ctx().screen_rect().bottom() - chip.rect.bottom() - 24.0;
-                egui::ScrollArea::vertical()
-                    .max_height(room.max(120.0))
-                    .show(ui, |ui| {
-                        ui.set_min_width(230.0);
-                        let current = self.lyrics_override.clone();
+        popup_below_widget(popup, &chip, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+            ui.set_min_width(230.0);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().button_padding = Vec2::new(8.0, 5.0);
+            // Fits under the name rather than being pushed up over it: the list scrolls.
+            let room = ui.ctx().content_rect().bottom() - chip.rect.bottom() - 24.0;
+            egui::ScrollArea::vertical()
+                .max_height(room.max(120.0))
+                .show(ui, |ui| {
+                    ui.set_min_width(230.0);
+                    let current = self.lyrics_override.clone();
+                    if ui
+                        .selectable_label(current.is_none(), "Automatic (enabled order)")
+                        .clicked()
+                    {
+                        pick = Some(None);
+                    }
+                    ui.separator();
+                    for provider in services::lyrics::PROVIDERS {
+                        let chosen = current.as_deref() == Some(provider.id);
                         if ui
-                            .selectable_label(current.is_none(), "Automatic (enabled order)")
+                            .selectable_label(chosen, provider.label)
+                            .on_hover_text(provider.detail)
                             .clicked()
                         {
-                            pick = Some(None);
+                            pick = Some(Some(provider.id.to_owned()));
                         }
-                        ui.separator();
-                        for provider in services::lyrics::PROVIDERS {
-                            let chosen = current.as_deref() == Some(provider.id);
-                            if ui
-                                .selectable_label(chosen, provider.label)
-                                .on_hover_text(provider.detail)
-                                .clicked()
-                            {
-                                pick = Some(Some(provider.id.to_owned()));
-                            }
-                        }
-                    });
-            },
-        );
+                    }
+                });
+        });
         if let Some(choice) = pick {
             self.lyrics_override = choice.clone();
             self.request_lyrics(choice);
@@ -5341,9 +5341,9 @@ impl YTDugem {
                             active_idx = Some(i);
                         }
                         let dim = if past {
-                            Color32::from_white_alpha(70)
+                            widgets::white_alpha(70)
                         } else {
-                            Color32::from_white_alpha(110)
+                            widgets::white_alpha(110)
                         };
                         let size = if active { 28.0 } else { 24.0 };
                         let r = if line.words.is_empty() {
@@ -5511,7 +5511,7 @@ impl YTDugem {
             ui.painter().rect_filled(
                 rect,
                 8.0,
-                Color32::from_white_alpha(if current { 12 } else { 8 }),
+                widgets::white_alpha(if current { 12 } else { 8 }),
             );
         }
         let art = Rect::from_min_size(rect.min + Vec2::new(7.0, 7.0), Vec2::splat(44.0));
@@ -5924,6 +5924,23 @@ fn avatar(ui: &egui::Ui, url: &str, name: &str, rect: Rect) {
 }
 
 /// Explanatory text in a dialog.
+/// A list popup that hangs below `anchor` while `popup_id` is open in egui's memory (the caller
+/// toggles it). It never flips above the anchor, and closes on Escape or per `close`.
+fn popup_below_widget(
+    popup_id: egui::Id,
+    anchor: &egui::Response,
+    close: egui::PopupCloseBehavior,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Popup::from_response(anchor)
+        .id(popup_id)
+        .open_memory(None)
+        .align_alternatives(&[])
+        .close_behavior(close)
+        .layout(egui::Layout::top_down_justified(Align::LEFT))
+        .show(add_contents);
+}
+
 fn muted(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(RichText::new(text).color(MUTED).size(13.0)).wrap());
 }
@@ -5937,12 +5954,20 @@ enum QueueAction {
 }
 
 impl eframe::App for YTDugem {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    /// Runs before each `ui` and keeps ticking while the window is minimized or hidden in the
+    /// tray (eframe then runs no UI pass), so playback events and tray actions are still handled.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.events(ctx);
         if services::take_sign_in_rejected() {
             self.message = "Your YouTube sign-in has expired, so public music is shown. Open your account to sign in again.".into();
         }
-        let typing = ctx.wants_keyboard_input();
+        self.tray_step(ctx);
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
+        let typing = ctx.egui_wants_keyboard_input();
         // While the palette is open it owns Escape (its modal closes on it).
         let palette_open = self.palette_open;
         let (search, local, quit, escape, palette) = ctx.input_mut(|i| {
@@ -5958,17 +5983,16 @@ impl eframe::App for YTDugem {
             self.toggle_palette();
         }
         if search {
-            ctx.memory_mut(|m| m.request_focus(egui::Id::new("search_input")));
+            ctx.memory_mut(|m| m.request_focus(egui::Id::unique("search_input")));
         }
         if local {
             self.page = Page::Local;
-            ctx.memory_mut(|m| m.request_focus(egui::Id::new("local-import")));
+            ctx.memory_mut(|m| m.request_focus(egui::Id::unique("local-import")));
         }
         if quit {
             self.quitting = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        self.tray_step(ctx);
         if escape {
             self.expanded = false;
             if self.sign_in.open {
@@ -6020,25 +6044,25 @@ impl eframe::App for YTDugem {
         }
         // Upstream DesktopPlayerSheet: 360 ms up, 280 ms down, FastOutSlowIn.
         let shown = ctx.animate_bool_with_time_and_easing(
-            egui::Id::new("player-sheet-shown"),
+            egui::Id::unique("player-sheet-shown"),
             self.expanded,
             if self.expanded { 0.36 } else { 0.28 },
             egui::emath::easing::cubic_in_out,
         );
         if shown < 1.0 {
             if self.sidebar_open {
-                egui::SidePanel::left("sidebar")
-                    .exact_width(258.0)
+                egui::Panel::left("sidebar")
+                    .exact_size(258.0)
                     .resizable(false)
                     .frame(egui::Frame::new().fill(SIDE).inner_margin(0.0))
-                    .show(ctx, |ui| {
+                    .show(ui, |ui| {
                         self.sidebar(ui, ui.max_rect());
                     });
             }
-            egui::TopBottomPanel::top("topbar")
-                .exact_height(78.0)
+            egui::Panel::top("topbar")
+                .exact_size(78.0)
                 .frame(egui::Frame::new().fill(SIDE).inner_margin(0.0))
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     self.topbar(ui, ui.max_rect());
                 });
             egui::CentralPanel::default()
@@ -6047,7 +6071,7 @@ impl eframe::App for YTDugem {
                         .fill(BG)
                         .inner_margin(egui::Margin::same(28)),
                 )
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     // One scroll position per page: opening Settings from a scrolled Home page
                     // used to land halfway down it.
                     egui::ScrollArea::vertical()
@@ -6066,7 +6090,6 @@ impl eframe::App for YTDugem {
         self.palette(ctx);
         self.sign_in_dialog(ctx);
         self.playlist_dialog(ctx);
-        ctx.request_repaint_after(Duration::from_millis(100));
         self.screenshot_step(ctx);
     }
 }
@@ -6182,12 +6205,12 @@ fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
         *on = !*on;
         response.mark_changed();
     }
-    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *on, ""));
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, *on, ""));
     let t = ui.ctx().animate_bool(response.id, *on);
     let track = if *on {
         Color32::from_gray(236)
     } else {
-        Color32::from_white_alpha(if response.hovered() { 60 } else { 40 })
+        widgets::white_alpha(if response.hovered() { 60 } else { 40 })
     };
     ui.painter().rect_filled(rect, 11.0, track);
     let knob = egui::pos2(
@@ -6240,15 +6263,15 @@ fn window_controls(ui: &mut egui::Ui, bar: Rect) {
             ui.make_persistent_id(("caption", i)),
             egui::Sense::click(),
         );
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
         let close = i == 2;
         let pressed = response.is_pointer_button_down_on();
         if response.hovered() {
             let fill = match (close, pressed) {
                 (true, false) => Color32::from_rgb(196, 43, 28),
                 (true, true) => Color32::from_rgb(160, 32, 22),
-                (false, false) => Color32::from_white_alpha(20),
-                (false, true) => Color32::from_white_alpha(32),
+                (false, false) => widgets::white_alpha(20),
+                (false, true) => widgets::white_alpha(32),
             };
             ui.painter().rect_filled(r, 0.0, fill);
         }
@@ -6307,8 +6330,8 @@ fn soft_controls(ui: &mut egui::Ui) {
         (&mut w.active, 40),
         (&mut w.open, 30),
     ] {
-        state.weak_bg_fill = Color32::from_white_alpha(alpha);
-        state.bg_fill = Color32::from_white_alpha(alpha);
+        state.weak_bg_fill = widgets::white_alpha(alpha);
+        state.bg_fill = widgets::white_alpha(alpha);
         state.bg_stroke = Stroke::NONE;
         state.corner_radius = egui::CornerRadius::same(14);
         state.fg_stroke.color = WHITE;
@@ -6366,19 +6389,16 @@ fn truncate(s: &str, max: usize) -> String {
 fn nav_row(
     ui: &mut egui::Ui,
     r: Rect,
-    id: impl std::hash::Hash,
+    id: impl std::hash::Hash + std::fmt::Debug,
     icon: Icon,
     label: &str,
     selected: bool,
 ) -> egui::Response {
     let response = ui.interact(r, ui.make_persistent_id(id), egui::Sense::click());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     if selected || response.hovered() {
-        ui.painter().rect_filled(
-            r,
-            6.0,
-            Color32::from_white_alpha(if selected { 30 } else { 12 }),
-        );
+        ui.painter()
+            .rect_filled(r, 6.0, widgets::white_alpha(if selected { 30 } else { 12 }));
     }
     let color = if selected { WHITE } else { MUTED };
     widgets::paint(
@@ -6486,6 +6506,92 @@ fn artwork_at(url: &str, px: u32) -> String {
     out
 }
 
+/// Inner margin of a text field. egui 0.37 derives it from `button_padding`, which this app sets
+/// large for buttons; egui 0.31 used this fixed margin.
+const TEXT_MARGIN: egui::Margin = egui::Margin::symmetric(4, 2);
+
+/// Adds a text field whose hint text is muted. egui 0.37 colours every hint from the style (an
+/// explicit colour on the hint is overridden), and the style makes it white, as 0.31 did for
+/// hints that carried no colour of their own.
+fn muted_hint(ui: &mut egui::Ui, edit: egui::TextEdit<'_>) -> egui::Response {
+    ui.scope(|ui| {
+        ui.visuals_mut().weak_text_color = Some(MUTED);
+        ui.add(edit)
+    })
+    .inner
+}
+
+/// A text field that paints no background or outline of its own, with the egui 0.31 margin.
+fn bare_text_frame() -> egui::Frame {
+    egui::Frame::NONE.inner_margin(TEXT_MARGIN)
+}
+
+/// egui 0.32 to 0.37 changed several defaults (rounder, larger, slower widgets, a rubber-banding
+/// trackpad scroll). The layout here was tuned against 0.31, so those values are kept.
+fn legacy_look(style: &mut egui::Style) {
+    use egui::style::{HandleShape, WidgetVisuals, Widgets};
+    let gray = Color32::from_gray;
+    let widget =
+        |weak_bg: u8, bg: u8, bg_stroke: Stroke, fg_stroke: Stroke, radius: u8, expansion: f32| {
+            WidgetVisuals {
+                weak_bg_fill: gray(weak_bg),
+                bg_fill: gray(bg),
+                bg_stroke,
+                fg_stroke,
+                corner_radius: egui::CornerRadius::same(radius),
+                expansion,
+            }
+        };
+    style.animation_time = 1.0 / 12.0;
+    style.spacing.interact_size = Vec2::new(40.0, 18.0);
+    style.spacing.scroll.kinetic.rubber_band = false;
+    style.visuals.handle_shape = HandleShape::Circle;
+    // Hint text was drawn in the normal text colour, not the dimmer "weak" one.
+    style.visuals.weak_text_color = Some(WHITE);
+    style.visuals.widgets = Widgets {
+        noninteractive: widget(
+            27,
+            27,
+            Stroke::new(1.0_f32, gray(60)),
+            Stroke::new(1.0_f32, gray(140)),
+            2,
+            0.0,
+        ),
+        inactive: widget(
+            60,
+            60,
+            Stroke::NONE,
+            Stroke::new(1.0_f32, gray(180)),
+            2,
+            0.0,
+        ),
+        hovered: widget(
+            70,
+            70,
+            Stroke::new(1.0_f32, gray(150)),
+            Stroke::new(1.5_f32, gray(240)),
+            3,
+            1.0,
+        ),
+        active: widget(
+            55,
+            55,
+            Stroke::new(1.0_f32, Color32::WHITE),
+            Stroke::new(2.0_f32, Color32::WHITE),
+            2,
+            1.0,
+        ),
+        open: widget(
+            45,
+            27,
+            Stroke::new(1.0_f32, gray(60)),
+            Stroke::new(1.0_f32, gray(210)),
+            2,
+            0.0,
+        ),
+    };
+}
+
 fn configure_style(ctx: &egui::Context) {
     egui_extras::install_image_loaders(ctx);
     let mut fonts = egui::FontDefinitions::default();
@@ -6536,12 +6642,13 @@ fn configure_style(ctx: &egui::Context) {
         .families
         .insert(egui::FontFamily::Name("bold".into()), bold);
     ctx.set_fonts(fonts);
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style.visuals = egui::Visuals::dark();
+    legacy_look(&mut style);
     style.visuals.panel_fill = BG;
     style.visuals.window_fill = Color32::from_rgb(35, 36, 33);
     style.visuals.override_text_color = Some(WHITE);
-    style.visuals.faint_bg_color = Color32::from_white_alpha(8);
+    style.visuals.faint_bg_color = widgets::white_alpha(8);
     style.visuals.extreme_bg_color = Color32::from_rgb(31, 32, 29);
     style.visuals.selection.bg_fill = Color32::from_gray(65);
     style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(43, 44, 40);
@@ -6556,7 +6663,7 @@ fn configure_style(ctx: &egui::Context) {
     style
         .text_styles
         .insert(egui::TextStyle::Button, FontId::proportional(15.0));
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
 
 fn heading(text: impl Into<String>, size: f32) -> RichText {
