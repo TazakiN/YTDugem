@@ -31,17 +31,30 @@ pub enum Icon {
     Close,
 }
 
+/// White at `alpha` opacity, as egui 0.31's `Color32::from_white_alpha` made it: the opacity is
+/// linear light, so the premultiplied channels are the gamma encoding of `alpha / 255` and far
+/// brighter than `alpha` itself. egui 0.37 uses `alpha` for every channel, which would draw the
+/// translucent overlays here much darker.
+pub fn white_alpha(alpha: u8) -> Color32 {
+    let linear = f32::from(alpha) / 255.0;
+    let gamma = if linear <= 0.003_130_8 {
+        3294.6 * linear
+    } else {
+        269.025 * linear.powf(1.0 / 2.4) - 14.025
+    };
+    let channel = (gamma + 0.5) as u8;
+    Color32::from_rgba_premultiplied(channel, channel, channel, alpha)
+}
+
 pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, selected: bool, label: &str) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     if response.hovered() || selected {
         // A true circle: `rect_filled` with a corner radius above half the side drew stray arcs.
         ui.painter().circle_filled(
             rect.center(),
             size * 0.5 - 1.0,
-            Color32::from_white_alpha(if selected { 32 } else { 16 }),
+            white_alpha(if selected { 32 } else { 16 }),
         );
     }
     if matches!(icon, Icon::Logo) {
@@ -380,7 +393,7 @@ pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
 
 pub fn slider(
     ui: &mut egui::Ui,
-    id: impl std::hash::Hash,
+    id: impl std::hash::Hash + std::fmt::Debug,
     value: &mut f64,
     maximum: f64,
     width: f32,
@@ -388,9 +401,7 @@ pub fn slider(
 ) -> Response {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width.max(24.0), 24.0), Sense::hover());
     let response = ui.interact(rect, ui.make_persistent_id(id), Sense::click_and_drag());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Slider, ui.is_enabled(), label)
-    });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, ui.is_enabled(), label));
     let max = if maximum.is_finite() {
         maximum.max(0.0)
     } else {
@@ -410,7 +421,7 @@ pub fn slider(
     let b = Pos2::new(rect.right() - 4.0, rect.center().y);
     let knob = a.lerp(b, fraction);
     ui.painter()
-        .line_segment([a, b], Stroke::new(3.5_f32, Color32::from_white_alpha(50)));
+        .line_segment([a, b], Stroke::new(3.5_f32, white_alpha(50)));
     ui.painter()
         .line_segment([a, knob], Stroke::new(3.5_f32, Color32::from_gray(235)));
     ui.painter().circle_filled(
@@ -442,5 +453,15 @@ mod tests {
         assert_eq!(ratio(50.0, 0.0, 100.0), 0.5);
         assert_eq!(ratio(110.0, 0.0, 100.0), 1.0);
         assert_eq!(ratio(10.0, 5.0, 5.0), 0.0);
+    }
+
+    #[test]
+    fn white_overlays_keep_the_egui_031_brightness() {
+        assert_eq!(white_alpha(0), Color32::TRANSPARENT);
+        assert_eq!(white_alpha(255), Color32::WHITE);
+        // Opacity is linear light, so the channels are far brighter than the alpha itself.
+        let [r, g, b, a] = white_alpha(30).to_array();
+        assert_eq!((r, g, b, a), (96, 96, 96, 30));
+        assert!(white_alpha(16).r() > 16);
     }
 }
