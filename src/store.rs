@@ -5,8 +5,44 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Playlist {
+    /// Stable identifier; libraries saved before ids existed get one on load.
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     pub tracks: Vec<Track>,
+}
+
+fn new_playlist_id(playlists: &[Playlist]) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let mut index = playlists.len();
+    loop {
+        let id = format!("local-{nanos}-{index}");
+        if !playlists.iter().any(|p| p.id == id) {
+            return id;
+        }
+        index += 1;
+    }
+}
+
+/// Give blank or duplicated playlist ids a fresh, unique value.
+fn assign_playlist_ids(playlists: &mut [Playlist]) {
+    for i in 0..playlists.len() {
+        let duplicate = playlists[..i].iter().any(|p| p.id == playlists[i].id);
+        if playlists[i].id.trim().is_empty() || duplicate {
+            playlists[i].id = new_playlist_id(playlists);
+        }
+    }
+}
+
+fn clean_playlist_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        anyhow::bail!("A playlist needs a name");
+    }
+    Ok(name.to_owned())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -353,6 +389,7 @@ impl Library {
             1.0
         };
         value.audio.sanitize();
+        assign_playlist_ids(&mut value.playlists);
         Ok(value)
     }
 
@@ -384,6 +421,71 @@ impl Library {
         self.history.retain(|t| t.key() != track.key());
         self.history.insert(0, track.clone());
         self.history.truncate(100);
+    }
+
+    /// Create a playlist, optionally seeded with one track, and return its index.
+    pub fn create_playlist(&mut self, name: &str, seed: Option<Track>) -> Result<usize> {
+        let name = clean_playlist_name(name)?;
+        let id = new_playlist_id(&self.playlists);
+        self.playlists.push(Playlist {
+            id,
+            name,
+            tracks: seed.into_iter().collect(),
+        });
+        Ok(self.playlists.len() - 1)
+    }
+
+    pub fn rename_playlist(&mut self, index: usize, name: &str) -> Result<()> {
+        let name = clean_playlist_name(name)?;
+        let playlist = self
+            .playlists
+            .get_mut(index)
+            .context("Playlist not found")?;
+        playlist.name = name;
+        Ok(())
+    }
+
+    pub fn delete_playlist(&mut self, index: usize) -> Option<Playlist> {
+        (index < self.playlists.len()).then(|| self.playlists.remove(index))
+    }
+
+    /// Returns false for an invalid index or when a track with the same key is already present.
+    pub fn add_to_playlist(&mut self, index: usize, track: Track) -> bool {
+        let Some(playlist) = self.playlists.get_mut(index) else {
+            return false;
+        };
+        if playlist.tracks.iter().any(|t| t.key() == track.key()) {
+            return false;
+        }
+        playlist.tracks.push(track);
+        true
+    }
+
+    pub fn remove_from_playlist(&mut self, index: usize, key: &str) -> bool {
+        let Some(playlist) = self.playlists.get_mut(index) else {
+            return false;
+        };
+        match playlist.tracks.iter().position(|t| t.key() == key) {
+            Some(position) => {
+                playlist.tracks.remove(position);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Moves the track at `from` so it ends up at `to`; false if either position is out of range.
+    pub fn move_in_playlist(&mut self, index: usize, from: usize, to: usize) -> bool {
+        let Some(playlist) = self.playlists.get_mut(index) else {
+            return false;
+        };
+        let len = playlist.tracks.len();
+        if from >= len || to >= len {
+            return false;
+        }
+        let track = playlist.tracks.remove(from);
+        playlist.tracks.insert(to, track);
+        true
     }
 }
 
@@ -497,6 +599,88 @@ mod tests {
         );
         assert_eq!(malformed.audio.stereo_balance, 0.0);
         std::fs::remove_file(path).unwrap();
+    }
+
+    fn test_track(id: &str) -> Track {
+        Track {
+            id: id.into(),
+            title: format!("Track {id}"),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn local_playlist_edits_validate_names_indexes_and_duplicates() {
+        let mut library = Library::default();
+        assert!(library.create_playlist("   ", None).is_err());
+        assert!(library.create_playlist("", None).is_err());
+        let first = library
+            .create_playlist("  Mix  ", Some(test_track("a")))
+            .unwrap();
+        let second = library.create_playlist("Other", None).unwrap();
+        assert_eq!((first, second), (0, 1));
+        assert_eq!(library.playlists[0].name, "Mix");
+        assert_eq!(library.playlists[0].tracks.len(), 1);
+        assert_ne!(library.playlists[0].id, library.playlists[1].id);
+        assert!(!library.playlists[0].id.is_empty());
+
+        assert!(library.rename_playlist(0, "  Renamed ").is_ok());
+        assert_eq!(library.playlists[0].name, "Renamed");
+        assert!(library.rename_playlist(0, " \t ").is_err());
+        assert_eq!(library.playlists[0].name, "Renamed");
+        assert!(library.rename_playlist(9, "Nope").is_err());
+
+        assert!(library.add_to_playlist(1, test_track("b")));
+        assert!(library.add_to_playlist(1, test_track("c")));
+        assert!(
+            !library.add_to_playlist(1, test_track("b")),
+            "dedupe by key"
+        );
+        assert!(!library.add_to_playlist(9, test_track("d")));
+        assert_eq!(library.playlists[1].tracks.len(), 2);
+
+        assert!(library.move_in_playlist(1, 0, 1));
+        let keys: Vec<&str> = library.playlists[1]
+            .tracks
+            .iter()
+            .map(|t| t.key())
+            .collect();
+        assert_eq!(keys, ["c", "b"]);
+        assert!(!library.move_in_playlist(1, 0, 2), "target out of range");
+        assert!(!library.move_in_playlist(1, 2, 0), "source out of range");
+        assert!(!library.move_in_playlist(9, 0, 0));
+
+        assert!(library.remove_from_playlist(1, "c"));
+        assert!(!library.remove_from_playlist(1, "c"));
+        assert!(!library.remove_from_playlist(9, "b"));
+        assert_eq!(library.playlists[1].tracks, vec![test_track("b")]);
+
+        assert!(library.delete_playlist(9).is_none());
+        let removed = library.delete_playlist(0).unwrap();
+        assert_eq!(removed.name, "Renamed");
+        assert_eq!(library.playlists.len(), 1);
+        assert_eq!(library.playlists[0].name, "Other");
+    }
+
+    #[test]
+    fn old_playlists_without_ids_load_with_unique_ids() {
+        let dir =
+            std::env::temp_dir().join(format!("bitchord-playlist-ids-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.json");
+        std::fs::write(
+            &path,
+            r#"{"playlists":[{"name":"Old","tracks":[]},{"name":"Older","tracks":[]},{"id":"keep","name":"Kept","tracks":[]},{"id":"keep","name":"Dup","tracks":[]}]}"#,
+        )
+        .unwrap();
+        let loaded = Library::load(&path).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        let ids: Vec<&str> = loaded.playlists.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(loaded.playlists[0].name, "Old");
+        assert_eq!(ids[2], "keep");
+        assert!(ids.iter().all(|id| !id.is_empty()));
+        let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "ids must be unique: {ids:?}");
     }
 
     #[test]

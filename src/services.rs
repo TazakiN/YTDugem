@@ -75,6 +75,12 @@ pub struct Collection {
     pub editable: bool,
     /// Video id to the playlist entry id (`playlistSetVideoId`) that removal needs.
     pub set_ids: std::collections::HashMap<String, String>,
+    /// Whether the page's save-to-library toggle says it is saved; None without such a toggle.
+    pub saved: Option<bool>,
+    /// Header description text, empty when the page has none.
+    pub description: String,
+    /// `PUBLIC`/`UNLISTED`/`PRIVATE`, from the owner's editable header only.
+    pub privacy: Option<String>,
 }
 
 fn client() -> Result<reqwest::blocking::Client> {
@@ -496,7 +502,51 @@ fn parse_collection(v: &Value) -> Collection {
         playlist_id: None,
         editable: find_renderer(v, "musicEditablePlaylistDetailHeaderRenderer").is_some(),
         set_ids: set_ids(v),
+        saved: library_saved(v),
+        description: header_description(v, header),
+        privacy: find_renderer(v, "musicPlaylistEditHeaderRenderer")
+            .and_then(|h| h["privacy"].as_str())
+            .map(str::to_owned),
     }
+}
+
+/// Port of upstream `parseLibraryState`: the responsive header's save toggle (bookmark icons)
+/// and its `isToggled`; None without an enabled toggle or without the play button's playlist.
+fn library_saved(v: &Value) -> Option<bool> {
+    let buttons = find_renderer(v, "musicResponsiveHeaderRenderer")?
+        .get("buttons")?
+        .as_array()?;
+    let save = buttons
+        .iter()
+        .filter_map(|b| b.get("toggleButtonRenderer"))
+        .find(|b| {
+            b.pointer("/defaultIcon/iconType").and_then(Value::as_str) == Some("BOOKMARK_BORDER")
+                || b.pointer("/toggledIcon/iconType").and_then(Value::as_str) == Some("BOOKMARK")
+        })?;
+    let flag = |x: &Value| x.as_bool().or_else(|| x.as_str().map(|s| s == "true"));
+    if flag(&save["isDisabled"]) == Some(true) {
+        return None;
+    }
+    let play = buttons
+        .iter()
+        .find_map(|b| b.pointer("/musicPlayButtonRenderer/playNavigationEndpoint"))?;
+    play.pointer("/watchPlaylistEndpoint/playlistId")
+        .or_else(|| play.pointer("/watchEndpoint/playlistId"))?;
+    Some(flag(&save["isToggled"]) == Some(true))
+}
+
+fn header_description(v: &Value, header: &Value) -> String {
+    let candidates = [
+        header.pointer("/description/musicDescriptionShelfRenderer/description"),
+        header.get("description"),
+        find_renderer(v, "musicPlaylistEditHeaderRenderer").and_then(|h| h.get("description")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .map(text)
+        .find(|t| !t.trim().is_empty())
+        .unwrap_or_default()
 }
 /// `playlistItemData` of every playlist row: video id to its entry id. Only rows actually in a
 /// playlist carry one (upstream `InnertubeParser`).
@@ -527,13 +577,188 @@ fn set_ids(v: &Value) -> std::collections::HashMap<String, String> {
 /// Playlists in the signed-in account's library (`FEmusic_liked_playlists`): its own and those
 /// it saved. The grid's "New playlist" tile has no browse id and is left out.
 pub fn library_playlists() -> Result<Vec<ShelfItem>> {
-    let v = account_call("browse", json!({"browseId": "FEmusic_liked_playlists"}))?;
-    let mut items = vec![];
-    collect_cards(&v, &mut items);
-    items.retain(|i| i.browse_id.as_deref().is_some_and(|b| b.starts_with("VL")));
-    let mut seen = HashSet::new();
-    items.retain(|i| seen.insert(i.browse_id.clone()));
+    let mut v = account_call("browse", json!({"browseId": "FEmusic_liked_playlists"}))?;
+    let mut items: Vec<ShelfItem> = vec![];
+    let mut page = 1;
+    loop {
+        merge_playlist_cards(&v, &mut items);
+        let Some(token) = continuation(&v) else { break };
+        if page >= MAX_PAGES {
+            break;
+        }
+        page += 1;
+        // A failed later page keeps what was already collected (upstream `itemsPaged`).
+        match account_call("browse", json!({"continuation": token})) {
+            Ok(next) => v = next,
+            Err(_) => break,
+        }
+    }
     Ok(items)
+}
+
+/// Upstream `YtMusicRepository.MAX_PAGES`.
+const MAX_PAGES: usize = 10;
+
+/// Add one library page's playlist cards to `items`, skipping the "New playlist" tile (no `VL`
+/// browse id) and ones already collected.
+fn merge_playlist_cards(v: &Value, items: &mut Vec<ShelfItem>) {
+    let mut page = vec![];
+    collect_cards(v, &mut page);
+    for item in page {
+        if item
+            .browse_id
+            .as_deref()
+            .is_some_and(|b| b.starts_with("VL"))
+            && !items.iter().any(|i| i.browse_id == item.browse_id)
+        {
+            items.push(item);
+        }
+    }
+}
+
+/// Save a playlist or album to the library, or take it back out (upstream `ratePlaylist`).
+pub fn set_playlist_saved(playlist_id: &str, saved: bool) -> Result<()> {
+    let endpoint = if saved {
+        "like/like"
+    } else {
+        "like/removelike"
+    };
+    account_call(
+        endpoint,
+        json!({"target": {"playlistId": playlist_id.trim_start_matches("VL")}}),
+    )
+    .map(|_| ())
+}
+
+/// Every track of a playlist: the first page and all continuations, merged.
+pub fn playlist_all(browse_id: &str) -> Result<Collection> {
+    let mut all = collection(browse_id, None)?;
+    let mut seen: HashSet<String> = all.tracks.iter().map(|t| t.id.clone()).collect();
+    let mut token = all.continuation.take();
+    let mut page = 1;
+    while let Some(t) = token {
+        if page >= MAX_PAGES {
+            bail!("playlist too long");
+        }
+        page += 1;
+        let more = collection_more(&t)?;
+        all.tracks.extend(
+            more.tracks
+                .into_iter()
+                .filter(|t| seen.insert(t.id.clone())),
+        );
+        for (video, set) in more.set_ids {
+            all.set_ids.entry(video).or_insert(set);
+        }
+        token = more.continuation;
+    }
+    Ok(all)
+}
+
+/// One step of a reorder: put entry `set_video_id` directly before `before`, or at the end.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlaylistMove {
+    pub set_video_id: String,
+    pub before: Option<String>,
+}
+
+/// Port of upstream `playlistMoves`: the fewest moves turning `current` into `target` (both
+/// entry ids). Empty when unchanged or when they are not the same set of unique entries.
+fn playlist_moves(current: &[String], target: &[String]) -> Vec<PlaylistMove> {
+    if current == target {
+        return vec![];
+    }
+    let cur: HashSet<&String> = current.iter().collect();
+    let tgt: HashSet<&String> = target.iter().collect();
+    if current.len() != target.len() || cur != tgt || cur.len() != current.len() {
+        return vec![];
+    }
+    let position: std::collections::HashMap<&String, usize> =
+        current.iter().enumerate().map(|(i, id)| (id, i)).collect();
+    let values: Vec<usize> = target.iter().map(|id| position[id]).collect();
+    let stay: HashSet<usize> = longest_increasing_run(&values).into_iter().collect();
+    let mut moves = vec![];
+    for index in (0..target.len()).rev() {
+        if stay.contains(&index) {
+            continue;
+        }
+        moves.push(PlaylistMove {
+            set_video_id: target[index].clone(),
+            before: target.get(index + 1).cloned(),
+        });
+    }
+    moves
+}
+
+/// Indices into `values` of one longest strictly increasing subsequence.
+fn longest_increasing_run(values: &[usize]) -> Vec<usize> {
+    if values.is_empty() {
+        return vec![];
+    }
+    let mut tails: Vec<usize> = vec![];
+    let mut previous = vec![usize::MAX; values.len()];
+    for i in 0..values.len() {
+        let low = tails.partition_point(|&t| values[t] < values[i]);
+        if low > 0 {
+            previous[i] = tails[low - 1];
+        }
+        if low == tails.len() {
+            tails.push(i);
+        } else {
+            tails[low] = i;
+        }
+    }
+    let mut run = vec![];
+    let mut at = *tails.last().unwrap();
+    while at != usize::MAX {
+        run.push(at);
+        at = previous[at];
+    }
+    run.reverse();
+    run
+}
+
+fn move_actions(moves: &[PlaylistMove]) -> Value {
+    Value::Array(
+        moves
+            .iter()
+            .map(|m| {
+                let mut a =
+                    json!({"action": "ACTION_MOVE_VIDEO_BEFORE", "setVideoId": m.set_video_id});
+                if let Some(before) = &m.before {
+                    a["movedSetVideoIdSuccessor"] = json!(before);
+                }
+                a
+            })
+            .collect(),
+    )
+}
+
+/// Rearrange a playlist from `current` to `target` (entry ids), 50 moves per request.
+pub fn reorder_playlist(playlist_id: &str, current: &[String], target: &[String]) -> Result<()> {
+    for batch in playlist_moves(current, target).chunks(50) {
+        edit_playlist(playlist_id, move_actions(batch))?;
+    }
+    Ok(())
+}
+
+pub fn set_playlist_privacy(playlist_id: &str, privacy: &str) -> Result<()> {
+    if !PLAYLIST_PRIVACY.iter().any(|(p, _)| *p == privacy) {
+        bail!("Unknown playlist privacy {privacy}");
+    }
+    edit_playlist(
+        playlist_id,
+        json!([{"action": "ACTION_SET_PLAYLIST_PRIVACY", "playlistPrivacy": privacy}]),
+    )
+    .map(|_| ())
+}
+
+pub fn set_playlist_description(playlist_id: &str, description: &str) -> Result<()> {
+    edit_playlist(
+        playlist_id,
+        json!([{"action": "ACTION_SET_PLAYLIST_DESCRIPTION", "playlistDescription": description}]),
+    )
+    .map(|_| ())
 }
 
 /// Privacy choices for a new playlist: (API value, label).
@@ -1298,6 +1523,100 @@ mod tests {
         );
         assert!(result.is_err());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn playlist_moves_port() {
+        let v = |s: &str| s.chars().map(|c| c.to_string()).collect::<Vec<_>>();
+        let apply = |cur: &[String], moves: &[PlaylistMove]| {
+            let mut l = cur.to_vec();
+            for m in moves {
+                l.retain(|x| *x != m.set_video_id);
+                let at = m
+                    .before
+                    .as_ref()
+                    .and_then(|b| l.iter().position(|x| x == b))
+                    .unwrap_or(l.len());
+                l.insert(at, m.set_video_id.clone());
+            }
+            l
+        };
+        assert!(playlist_moves(&v("abc"), &v("abc")).is_empty());
+        assert!(playlist_moves(&v("abc"), &v("abd")).is_empty());
+        assert!(playlist_moves(&v("abc"), &v("ab")).is_empty());
+        assert!(playlist_moves(&v("aab"), &v("aba")).is_empty());
+        let one = playlist_moves(&v("abcde"), &v("acdeb"));
+        assert_eq!(
+            one,
+            vec![PlaylistMove {
+                set_video_id: "b".into(),
+                before: None
+            }]
+        );
+        for (a, b) in [
+            ("abcde", "edcba"),
+            ("abcdef", "badcfe"),
+            ("abcd", "dabc"),
+            ("abcde", "cabed"),
+        ] {
+            let moves = playlist_moves(&v(a), &v(b));
+            assert_eq!(apply(&v(a), &moves), v(b), "{a} -> {b}");
+        }
+        assert_eq!(
+            move_actions(&one),
+            json!([{"action":"ACTION_MOVE_VIDEO_BEFORE","setVideoId":"b"}])
+        );
+        assert_eq!(
+            move_actions(&playlist_moves(&v("abc"), &v("cab"))),
+            json!([{"action":"ACTION_MOVE_VIDEO_BEFORE","setVideoId":"c","movedSetVideoIdSuccessor":"a"}])
+        );
+    }
+
+    #[test]
+    fn library_pages_merge_and_skip_tiles() {
+        let card = |id: Option<&str>, t: &str| {
+            let mut c = json!({"title":{"runs":[{"text":t}]}});
+            if let Some(id) = id {
+                c["navigationEndpoint"] = json!({"browseEndpoint":{"browseId":id}});
+            }
+            json!({"musicTwoRowItemRenderer": c})
+        };
+        let mut items = vec![];
+        merge_playlist_cards(
+            &json!({"items":[card(None,"New"),card(Some("VLPL1"),"One")]}),
+            &mut items,
+        );
+        merge_playlist_cards(
+            &json!({"items":[card(Some("VLPL1"),"One"),card(Some("VLPL2"),"Two")]}),
+            &mut items,
+        );
+        let ids: Vec<_> = items.iter().filter_map(|i| i.browse_id.clone()).collect();
+        assert_eq!(ids, ["VLPL1", "VLPL2"]);
+    }
+
+    #[test]
+    fn collection_exposes_saved_description_and_privacy() {
+        let page = |toggled: Value| {
+            json!({"header":{"musicResponsiveHeaderRenderer":{
+            "title":{"runs":[{"text":"T"}]},
+            "description":{"musicDescriptionShelfRenderer":{"description":{"runs":[{"text":"About it"}]}}},
+            "buttons":[
+                {"musicPlayButtonRenderer":{"playNavigationEndpoint":{"watchPlaylistEndpoint":{"playlistId":"OLAK5uy_x"}}}},
+                {"toggleButtonRenderer":{"isToggled":toggled,"defaultIcon":{"iconType":"BOOKMARK_BORDER"},"toggledIcon":{"iconType":"BOOKMARK"}}}
+            ]}}})
+        };
+        let c = parse_collection(&page(json!(true)));
+        assert_eq!(c.saved, Some(true));
+        assert_eq!(c.description, "About it");
+        assert_eq!(parse_collection(&page(json!(false))).saved, Some(false));
+        assert_eq!(parse_collection(&json!({})).saved, None);
+        let owned = json!({"header":{"musicEditablePlaylistDetailHeaderRenderer":{
+            "editHeader":{"musicPlaylistEditHeaderRenderer":{"privacy":"UNLISTED","description":{"runs":[{"text":"Mine"}]}}},
+            "header":{"musicResponsiveHeaderRenderer":{"title":{"simpleText":"Mine"}}}}}});
+        let c = parse_collection(&owned);
+        assert_eq!(c.privacy.as_deref(), Some("UNLISTED"));
+        assert_eq!(c.description, "Mine");
+        assert_eq!(c.saved, None);
     }
 
     #[test]

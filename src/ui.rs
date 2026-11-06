@@ -6,10 +6,11 @@ use crate::{
     player::{Player, PlayerStatus, Stream},
     services::translate::{self, Translation},
     services::{self, Collection, HomeFeed, HomeShelf, LyricLine, ShelfItem},
-    store::{self, Library, Playlist},
+    store::{self, Library},
     widgets::{self, Icon},
 };
 use eframe::egui::{self, Align, Color32, FontId, Pos2, Rect, RichText, Stroke, Vec2};
+use rand::seq::SliceRandom;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -58,6 +59,8 @@ enum Event {
     Suggestions(u64, String, Result<Vec<String>, String>),
     Translated(u64, Result<Translation, String>),
     PlaylistEdited(Result<PlaylistEdit, String>),
+    /// Every track of a playlist, fetched for a bulk action.
+    BulkTracks(PlaylistBulk, String, Result<Vec<Track>, String>),
     Results(u64, Result<Vec<Track>, String>),
     Home(u64, Result<HomeFeed, String>),
     Supplement(u64, Result<Vec<HomeShelf>, String>),
@@ -130,7 +133,6 @@ pub struct YTDugem {
     cover: Option<egui::TextureHandle>,
     backdrop: Option<egui::TextureHandle>,
     import_path: String,
-    playlist_name: String,
     download_path: String,
     sleep_until: Option<Instant>,
     stop_after_track: bool,
@@ -194,6 +196,12 @@ pub struct YTDugem {
     playlist_dialog: Option<PlaylistDialog>,
     /// One account-playlist change at a time.
     playlist_busy: bool,
+    /// Set when the open dialog started the running change; its result then closes the dialog or
+    /// shows its error.
+    playlist_pending: bool,
+    playlist_error: String,
+    /// A whole playlist is being fetched for Play, Shuffle, Add to queue or Download all.
+    bulk_loading: bool,
     /// The lyrics translated for (track key, language), when asked for.
     translation: Option<(String, String, Translation)>,
     /// The Translate toggle; stays on across songs, as upstream.
@@ -336,7 +344,6 @@ impl YTDugem {
             cover: None,
             backdrop: None,
             import_path: String::new(),
-            playlist_name: String::new(),
             download_path,
             sleep_until: None,
             stop_after_track: false,
@@ -386,6 +393,9 @@ impl YTDugem {
             account_playlists_loading: false,
             playlist_dialog: None,
             playlist_busy: false,
+            playlist_pending: false,
+            playlist_error: String::new(),
+            bulk_loading: false,
             translation: None,
             show_translation: false,
             translating: false,
@@ -1158,30 +1168,62 @@ impl YTDugem {
             ));
         });
     }
+    fn open_playlist_dialog(&mut self, dialog: PlaylistDialog) {
+        self.playlist_error.clear();
+        self.playlist_pending = false;
+        if matches!(dialog, PlaylistDialog::AddTo { .. })
+            && self.account.is_some()
+            && self.account_playlists.is_none()
+            && !self.account_playlists_loading
+        {
+            self.load_account_playlists();
+        }
+        self.playlist_dialog = Some(dialog);
+    }
     /// Run one account-playlist change off the GUI thread; its outcome arrives as `PlaylistEdit`.
+    /// False when another change is still running.
     fn edit_account_playlist(
         &mut self,
         job: impl FnOnce() -> anyhow::Result<PlaylistEdit> + Send + 'static,
-    ) {
+    ) -> bool {
         if self.playlist_busy {
             self.message = "Another playlist change is still being saved".into();
-            return;
+            return false;
         }
         self.playlist_busy = true;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(Event::PlaylistEdited(job().map_err(err)));
         });
+        true
+    }
+    /// Like `edit_account_playlist`, for a change the open dialog asked for.
+    fn dialog_account_job(
+        &mut self,
+        job: impl FnOnce() -> anyhow::Result<PlaylistEdit> + Send + 'static,
+    ) {
+        if self.edit_account_playlist(job) {
+            self.playlist_pending = true;
+            self.playlist_error.clear();
+        }
     }
     fn playlist_edited(&mut self, result: Result<PlaylistEdit, String>) {
         self.playlist_busy = false;
+        let pending = std::mem::take(&mut self.playlist_pending);
         let edit = match result {
             Ok(edit) => edit,
             Err(e) => {
+                if pending && self.playlist_dialog.is_some() {
+                    self.playlist_error = e.clone();
+                }
                 self.message = e;
                 return;
             }
         };
+        if pending {
+            self.playlist_dialog = None;
+            self.playlist_error.clear();
+        }
         let open = self.collection.as_ref().and_then(|c| c.playlist_id.clone());
         match edit {
             PlaylistEdit::Created { title, seeded } => {
@@ -1239,68 +1281,227 @@ impl YTDugem {
                     }
                 }
             }
-        }
-    }
-    /// "Add to YouTube playlist" and, inside an owned playlist, "Remove from this playlist".
-    fn account_playlist_menu(&mut self, ui: &mut egui::Ui, track: &Track) {
-        if self.account.is_none() || track.id.is_empty() || !track.source.starts_with("https://") {
-            return;
-        }
-        if self.account_playlists.is_none() && !self.account_playlists_loading {
-            self.load_account_playlists();
-        }
-        ui.menu_button("Add to YouTube playlist", |ui| {
-            if ui.button("New playlist…").clicked() {
-                self.playlist_dialog = Some(PlaylistDialog::Create {
-                    name: String::new(),
-                    privacy: "PRIVATE".into(),
-                    seed: Some(track.clone()),
-                });
-                ui.close_menu();
+            PlaylistEdit::Saved { id, saved } => {
+                self.message = if saved {
+                    "Saved to your library".into()
+                } else {
+                    "Removed from your library".into()
+                };
+                if open.as_deref() == Some(id.as_str()) {
+                    if let Some(c) = &mut self.collection {
+                        c.saved = Some(saved);
+                    }
+                }
+                self.load_account_playlists();
             }
-            ui.separator();
-            match self.account_playlists.clone() {
-                None => {
-                    ui.spinner();
-                }
-                Some(list) if list.is_empty() => {
-                    ui.label(RichText::new("No playlists yet").color(MUTED));
-                }
-                Some(list) => {
-                    for p in list {
-                        let Some(id) = p.browse_id.as_deref().and_then(|b| b.strip_prefix("VL"))
-                        else {
-                            continue;
-                        };
-                        if ui.button(truncate(&p.title, 40)).clicked() {
-                            let (id, t) = (id.to_owned(), track.clone());
-                            self.edit_account_playlist(move || {
-                                let set_id = services::add_to_playlist(&id, &t.id)?;
-                                Ok(PlaylistEdit::Added {
-                                    id,
-                                    track: t,
-                                    set_id,
-                                })
-                            });
-                            ui.close_menu();
-                        }
+            PlaylistEdit::Privacy { id, privacy } => {
+                self.message = format!("Playlist is now {}", privacy_label(&privacy));
+                if open.as_deref() == Some(id.as_str()) {
+                    if let Some(c) = &mut self.collection {
+                        c.privacy = Some(privacy);
                     }
                 }
             }
+            PlaylistEdit::Described { id, description } => {
+                self.message = "Description saved".into();
+                if open.as_deref() == Some(id.as_str()) {
+                    if let Some(c) = &mut self.collection {
+                        c.description = description;
+                    }
+                }
+            }
+            PlaylistEdit::Reordered(collection) => {
+                self.message = "Playlist order saved".into();
+                if collection.playlist_id.is_some() && collection.playlist_id == open {
+                    self.collection = Some(*collection);
+                }
+            }
+        }
+    }
+    /// Account playlist `id`'s entry for `video_id` one step up or down, in the saved playlist.
+    fn move_account_entry(&mut self, id: String, video_id: String, up: bool) {
+        self.edit_account_playlist(move || {
+            let mut all = services::playlist_all(&format!("VL{id}"))?;
+            let from = all
+                .tracks
+                .iter()
+                .position(|t| t.id == video_id)
+                .ok_or_else(|| anyhow::anyhow!("That song is no longer in the playlist"))?;
+            let to = step_target(all.tracks.len(), from, up).ok_or_else(|| {
+                anyhow::anyhow!(if up {
+                    "Already at the top"
+                } else {
+                    "Already at the bottom"
+                })
+            })?;
+            let current = set_id_order(&all.tracks, &all.set_ids)
+                .ok_or_else(|| anyhow::anyhow!("This playlist can't be reordered"))?;
+            let target = moved(&current, from, to);
+            services::reorder_playlist(&id, &current, &target)?;
+            all.tracks = moved(&all.tracks, from, to);
+            Ok(PlaylistEdit::Reordered(Box::new(all)))
         });
+    }
+    /// Run `action` over a playlist's tracks. `browse_id` is set when `tracks` is only the first
+    /// page, so the whole playlist is fetched first, off the GUI thread.
+    fn bulk(
+        &mut self,
+        action: PlaylistBulk,
+        origin: &str,
+        tracks: Vec<Track>,
+        browse_id: Option<String>,
+    ) {
+        let Some(id) = browse_id else {
+            self.apply_bulk(action, tracks, origin);
+            return;
+        };
+        if self.bulk_loading {
+            return;
+        }
+        self.bulk_loading = true;
+        let (tx, origin) = (self.tx.clone(), origin.to_owned());
+        std::thread::spawn(move || {
+            let r = services::playlist_all(&id).map(|c| c.tracks).map_err(err);
+            let _ = tx.send(Event::BulkTracks(action, origin, r));
+        });
+    }
+    fn apply_bulk(&mut self, action: PlaylistBulk, mut tracks: Vec<Track>, origin: &str) {
+        if tracks.is_empty() {
+            self.message = "This playlist is empty".into();
+            return;
+        }
+        match action {
+            PlaylistBulk::Play => self.start_tracks(tracks, 0, origin),
+            PlaylistBulk::Shuffle => {
+                tracks.shuffle(&mut rand::rng());
+                self.start_tracks(tracks, 0, origin);
+            }
+            PlaylistBulk::Queue => {
+                self.message = format!("Added {} songs to the queue", tracks.len());
+                self.library.queue.extend(tracks);
+                self.save();
+            }
+            PlaylistBulk::Download => {
+                tracks.retain(is_youtube_track);
+                if tracks.is_empty() {
+                    self.message = "None of these songs can be downloaded".into();
+                    return;
+                }
+                let n = tracks.len();
+                for t in tracks {
+                    self.download(t);
+                }
+                self.message = format!("Downloading {n} songs");
+            }
+        }
+    }
+    /// Play, Shuffle, Add to queue and Download all for a playlist page.
+    fn bulk_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        origin: &str,
+        tracks: &[Track],
+        browse_id: Option<String>,
+    ) {
+        let enabled = !tracks.is_empty() && !self.bulk_loading;
+        for (label, action) in [
+            ("Play", PlaylistBulk::Play),
+            ("Shuffle", PlaylistBulk::Shuffle),
+            ("Add to queue", PlaylistBulk::Queue),
+            ("Download all", PlaylistBulk::Download),
+        ] {
+            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                self.bulk(action, origin, tracks.to_vec(), browse_id.clone());
+            }
+        }
+        if self.bulk_loading {
+            ui.spinner();
+        }
+    }
+    /// A local playlist removed: forget it in the history and leave its page.
+    fn local_playlist_deleted(&mut self) {
+        self.nav.retain(|p| !matches!(p, Page::Playlist(_)));
+        if matches!(self.page, Page::Playlist(_)) {
+            self.page = Page::Library;
+        }
+    }
+    /// "Add to playlist…", which opens the dialog that holds the choices.
+    fn playlist_menu(&mut self, ui: &mut egui::Ui, track: &Track) {
+        if ui.button("Add to playlist…").clicked() {
+            self.open_playlist_dialog(PlaylistDialog::AddTo {
+                track: track.clone(),
+            });
+            ui.close_menu();
+        }
+    }
+    /// Entries that act on the playlist the row is in: remove and move.
+    fn playlist_row_menu(&mut self, ui: &mut egui::Ui, track: &Track) {
         let owned = self
             .collection
             .as_ref()
             .filter(|c| self.page == Page::Collection && c.editable)
-            .and_then(|c| Some((c.playlist_id.clone()?, c.set_ids.get(&track.id)?.clone())));
-        if let Some((id, set_id)) = owned {
+            .and_then(|c| {
+                let position = c.tracks.iter().position(|t| t.id == track.id)?;
+                let has_next = position + 1 < c.tracks.len() || c.continuation.is_some();
+                Some((
+                    c.playlist_id.clone()?,
+                    c.set_ids.get(&track.id)?.clone(),
+                    position > 0,
+                    has_next,
+                ))
+            });
+        if let Some((id, set_id, has_previous, has_next)) = owned {
             if ui.button("Remove from this playlist").clicked() {
                 let video_id = track.id.clone();
+                let id = id.clone();
                 self.edit_account_playlist(move || {
                     services::remove_from_playlist(&id, &video_id, &set_id)?;
                     Ok(PlaylistEdit::Removed { id, video_id })
                 });
                 ui.close_menu();
+            }
+            for (label, enabled, up) in [
+                ("Move up", has_previous, true),
+                ("Move down", has_next, false),
+            ] {
+                if ui
+                    .add_enabled(enabled && !self.playlist_busy, egui::Button::new(label))
+                    .clicked()
+                {
+                    self.move_account_entry(id.clone(), track.id.clone(), up);
+                    ui.close_menu();
+                }
+            }
+        }
+        if let Page::Playlist(i) = self.page {
+            let Some(p) = self.library.playlists.get(i) else {
+                return;
+            };
+            let len = p.tracks.len();
+            let Some(position) = p.tracks.iter().position(|t| t.key() == track.key()) else {
+                return;
+            };
+            let mut changed = false;
+            for (label, target) in [
+                ("Move up", step_target(len, position, true)),
+                ("Move down", step_target(len, position, false)),
+            ] {
+                if ui
+                    .add_enabled(target.is_some(), egui::Button::new(label))
+                    .clicked()
+                {
+                    if let Some(to) = target {
+                        changed |= self.library.move_in_playlist(i, position, to);
+                    }
+                    ui.close_menu();
+                }
+            }
+            if ui.button("Remove from playlist").clicked() {
+                changed |= self.library.remove_from_playlist(i, track.key());
+                ui.close_menu();
+            }
+            if changed {
+                self.save();
             }
         }
     }
@@ -1323,7 +1524,7 @@ impl YTDugem {
                 .add_enabled(!self.playlist_busy, egui::Button::new("New playlist"))
                 .clicked()
             {
-                self.playlist_dialog = Some(PlaylistDialog::Create {
+                self.open_playlist_dialog(PlaylistDialog::Create {
                     name: String::new(),
                     privacy: "PRIVATE".into(),
                     seed: None,
@@ -1391,18 +1592,29 @@ impl YTDugem {
             self.open_item(p);
         }
     }
-    /// Create / rename / confirm-delete for account playlists.
+    /// The playlist dialogs: add a track, create, rename, describe and confirm-delete.
     fn playlist_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut dialog) = self.playlist_dialog.take() else {
             return;
         };
+        let busy = self.playlist_busy;
+        let signed_in = self.account.is_some();
+        let account = self.account_playlists.clone();
+        let locals: Vec<(String, usize)> = self
+            .library
+            .playlists
+            .iter()
+            .map(|p| (p.name.clone(), p.tracks.len()))
+            .collect();
+        let error = self.playlist_error.clone();
         let title = match &dialog {
+            PlaylistDialog::AddTo { .. } => "Add to playlist",
             PlaylistDialog::Create { .. } => "New playlist",
-            PlaylistDialog::Rename { .. } => "Rename playlist",
-            PlaylistDialog::Delete { .. } => "Delete playlist",
+            PlaylistDialog::Rename { .. } | PlaylistDialog::RenameLocal { .. } => "Rename playlist",
+            PlaylistDialog::Description { .. } => "Edit description",
+            PlaylistDialog::Delete { .. } | PlaylistDialog::DeleteLocal { .. } => "Delete playlist",
         };
-        let mut keep = true;
-        let mut submit = false;
+        let mut act = DialogAct::None;
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
@@ -1410,6 +1622,131 @@ impl YTDugem {
             .show(ctx, |ui| {
                 ui.set_width(340.0);
                 match &mut dialog {
+                    PlaylistDialog::AddTo { track } => {
+                        let who = if track.artist.is_empty() {
+                            track.title.clone()
+                        } else {
+                            format!("{} — {}", track.title, track.artist)
+                        };
+                        ui.label(RichText::new(who).color(MUTED));
+                    }
+                    PlaylistDialog::Create { seed, .. } => {
+                        let to_account =
+                            create_target(signed_in, seed.as_ref()) == CreateTarget::Account;
+                        ui.label(
+                            RichText::new(if to_account {
+                                "Saved to your YouTube Music account"
+                            } else {
+                                "Saved on this computer"
+                            })
+                            .color(MUTED),
+                        );
+                    }
+                    PlaylistDialog::Rename { current, .. }
+                    | PlaylistDialog::RenameLocal { current, .. } => {
+                        ui.label(RichText::new(current.as_str()).color(MUTED));
+                    }
+                    PlaylistDialog::Delete { title, .. } => {
+                        ui.label(format!(
+                            "“{title}” will be removed from your YouTube Music account, on every device. The songs in it are not deleted."
+                        ));
+                    }
+                    PlaylistDialog::DeleteLocal { title, .. } => {
+                        ui.label(format!(
+                            "“{title}” will be removed from this computer. The songs in it are not deleted."
+                        ));
+                    }
+                    PlaylistDialog::Description { .. } => {}
+                }
+                if !error.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(&error).color(ERROR));
+                }
+                ui.add_space(6.0);
+                match &mut dialog {
+                    PlaylistDialog::AddTo { track } => {
+                        if ui
+                            .add_enabled(!busy, egui::Button::new("+  New playlist"))
+                            .clicked()
+                        {
+                            act = DialogAct::New(track.clone());
+                        }
+                        let can_use_account = signed_in && is_youtube_track(track);
+                        if signed_in && !can_use_account {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new("This track is not from YouTube Music, so it can only go in a playlist kept here.")
+                                    .size(12.5)
+                                    .color(MUTED),
+                            );
+                        }
+                        let items: Vec<(String, String, String)> = if can_use_account {
+                            account
+                                .iter()
+                                .flatten()
+                                .filter_map(|p| {
+                                    let id = p.browse_id.as_deref()?.strip_prefix("VL")?;
+                                    Some((id.to_owned(), p.title.clone(), p.subtitle.clone()))
+                                })
+                                .collect()
+                        } else {
+                            vec![]
+                        };
+                        ui.add_space(4.0);
+                        if items.is_empty() && locals.is_empty() {
+                            if can_use_account && account.is_none() {
+                                ui.spinner();
+                            } else {
+                                ui.label(
+                                    RichText::new(if !signed_in {
+                                        "No playlists on this computer yet. Sign in to see the ones on your account."
+                                    } else if !can_use_account {
+                                        "No playlists on this computer yet. Make one and this track goes straight into it."
+                                    } else {
+                                        "No playlists yet. Make one and this song goes straight into it."
+                                    })
+                                    .size(12.5)
+                                    .color(MUTED),
+                                );
+                            }
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .max_height(320.0)
+                                .show(ui, |ui| {
+                                    let width = ui.available_width();
+                                    let entry = |ui: &mut egui::Ui, name: &str, sub: &str| {
+                                        let clicked = ui
+                                            .add_enabled(
+                                                !busy,
+                                                egui::Button::new(truncate(name, 44))
+                                                    .min_size(Vec2::new(width, 0.0)),
+                                            )
+                                            .clicked();
+                                        ui.label(RichText::new(sub).size(12.0).color(MUTED));
+                                        clicked
+                                    };
+                                    if !items.is_empty() {
+                                        section_heading(ui, "On your account");
+                                        for (id, name, sub) in &items {
+                                            if entry(ui, name, sub) {
+                                                act = DialogAct::PickAccount(
+                                                    id.clone(),
+                                                    track.clone(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    if !locals.is_empty() {
+                                        section_heading(ui, "On this computer");
+                                        for (i, (name, count)) in locals.iter().enumerate() {
+                                            if entry(ui, name, &format!("{count} songs")) {
+                                                act = DialogAct::PickLocal(i, track.clone());
+                                            }
+                                        }
+                                    }
+                                });
+                        }
+                    }
                     PlaylistDialog::Create {
                         name,
                         privacy,
@@ -1421,89 +1758,233 @@ impl YTDugem {
                                 .desired_width(f32::INFINITY),
                         );
                         r.request_focus();
-                        submit |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        ui.horizontal(|ui| {
-                            ui.label("Privacy");
-                            for (value, label) in services::PLAYLIST_PRIVACY {
-                                ui.radio_value(privacy, value.to_owned(), label);
-                            }
-                        });
+                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            act = DialogAct::Submit;
+                        }
+                        if create_target(signed_in, seed.as_ref()) == CreateTarget::Account {
+                            section_heading(ui, "Who can see it");
+                            ui.horizontal(|ui| {
+                                for (value, label) in services::PLAYLIST_PRIVACY {
+                                    ui.radio_value(privacy, value.to_owned(), label);
+                                }
+                            });
+                        }
                         if let Some(t) = seed {
                             ui.label(
                                 RichText::new(format!("Starts with “{}”", t.title)).color(MUTED),
                             );
                         }
                     }
-                    PlaylistDialog::Rename { name, .. } => {
-                        let r = ui.add(
-                            egui::TextEdit::singleline(name).desired_width(f32::INFINITY),
-                        );
+                    PlaylistDialog::Rename { name, .. }
+                    | PlaylistDialog::RenameLocal { name, .. } => {
+                        let r =
+                            ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
                         r.request_focus();
-                        submit |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            act = DialogAct::Submit;
+                        }
                     }
-                    PlaylistDialog::Delete { title, .. } => {
-                        ui.label(format!(
-                            "Delete “{title}” from your YouTube Music account? This cannot be undone."
-                        ));
+                    PlaylistDialog::Description { text, .. } => {
+                        ui.add(
+                            egui::TextEdit::multiline(text)
+                                .hint_text("Description")
+                                .desired_rows(4)
+                                .desired_width(f32::INFINITY),
+                        )
+                        .request_focus();
                     }
+                    PlaylistDialog::Delete { .. } | PlaylistDialog::DeleteLocal { .. } => {}
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    let label = match dialog {
-                        PlaylistDialog::Create { .. } => "Create",
-                        PlaylistDialog::Rename { .. } => "Rename",
-                        PlaylistDialog::Delete { .. } => "Delete",
+                    let confirm = match &dialog {
+                        PlaylistDialog::AddTo { .. } => None,
+                        PlaylistDialog::Create { name, .. } => {
+                            Some(("Create playlist", !name.trim().is_empty()))
+                        }
+                        PlaylistDialog::Rename { name, current, .. }
+                        | PlaylistDialog::RenameLocal { name, current, .. } => Some((
+                            "Rename",
+                            !name.trim().is_empty() && name.trim() != current.trim(),
+                        )),
+                        PlaylistDialog::Description { .. } => Some(("Save", true)),
+                        PlaylistDialog::Delete { .. } | PlaylistDialog::DeleteLocal { .. } => {
+                            Some(("Delete", true))
+                        }
                     };
-                    submit |= ui.button(label).clicked();
-                    if ui.button("Cancel").clicked() {
-                        keep = false;
+                    if let Some((label, enabled)) = confirm {
+                        if ui
+                            .add_enabled(enabled && !busy, egui::Button::new(label))
+                            .clicked()
+                        {
+                            act = DialogAct::Submit;
+                        }
+                    }
+                    if let PlaylistDialog::Create {
+                        seed: Some(track), ..
+                    } = &dialog
+                    {
+                        if ui.button("Back").clicked() {
+                            act = DialogAct::Back(track.clone());
+                        }
+                    }
+                    let close = if matches!(dialog, PlaylistDialog::AddTo { .. }) {
+                        "Close"
+                    } else {
+                        "Cancel"
+                    };
+                    if ui.button(close).clicked() {
+                        act = DialogAct::Cancel;
+                    }
+                    if busy {
+                        ui.spinner();
                     }
                 });
             });
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            keep = false;
+            act = DialogAct::Cancel;
         }
-        if submit {
-            match dialog {
-                PlaylistDialog::Create {
-                    name,
-                    privacy,
-                    seed,
-                } => {
-                    if name.trim().is_empty() {
-                        self.message = "A playlist needs a name".into();
-                        self.playlist_dialog = Some(PlaylistDialog::Create {
-                            name,
-                            privacy,
-                            seed,
-                        });
-                        return;
+        match act {
+            DialogAct::None => {}
+            DialogAct::Cancel => {
+                self.playlist_pending = false;
+                self.playlist_error.clear();
+                return;
+            }
+            DialogAct::Back(track) => {
+                self.playlist_error.clear();
+                dialog = PlaylistDialog::AddTo { track };
+            }
+            DialogAct::New(track) => {
+                self.playlist_error.clear();
+                dialog = PlaylistDialog::Create {
+                    name: String::new(),
+                    privacy: "PRIVATE".into(),
+                    seed: Some(track),
+                };
+            }
+            DialogAct::PickAccount(id, track) => {
+                self.dialog_account_job(move || {
+                    let set_id = services::add_to_playlist(&id, &track.id)?;
+                    Ok(PlaylistEdit::Added { id, track, set_id })
+                });
+            }
+            DialogAct::PickLocal(index, track) => {
+                if let Some(name) = self.library.playlists.get(index).map(|p| p.name.clone()) {
+                    if self.library.add_to_playlist(index, track) {
+                        self.message = format!("Added to {name}");
+                        self.save();
+                    } else {
+                        self.message = format!("Already in {name}");
                     }
-                    self.edit_account_playlist(move || {
-                        let seeds: Vec<String> = seed.iter().map(|t| t.id.clone()).collect();
-                        services::create_playlist(&name, &privacy, &seeds)?;
+                }
+                return;
+            }
+            DialogAct::Submit => match self.submit_playlist_dialog(dialog) {
+                Some(keep) => dialog = keep,
+                None => return,
+            },
+        }
+        self.playlist_dialog = Some(dialog);
+    }
+    /// The dialog's confirm action. `Some` keeps it open (a failure, or an account change that is
+    /// still running); `None` closes it.
+    fn submit_playlist_dialog(&mut self, dialog: PlaylistDialog) -> Option<PlaylistDialog> {
+        match dialog {
+            PlaylistDialog::AddTo { .. } => Some(dialog),
+            PlaylistDialog::Create {
+                name,
+                privacy,
+                seed,
+            } => {
+                if name.trim().is_empty() {
+                    self.playlist_error = "A playlist needs a name".into();
+                } else if create_target(self.account.is_some(), seed.as_ref())
+                    == CreateTarget::Account
+                {
+                    let (n, p, s) = (name.clone(), privacy.clone(), seed.clone());
+                    self.dialog_account_job(move || {
+                        let seeds: Vec<String> = s.iter().map(|t| t.id.clone()).collect();
+                        services::create_playlist(&n, &p, &seeds)?;
                         Ok(PlaylistEdit::Created {
-                            title: name.trim().to_owned(),
+                            title: n.trim().to_owned(),
                             seeded: !seeds.is_empty(),
                         })
                     });
+                } else {
+                    match self.library.create_playlist(&name, seed.clone()) {
+                        Ok(index) => {
+                            self.save();
+                            self.message = format!("Created “{}”", name.trim());
+                            self.navigate(Page::Playlist(index));
+                            return None;
+                        }
+                        Err(e) => self.playlist_error = format!("{e:#}"),
+                    }
                 }
-                PlaylistDialog::Rename { id, name } => self.edit_account_playlist(move || {
-                    services::rename_playlist(&id, &name)?;
-                    Ok(PlaylistEdit::Renamed {
-                        id,
-                        name: name.trim().to_owned(),
-                    })
-                }),
-                PlaylistDialog::Delete { id, .. } => self.edit_account_playlist(move || {
-                    services::delete_playlist(&id)?;
-                    Ok(PlaylistEdit::Deleted { id })
-                }),
+                Some(PlaylistDialog::Create {
+                    name,
+                    privacy,
+                    seed,
+                })
             }
-            return;
-        }
-        if keep {
-            self.playlist_dialog = Some(dialog);
+            PlaylistDialog::Rename { id, name, current } => {
+                let (i, n) = (id.clone(), name.clone());
+                self.dialog_account_job(move || {
+                    services::rename_playlist(&i, &n)?;
+                    Ok(PlaylistEdit::Renamed {
+                        id: i,
+                        name: n.trim().to_owned(),
+                    })
+                });
+                Some(PlaylistDialog::Rename { id, name, current })
+            }
+            PlaylistDialog::RenameLocal {
+                index,
+                name,
+                current,
+            } => match self.library.rename_playlist(index, &name) {
+                Ok(()) => {
+                    self.save();
+                    self.message = format!("Renamed to “{}”", name.trim());
+                    None
+                }
+                Err(e) => {
+                    self.playlist_error = format!("{e:#}");
+                    Some(PlaylistDialog::RenameLocal {
+                        index,
+                        name,
+                        current,
+                    })
+                }
+            },
+            PlaylistDialog::Description { id, text } => {
+                let (i, t) = (id.clone(), text.clone());
+                self.dialog_account_job(move || {
+                    services::set_playlist_description(&i, &t)?;
+                    Ok(PlaylistEdit::Described {
+                        id: i,
+                        description: t,
+                    })
+                });
+                Some(PlaylistDialog::Description { id, text })
+            }
+            PlaylistDialog::Delete { id, title } => {
+                let i = id.clone();
+                self.dialog_account_job(move || {
+                    services::delete_playlist(&i)?;
+                    Ok(PlaylistEdit::Deleted { id: i })
+                });
+                Some(PlaylistDialog::Delete { id, title })
+            }
+            PlaylistDialog::DeleteLocal { index, title } => {
+                if self.library.delete_playlist(index).is_some() {
+                    self.local_playlist_deleted();
+                    self.save();
+                    self.message = format!("Deleted “{title}”");
+                }
+                None
+            }
         }
     }
     /// Tray menu actions, its labels, and close-to-tray.
@@ -2945,6 +3426,13 @@ impl YTDugem {
                     }
                 }
                 Event::PlaylistEdited(r) => self.playlist_edited(r),
+                Event::BulkTracks(action, origin, r) => {
+                    self.bulk_loading = false;
+                    match r {
+                        Ok(tracks) => self.apply_bulk(action, tracks, &origin),
+                        Err(e) => self.message = e,
+                    }
+                }
                 Event::Translated(id, r) if id == self.translation_request => {
                     self.translating = false;
                     match r {
@@ -3357,6 +3845,12 @@ impl YTDugem {
             y += 40.0;
         }
         let bottom = rect.bottom() - 67.0;
+        if self.account.is_some()
+            && self.account_playlists.is_none()
+            && !self.account_playlists_loading
+        {
+            self.load_account_playlists();
+        }
         if bottom > y + 25.0 {
             region(
                 ui,
@@ -3368,7 +3862,42 @@ impl YTDugem {
                     egui::ScrollArea::vertical()
                         .id_salt("sidebar-playlists")
                         .show(ui, |ui| {
-                            for (i, p) in self.library.playlists.iter().enumerate() {
+                            let accounts = self.account_playlists.clone().unwrap_or_default();
+                            let open_id = self
+                                .collection
+                                .as_ref()
+                                .filter(|_| self.page == Page::Collection)
+                                .and_then(|c| c.playlist_id.clone());
+                            for (i, p) in accounts.iter().enumerate() {
+                                let r = Rect::from_min_size(
+                                    ui.cursor().min,
+                                    Vec2::new(ui.available_width(), 35.0),
+                                );
+                                ui.allocate_space(r.size());
+                                let active = p
+                                    .browse_id
+                                    .as_deref()
+                                    .is_some_and(|b| open_id.as_deref() == b.strip_prefix("VL"));
+                                if nav_row(
+                                    ui,
+                                    r,
+                                    ("account-playlist-nav", i),
+                                    Icon::Queue,
+                                    &p.title,
+                                    active,
+                                )
+                                .clicked()
+                                {
+                                    self.open_item(p.clone());
+                                }
+                            }
+                            let locals: Vec<String> = self
+                                .library
+                                .playlists
+                                .iter()
+                                .map(|p| p.name.clone())
+                                .collect();
+                            for (i, name) in locals.iter().enumerate() {
                                 let r = Rect::from_min_size(
                                     ui.cursor().min,
                                     Vec2::new(ui.available_width(), 35.0),
@@ -3379,24 +3908,27 @@ impl YTDugem {
                                     r,
                                     ("playlist", i),
                                     Icon::Queue,
-                                    &p.name,
+                                    name,
                                     self.page == Page::Playlist(i),
                                 )
                                 .clicked()
                                 {
-                                    self.nav.push(self.page.clone());
-                                    self.page = Page::Playlist(i);
-                                    self.expanded = false;
+                                    self.navigate(Page::Playlist(i));
                                 }
                             }
+                            if accounts.is_empty() && locals.is_empty() {
+                                ui.label(
+                                    RichText::new("Your playlists will appear here")
+                                        .size(12.5)
+                                        .color(MUTED),
+                                );
+                            }
                             if ui.small_button("+ New playlist").clicked() {
-                                self.playlist_name = "New playlist".into();
-                                self.library.playlists.push(Playlist {
-                                    name: self.playlist_name.clone(),
-                                    tracks: vec![],
+                                self.open_playlist_dialog(PlaylistDialog::Create {
+                                    name: String::new(),
+                                    privacy: "PRIVATE".into(),
+                                    seed: None,
                                 });
-                                self.navigate(Page::Playlist(self.library.playlists.len() - 1));
-                                self.save();
                             }
                         });
                 },
@@ -3733,33 +4265,12 @@ impl YTDugem {
             self.save();
             ui.close_menu();
         }
-        self.account_playlist_menu(ui, track);
+        self.playlist_menu(ui, track);
         if ui.button("Download audio").clicked() {
             self.download(track.clone());
             ui.close_menu();
         }
-        let mut changed = false;
-        for playlist in &mut self.library.playlists {
-            if ui.button(format!("Add to {}", playlist.name)).clicked() {
-                if !playlist.tracks.iter().any(|t| t.key() == track.key()) {
-                    playlist.tracks.push(track.clone());
-                    changed = true;
-                }
-                ui.close_menu();
-            }
-        }
-        if let Page::Playlist(i) = self.page {
-            if ui.button("Remove from playlist").clicked() {
-                self.library.playlists[i]
-                    .tracks
-                    .retain(|t| t.key() != track.key());
-                changed = true;
-                ui.close_menu();
-            }
-        }
-        if changed {
-            self.save();
-        }
+        self.playlist_row_menu(ui, track);
     }
     fn song_row(
         &mut self,
@@ -3850,6 +4361,16 @@ impl YTDugem {
         response.clicked()
     }
     fn track_list(&mut self, ui: &mut egui::Ui, tracks: Vec<Track>, origin: &str) {
+        self.track_list_with(ui, tracks, origin, true);
+    }
+    /// The rows of a list; `header` adds Play all, Add all to queue and the count above them.
+    fn track_list_with(
+        &mut self,
+        ui: &mut egui::Ui,
+        tracks: Vec<Track>,
+        origin: &str,
+        header: bool,
+    ) {
         if tracks.is_empty() {
             ui.add_space(28.0);
             ui.label(
@@ -3862,17 +4383,19 @@ impl YTDugem {
             );
             return;
         }
-        ui.horizontal(|ui| {
-            if ui.button("Play all").clicked() {
-                self.start_tracks(tracks.clone(), 0, origin);
-            }
-            if ui.button("Add all to queue").clicked() {
-                self.library.queue.extend(tracks.clone());
-                self.save();
-            }
-            ui.label(RichText::new(format!("{} songs", tracks.len())).color(MUTED));
-        });
-        ui.add_space(12.0);
+        if header {
+            ui.horizontal(|ui| {
+                if ui.button("Play all").clicked() {
+                    self.start_tracks(tracks.clone(), 0, origin);
+                }
+                if ui.button("Add all to queue").clicked() {
+                    self.library.queue.extend(tracks.clone());
+                    self.save();
+                }
+                ui.label(RichText::new(format!("{} songs", tracks.len())).color(MUTED));
+            });
+            ui.add_space(12.0);
+        }
         for (i, t) in tracks.iter().enumerate() {
             ui.push_id((origin, i), |ui| {
                 if self.song_row(ui, t, Some(i), ui.available_width()) {
@@ -3998,36 +4521,98 @@ impl YTDugem {
     }
     fn collection_view(&mut self, ui: &mut egui::Ui) {
         if let Some(c) = self.collection.clone() {
+            let playlist_id = c.playlist_id.clone();
             ui.horizontal_top(|ui| {
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(155.0), egui::Sense::hover());
                 draw_image(ui, &c.thumbnail, r, None);
                 ui.vertical(|ui| {
                     ui.label(heading(&c.title, 31.0));
                     ui.label(RichText::new(&c.subtitle).color(MUTED));
-                    if let Some(id) = c.playlist_id.clone().filter(|_| c.editable) {
-                        ui.add_space(10.0);
-                        ui.horizontal(|ui| {
+                    let Some(id) = playlist_id.clone() else {
+                        return;
+                    };
+                    if !c.description.is_empty() {
+                        ui.set_max_width(ui.available_width().min(640.0));
+                        ui.label(RichText::new(&c.description).color(MUTED));
+                    }
+                    ui.add_space(10.0);
+                    let more = c.continuation.as_ref().map(|_| format!("VL{id}"));
+                    ui.horizontal_wrapped(|ui| self.bulk_buttons(ui, &c.title, &c.tracks, more));
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if c.editable {
                             if ui.button("Rename").clicked() {
-                                self.playlist_dialog = Some(PlaylistDialog::Rename {
+                                self.open_playlist_dialog(PlaylistDialog::Rename {
                                     id: id.clone(),
                                     name: c.title.clone(),
+                                    current: c.title.clone(),
+                                });
+                            }
+                            if ui.button("Edit description").clicked() {
+                                self.open_playlist_dialog(PlaylistDialog::Description {
+                                    id: id.clone(),
+                                    text: c.description.clone(),
+                                });
+                            }
+                            let current = c.privacy.clone().unwrap_or_default();
+                            let mut chosen = None;
+                            ui.add_enabled_ui(!self.playlist_busy, |ui| {
+                                egui::ComboBox::from_id_salt("playlist-privacy")
+                                    .selected_text(if current.is_empty() {
+                                        "Privacy"
+                                    } else {
+                                        privacy_label(&current)
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        for (value, label) in services::PLAYLIST_PRIVACY {
+                                            if ui
+                                                .selectable_label(current == value, label)
+                                                .clicked()
+                                                && current != value
+                                            {
+                                                chosen = Some(value.to_owned());
+                                            }
+                                        }
+                                    });
+                            });
+                            if let Some(privacy) = chosen {
+                                let id = id.clone();
+                                self.edit_account_playlist(move || {
+                                    services::set_playlist_privacy(&id, &privacy)?;
+                                    Ok(PlaylistEdit::Privacy { id, privacy })
                                 });
                             }
                             if ui.button("Delete playlist").clicked() {
-                                self.playlist_dialog = Some(PlaylistDialog::Delete {
+                                self.open_playlist_dialog(PlaylistDialog::Delete {
                                     id: id.clone(),
                                     title: c.title.clone(),
                                 });
                             }
-                            if self.playlist_busy {
-                                ui.spinner();
+                        } else if let Some(saved) = c.saved {
+                            let label = if saved {
+                                "Remove from library"
+                            } else {
+                                "Save to library"
+                            };
+                            if ui
+                                .add_enabled(!self.playlist_busy, egui::Button::new(label))
+                                .clicked()
+                            {
+                                let id = id.clone();
+                                self.edit_account_playlist(move || {
+                                    services::set_playlist_saved(&id, !saved)?;
+                                    Ok(PlaylistEdit::Saved { id, saved: !saved })
+                                });
                             }
-                        });
-                    }
+                        }
+                        if self.playlist_busy {
+                            ui.spinner();
+                        }
+                    });
                 });
             });
             ui.add_space(20.0);
-            self.track_list(ui, c.tracks, &c.title);
+            self.track_list_with(ui, c.tracks, &c.title, playlist_id.is_none());
             if c.continuation.is_some()
                 && ui
                     .add_enabled(!self.busy, egui::Button::new("Load more tracks"))
@@ -4059,6 +4644,28 @@ impl YTDugem {
                 ui.label(heading("Your library", 26.0));
                 ui.add_space(14.0);
                 self.account_playlists_view(ui);
+                ui.add_space(24.0);
+                ui.label(heading("On this computer", 20.0));
+                ui.add_space(8.0);
+                let locals: Vec<(String, usize)> = self
+                    .library
+                    .playlists
+                    .iter()
+                    .map(|p| (p.name.clone(), p.tracks.len()))
+                    .collect();
+                if locals.is_empty() {
+                    ui.label(RichText::new("No playlists on this computer yet").color(MUTED));
+                }
+                for (i, (name, count)) in locals.iter().enumerate() {
+                    let text = format!("{}  ·  {count} songs", truncate(name, 60));
+                    if ui
+                        .add(egui::Button::new(text).frame(false))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        self.navigate(Page::Playlist(i));
+                    }
+                }
                 ui.add_space(24.0);
                 ui.label(heading("Liked Music", 20.0));
                 self.track_list(ui, self.library.liked.clone(), "Liked Music");
@@ -4098,10 +4705,31 @@ impl YTDugem {
             }
             Page::Liked => self.track_list(ui, self.library.liked.clone(), "Liked Music"),
             Page::Playlist(i) => {
-                if let Some(p) = self.library.playlists.get(i).cloned() {
-                    ui.label(heading(&p.name, 26.0));
-                    self.track_list(ui, p.tracks, "Playlist");
-                }
+                let Some(p) = self.library.playlists.get(i).cloned() else {
+                    self.page = Page::Library;
+                    return;
+                };
+                ui.label(heading(&p.name, 26.0));
+                ui.label(RichText::new(format!("{} songs", p.tracks.len())).color(MUTED));
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui| {
+                    self.bulk_buttons(ui, &p.name, &p.tracks, None);
+                    if ui.button("Rename").clicked() {
+                        self.open_playlist_dialog(PlaylistDialog::RenameLocal {
+                            index: i,
+                            name: p.name.clone(),
+                            current: p.name.clone(),
+                        });
+                    }
+                    if ui.button("Delete").clicked() {
+                        self.open_playlist_dialog(PlaylistDialog::DeleteLocal {
+                            index: i,
+                            title: p.name.clone(),
+                        });
+                    }
+                });
+                ui.add_space(14.0);
+                self.track_list_with(ui, p.tracks, &p.name, false);
             }
             Page::Settings => self.settings_view(ui),
         }
@@ -5004,6 +5632,10 @@ fn download_summary(items: &[DownloadItem]) -> String {
 }
 
 enum PlaylistDialog {
+    /// Pick where `track` goes: an account playlist, a local one, or a new one.
+    AddTo {
+        track: Track,
+    },
     Create {
         name: String,
         privacy: String,
@@ -5012,11 +5644,44 @@ enum PlaylistDialog {
     Rename {
         id: String,
         name: String,
+        current: String,
+    },
+    RenameLocal {
+        index: usize,
+        name: String,
+        current: String,
+    },
+    Description {
+        id: String,
+        text: String,
     },
     Delete {
         id: String,
         title: String,
     },
+    DeleteLocal {
+        index: usize,
+        title: String,
+    },
+}
+
+/// What a click in the open playlist dialog asks for.
+enum DialogAct {
+    None,
+    Submit,
+    Cancel,
+    Back(Track),
+    New(Track),
+    PickAccount(String, Track),
+    PickLocal(usize, Track),
+}
+
+#[derive(Clone, Copy)]
+enum PlaylistBulk {
+    Play,
+    Shuffle,
+    Queue,
+    Download,
 }
 
 /// A finished account-playlist change, applied to what is on screen without refetching.
@@ -5041,6 +5706,138 @@ enum PlaylistEdit {
         id: String,
         video_id: String,
     },
+    Saved {
+        id: String,
+        saved: bool,
+    },
+    Privacy {
+        id: String,
+        privacy: String,
+    },
+    Described {
+        id: String,
+        description: String,
+    },
+    /// The whole playlist in its new order.
+    Reordered(Box<Collection>),
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CreateTarget {
+    Account,
+    Local,
+}
+
+/// YouTube can only hold tracks it knows: a video id and a web source, not a local file.
+fn is_youtube_track(track: &Track) -> bool {
+    !track.id.is_empty() && track.source.starts_with("https://")
+}
+
+/// A new playlist goes to the account when signed in and the seed (if any) is a YouTube track.
+fn create_target(signed_in: bool, seed: Option<&Track>) -> CreateTarget {
+    if signed_in && seed.is_none_or(is_youtube_track) {
+        CreateTarget::Account
+    } else {
+        CreateTarget::Local
+    }
+}
+
+/// Where an entry at `from` lands one step up or down; None at the end of the list.
+fn step_target(len: usize, from: usize, up: bool) -> Option<usize> {
+    if from >= len {
+        return None;
+    }
+    if up {
+        from.checked_sub(1)
+    } else {
+        (from + 1 < len).then_some(from + 1)
+    }
+}
+
+/// `items` with the entry at `from` taken out and put back at `to`.
+fn moved<T: Clone>(items: &[T], from: usize, to: usize) -> Vec<T> {
+    let mut out = items.to_vec();
+    if from < out.len() && to < out.len() {
+        let item = out.remove(from);
+        out.insert(to, item);
+    }
+    out
+}
+
+/// The playlist entry id of every track in order, when each one has one.
+fn set_id_order(
+    tracks: &[Track],
+    set_ids: &std::collections::HashMap<String, String>,
+) -> Option<Vec<String>> {
+    tracks.iter().map(|t| set_ids.get(&t.id).cloned()).collect()
+}
+
+fn privacy_label(privacy: &str) -> &str {
+    services::PLAYLIST_PRIVACY
+        .iter()
+        .find(|(value, _)| *value == privacy)
+        .map_or(privacy, |(_, label)| *label)
+}
+
+fn section_heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(10.0);
+    ui.label(RichText::new(text.to_uppercase()).size(11.0).color(MUTED));
+}
+
+#[cfg(test)]
+mod playlist_tests {
+    use super::*;
+
+    fn track(id: &str, source: &str) -> Track {
+        Track {
+            id: id.into(),
+            source: source.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn create_target_follows_sign_in_and_seed() {
+        let web = track("abc", "https://music.youtube.com/watch?v=abc");
+        let file = track("", "C:/music/a.mp3");
+        assert_eq!(create_target(true, None), CreateTarget::Account);
+        assert_eq!(create_target(true, Some(&web)), CreateTarget::Account);
+        assert_eq!(create_target(true, Some(&file)), CreateTarget::Local);
+        assert_eq!(create_target(false, None), CreateTarget::Local);
+        assert_eq!(create_target(false, Some(&web)), CreateTarget::Local);
+    }
+
+    #[test]
+    fn one_step_moves() {
+        assert_eq!(step_target(3, 0, true), None);
+        assert_eq!(step_target(3, 1, true), Some(0));
+        assert_eq!(step_target(3, 1, false), Some(2));
+        assert_eq!(step_target(3, 2, false), None);
+        assert_eq!(step_target(3, 3, true), None);
+        let ids = ["a", "b", "c"].map(String::from);
+        assert_eq!(moved(&ids, 0, 1), ["b", "a", "c"].map(String::from));
+        assert_eq!(moved(&ids, 2, 1), ["a", "c", "b"].map(String::from));
+        assert_eq!(moved(&ids, 1, 9), ids);
+    }
+
+    #[test]
+    fn reorder_needs_every_set_id() {
+        let tracks = [track("a", ""), track("b", "")];
+        let mut set_ids = std::collections::HashMap::new();
+        set_ids.insert("a".to_owned(), "sa".to_owned());
+        assert_eq!(set_id_order(&tracks, &set_ids), None);
+        set_ids.insert("b".to_owned(), "sb".to_owned());
+        assert_eq!(
+            set_id_order(&tracks, &set_ids),
+            Some(vec!["sa".to_owned(), "sb".to_owned()])
+        );
+    }
+
+    #[test]
+    fn privacy_labels() {
+        assert_eq!(privacy_label("UNLISTED"), "Unlisted");
+        assert_eq!(privacy_label("other"), "other");
+    }
 }
 
 /// Transfers at once; upstream's `DesktopDownloadQueue.WORKERS`.
