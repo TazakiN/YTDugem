@@ -108,6 +108,7 @@ def main():
     shutil.copy2(binary, temporary)
     temporary.replace(DIST / "YTDugem.exe")
     shutil.copy2(ROOT / "LICENSE", DIST / "LICENSE")
+    shutil.copy2(ROOT / "NOTICE", DIST / "NOTICE")
     (DIST / "START-HERE.txt").write_text(
         "Extract the ENTIRE ZIP, then double-click YTDugem.exe.\n"
         "Keep the tools folder beside YTDugem.exe. No PATH changes or admin installation needed.\n"
@@ -122,17 +123,17 @@ def main():
     )
     output = DIST / "YTDugem-windows-x86_64.zip"
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
-        for item in ("YTDugem.exe", "LICENSE", "START-HERE.txt", "runtime-sources.json", "tools", "third-party"):
+        for item in ("YTDugem.exe", "LICENSE", "NOTICE", "START-HERE.txt", "runtime-sources.json", "tools", "third-party"):
             path = DIST / item
             for file in ([path] if path.is_file() else path.rglob("*")):
                 if file.is_file():
                     if item == "tools" and file.suffix.lower() == ".exe" and file.name.lower() not in EXECUTABLES:
                         continue
                     bundle.write(file, Path("YTDugem") / file.relative_to(DIST))
-        for item in ("Cargo.toml", "Cargo.lock", "build.rs", "README.md", "AGENTS.md", "LICENSE", "docs", "src", "assets", "scripts", "packaging"):
+        for item in ("Cargo.toml", "Cargo.lock", "build.rs", "README.md", "AGENTS.md", "LICENSE", "docs", "src", "assets", "scripts", "packaging", "xtask", ".cargo", "NOTICE", "CONTRIBUTING.md"):
             path = ROOT / item
             for file in ([path] if path.is_file() else path.rglob("*")):
-                if file.is_file() and "__pycache__" not in file.parts:
+                if file.is_file() and not {"__pycache__", "target"} & set(file.relative_to(ROOT).parts):
                     bundle.write(file, Path("YTDugem/source") / file.relative_to(ROOT))
     print("Portable package:", output, flush=True)
     print("Bundled tools:", ", ".join(EXECUTABLES), flush=True)

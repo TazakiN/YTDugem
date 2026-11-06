@@ -4,6 +4,17 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
 description = "YTDugem music player, a native Rust desktop rewrite of BitChord"
+repository = "https://github.com/TazakiN/YTDugem"
+homepage = "https://github.com/TazakiN/YTDugem"
+readme = "README.md"
+keywords = ["music-player", "youtube-music", "egui", "lyrics", "desktop"]
+categories = ["multimedia::audio", "gui"]
+publish = false
+rust-version = "1.90"
+
+[workspace]
+members = [".", "xtask"]
+default-members = ["."]
 
 [dependencies]
 anyhow = "1"
