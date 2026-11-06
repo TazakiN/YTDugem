@@ -30,6 +30,8 @@
 - `src/integrations.rs`: system media controls.
 - `src/playback_check.rs`: audio checks using the same engine as the GUI.
 - `scripts/`: packaging, installation, and smoke tests. `dist/` and `target/` contain build outputs.
+- `xtask/`: std-only `cargo xtask` runner (`ci`, `package`, `smoke`); aliases live in `.cargo/config.toml`.
+- `docs/`: user guide (`USAGE.md`), parity inventory, project guidelines, and Windows verification.
 
 ## Working Rules
 
@@ -44,12 +46,12 @@
 
 ## Basic Checks
 
-Run from the project root:
+Run `cargo ci` from the project root. It runs the same sequence as CI:
 
 ```sh
-cargo fmt --check
-cargo clippy --locked -- -D warnings
-cargo test --locked
+cargo fmt --all --check
+cargo clippy --workspace --locked -- -D warnings
+cargo test --workspace --locked
 cargo build --release --locked
 ```
 
@@ -69,7 +71,7 @@ Linux GUI smoke test: `python3 scripts/gui-smoke.py`; requires Xvfb, xauth, xdot
 - Distribute the complete portable ZIP, **not just the `.exe`**. Keep the `tools` folder beside `YTDugem.exe`.
 - Bundled runtime tools: mpv, yt-dlp, FFmpeg, ffprobe, and Deno. Do not rely on tools installed on the developer's machine or its `PATH`.
 - Package with `python scripts/package-windows.py` after building for Windows; use 7zip or native Windows `tar` with 7z support. Preserve SHA-256 verification of runtime downloads.
-- After changing runtime discovery, IPC, playback, or packaging, test the actual ZIP that will be delivered to users:
+- After changing runtime discovery, IPC, playback, or packaging, test the actual ZIP that will be delivered to users (`cargo xtask package`, then `cargo xtask smoke`, then `cargo xtask smoke --playback --online --real-audio`), or run the scripts directly:
 
 ```powershell
 powershell -NoProfile -File scripts/windows-smoke.ps1

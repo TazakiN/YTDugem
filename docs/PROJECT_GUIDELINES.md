@@ -36,4 +36,4 @@ The orchestrator assigns disjoint files, reviews diffs, resolves integration, an
 - Runtime/IPC/playback/package changes checked against the actual complete Windows ZIP with a system-only `PATH`.
 - Null-output decoding, non-null Windows output, and user-confirmed audible playback are distinct claims. A non-null backend alone does not prove the user heard sound.
 - Live provider tests and real-account sign-in reported separately. Missing credentials, network restrictions, and ignored tests are limitations, not passes.
-- README and parity inventory describe what was delivered, not what was planned.
+- README, `docs/USAGE.md` and the parity inventory describe what was delivered, not what was planned.

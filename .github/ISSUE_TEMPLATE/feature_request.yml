@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest an improvement or a missing feature
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What do you want to do, and what gets in the way today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior you would like.
+    validations:
+      required: true
+
+  - type: textarea
+    id: upstream
+    attributes:
+      label: Upstream BitChord reference
+      description: Optional. If BitChord desktop already does this, describe its behavior or link the relevant file in the upstream repository.

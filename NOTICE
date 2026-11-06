@@ -1,0 +1,40 @@
+YTDugem
+Copyright (C) YTDugem contributors
+
+YTDugem is licensed under the GNU General Public License, version 3 only
+(GPL-3.0-only). See LICENSE.
+
+Upstream project
+----------------
+YTDugem is a native Rust rewrite of BitChord, based on its desktop target
+(branch desktop-build-30, commit 7c673dc).
+
+  BitChord, by kushagrasinghx and contributors
+  https://github.com/kushagrasinghx/BitChord
+  Licensed under GPL-3.0.
+
+Bundled assets
+--------------
+Inter font (assets/fonts/Inter-*.ttf)
+  Copyright (c) 2016 The Inter Project Authors
+  https://github.com/rsms/inter
+  SIL Open Font License 1.1, see assets/fonts/LICENSE.txt.
+
+Runtime tools in the Windows portable ZIP
+-----------------------------------------
+The portable ZIP ships these programs unmodified in its tools folder. Their
+license and copyright files are copied into the ZIP's third-party folder, and
+exact versions and SHA-256 checksums are listed in runtime-sources.json.
+
+  mpv       https://mpv.io                        (shinchiro/mpv-winbuild-cmake build)
+  FFmpeg    https://ffmpeg.org                    (GyanD/codexffmpeg essentials build)
+  ffprobe   https://ffmpeg.org                    (same FFmpeg build)
+  yt-dlp    https://github.com/yt-dlp/yt-dlp
+  Deno      https://deno.com
+
+Pinned download URLs are defined in scripts/package-windows.py.
+
+Trademarks
+----------
+YTDugem is an independent third-party client. It is not affiliated with,
+endorsed by, or sponsored by YouTube or Google.
