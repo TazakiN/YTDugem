@@ -115,6 +115,7 @@ impl YTDugem {
             egui::ScrollArea::vertical()
                 .id_salt("output-dialog-scroll")
                 .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(u, |u| {
                     u.spacing_mut().item_spacing.y = 8.0;
                     let width = u.available_width();

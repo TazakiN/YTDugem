@@ -53,6 +53,7 @@ impl YTDugem {
             egui::ScrollArea::vertical()
                 .id_salt("sheet-queue")
                 .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(panel, |u| self.queue_list(u));
         });
     }

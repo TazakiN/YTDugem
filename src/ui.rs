@@ -3961,6 +3961,7 @@ impl YTDugem {
                 |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("sidebar-playlists")
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
                             let accounts = self.account_playlists.clone().unwrap_or_default();
                             let open_id = self
@@ -5324,6 +5325,7 @@ impl eframe::App for YTDugem {
                     // used to land halfway down it.
                     egui::ScrollArea::vertical()
                         .id_salt(("page", self.page.clone()))
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
                             if !self.message.is_empty() {
                                 ui.label(RichText::new(&self.message).color(MUTED));
