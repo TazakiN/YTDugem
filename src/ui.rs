@@ -2969,9 +2969,18 @@ impl YTDugem {
                     .show(ui, |ui| {
                         let mut picked = None;
                         ui.horizontal(|ui| {
+                            // The icon shares its centre line with the suggestion icons below, and
+                            // the text starts where their text starts.
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            ui.add_space(8.0);
                             let (r, _) =
                                 ui.allocate_exact_size(Vec2::splat(20.0), egui::Sense::hover());
-                            widgets::paint(ui.painter(), Icon::Search, r, MUTED);
+                            widgets::paint(
+                                ui.painter(),
+                                Icon::Search,
+                                r.translate(Vec2::new(0.0, 2.0)),
+                                MUTED,
+                            );
                             let field = muted_hint(
                                 ui,
                                 egui::TextEdit::singleline(&mut self.palette_query)
@@ -2979,6 +2988,12 @@ impl YTDugem {
                                     .hint_text(RichText::new("Search YouTube Music").size(18.0).color(MUTED))
                                     .font(FontId::proportional(18.0))
                                     .frame(bare_text_frame())
+                                    .margin(egui::Margin {
+                                        left: 0,
+                                        right: 4,
+                                        top: 2,
+                                        bottom: 2,
+                                    })
                                     .desired_width(f32::INFINITY),
                             );
                             if self.palette_focus {
@@ -3985,17 +4000,38 @@ impl YTDugem {
                     .fill(Color32::from_rgb(36, 37, 34))
                     .stroke(Stroke::new(1.0_f32, Color32::from_gray(63)))
                     .corner_radius(7.0)
-                    .inner_margin(8.0)
+                    // The left padding puts the icon in the same column as the nav icons (11px
+                    // in from the sidebar's inset), and the text starts where the nav labels do.
+                    .inner_margin(egui::Margin {
+                        left: 11,
+                        right: 8,
+                        top: 8,
+                        bottom: 8,
+                    })
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 14.0;
                             let (r, _) =
                                 ui.allocate_exact_size(Vec2::splat(18.0), egui::Sense::hover());
-                            widgets::paint(ui.painter(), Icon::Search, r, MUTED);
+                            // Phosphor glyphs sit a little high in their box; the text reads lower.
+                            widgets::paint(
+                                ui.painter(),
+                                Icon::Search,
+                                r.translate(Vec2::new(0.0, 2.5)),
+                                MUTED,
+                            );
                             let response = ui.add(
                                 egui::TextEdit::singleline(&mut self.query)
                                     .id(egui::Id::unique("search_input"))
                                     .desired_width(rect.width() - 78.0)
                                     .hint_text("Search")
+                                    .font(FontId::proportional(15.0))
+                                    .margin(egui::Margin {
+                                        left: 0,
+                                        right: 4,
+                                        top: 2,
+                                        bottom: 2,
+                                    })
                                     .frame(bare_text_frame()),
                             );
                             if response.lost_focus()
