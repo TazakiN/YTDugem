@@ -592,6 +592,28 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[test]
+    fn tracks_without_artist_links_stay_backward_compatible() {
+        let old: Library = serde_json::from_str(
+            r#"{"liked":[{"id":"abc","title":"Song","artist":"A, B","album":"","duration":1.0,"thumbnail":"","source":"abc"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.liked[0].artist, "A, B");
+        assert!(old.liked[0].artists.is_empty());
+        let saved = serde_json::to_value(&old.liked[0]).unwrap();
+        assert!(saved.get("artists").is_none());
+        let linked = Track {
+            artists: vec![crate::model::ArtistRef {
+                name: "A".into(),
+                browse_id: "UC1".into(),
+            }],
+            ..test_track("x")
+        };
+        let restored: Track =
+            serde_json::from_value(serde_json::to_value(&linked).unwrap()).unwrap();
+        assert_eq!(restored, linked);
+    }
+
     fn test_track(id: &str) -> Track {
         Track {
             id: id.into(),

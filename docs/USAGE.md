@@ -34,6 +34,7 @@ YTDugem automatically uses X11 and Mesa's software renderer to work around EGL/Z
 
 - **Home and search:** Desktop Home with real YouTube Music shelves, browsable albums and collections, live search and Explore, artwork, and a local audio library. Selecting a Home song starts playback.
 - **Explore:** New releases, Charts and Moods & genres buttons, YouTube Music's Explore shelves, and mood and genre tiles that open their playlists. Each sub-page has Back to Explore; the refresh button reloads everything.
+- **Artist pages:** artist banner, top songs, releases and related artists, opened from a song's artist name, an artist card or search results. See [Artist pages](#artist-pages).
 - **Expanded player:** artwork view with a blurred background, controls, synchronized lyrics and queue views.
 - **Google sign-in:** sign-in runs in a normal isolated Chrome/Edge/Chromium window. After that window closes, the session is captured securely in a headless browser. You can also enter cookies manually in a masked field (Cookie header, Netscape or JSON).
   - Encrypted saved accounts support adding, switching and removing sessions.
@@ -63,6 +64,21 @@ This is a working desktop rewrite, **not yet feature parity with every upstream 
 - installer and update automation
 
 Android, TV, watch, backend and web targets are deliberately excluded.
+
+## Artist pages
+
+To open an artist, click the artist name wherever it is shown: song rows, the player bar, the full player, the queue, an album page header, or the subtitle of a card. You can also choose "Open artist" in the player menu, click an artist card (for example in "Fans might also like"), or use the Artists row at the top of search results.
+
+An artist page shows the banner image and name, the subscriber count and monthly audience, and Play, Shuffle, Mix (artist radio) and, when you are signed in, Subscribe. Below these are a Latest release card, Top songs, and the shelves YouTube Music provides (Albums, Singles & EPs, Videos, Live performances, Featured on, Playlists, Fans might also like), with "See all" where YouTube Music offers one. About shows the artist's biography.
+
+When a song credits several artists, each linked name opens its own page. Tracks saved before artist pages were added, and downloaded or imported files, carry no artist links. Clicking their artist name searches for an artist with exactly that name and opens the page only on an exact match; otherwise a message is shown. Local audio files without a YouTube match have no artist page.
+
+Known gaps compared with the Apple Music-style design:
+
+- Latest release is chosen by year only, because YouTube gives no release date. Among releases from the same year, the first one listed wins.
+- YouTube Music does not provide upcoming concerts, editorial "Essential albums" quotes, radio shows and interviews ("More to hear", "More to see"), or structured artist facts such as hometown, birth date and genre, so these are not shown. About shows only the biography text.
+- "Compilations" is approximated by YouTube's "Featured on" shelf.
+- Artist names in the tray tooltip, Discord status and Windows media controls are not clickable.
 
 ## Lyrics providers
 
