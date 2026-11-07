@@ -4,7 +4,7 @@
 
 YTDugem rewrites [BitChord Desktop](https://github.com/kushagrasinghx/BitChord) in Rust, with native egui rendering and mpv playback. **Windows is the supported delivery target for this phase.** Existing Linux code is compatibility, not a parallel product roadmap. No JVM, web frontend, Android target, or new backend is required.
 
-The goal is the closest practical match in desktop features, playback, account behavior, lyrics, navigation, layout, and interaction. This is a goal, not a claim of completed parity. [The parity inventory](DESKTOP_PARITY.md) records known gaps.
+The goal is the closest practical match in desktop features, playback, account behavior, lyrics, navigation, layout, and interaction. This is a goal, not a claim of completed parity. Known gaps are listed in `docs/USAGE.md`.
 
 ## Source of truth
 
@@ -36,4 +36,4 @@ The orchestrator assigns disjoint files, reviews diffs, resolves integration, an
 - Runtime/IPC/playback/package changes checked against the actual complete Windows ZIP with a system-only `PATH`.
 - Null-output decoding, non-null Windows output, and user-confirmed audible playback are distinct claims. A non-null backend alone does not prove the user heard sound.
 - Live provider tests and real-account sign-in reported separately. Missing credentials, network restrictions, and ignored tests are limitations, not passes.
-- README, `docs/USAGE.md` and the parity inventory describe what was delivered, not what was planned.
+- README and `docs/USAGE.md` describe what was delivered, not what was planned.

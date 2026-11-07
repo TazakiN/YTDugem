@@ -2,7 +2,7 @@
 
 A native desktop YouTube Music player written in Rust, rewritten from [BitChord](https://github.com/kushagrasinghx/BitChord). It renders with egui and plays audio through mpv. It needs no JVM, embedded browser, or web frontend.
 
-**Status:** Windows first; Linux is kept working where practical. This is a working rewrite, not yet feature parity with upstream. See the [parity inventory](docs/DESKTOP_PARITY.md).
+**Status:** Windows first; Linux is kept working where practical. This is a working rewrite, not yet feature parity with upstream. The [user guide](docs/USAGE.md) lists what has not been ported.
 
 ## Download
 

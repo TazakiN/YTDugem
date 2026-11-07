@@ -2,7 +2,7 @@
 
 Thank you for helping improve YTDugem. It is a native Rust (egui) desktop music player and a rewrite of [BitChord](https://github.com/kushagrasinghx/BitChord). The project targets Windows first; Linux is kept working where practical.
 
-Before contributing, read [AGENTS.md](AGENTS.md), [docs/PROJECT_GUIDELINES.md](docs/PROJECT_GUIDELINES.md) and [docs/DESKTOP_PARITY.md](docs/DESKTOP_PARITY.md).
+Before contributing, read [AGENTS.md](AGENTS.md) and [docs/PROJECT_GUIDELINES.md](docs/PROJECT_GUIDELINES.md).
 
 ## Prerequisites
 
@@ -74,7 +74,7 @@ Notes on test results:
 - Keep changes small and focused. Do not reformat unrelated code.
 - Keep slow work (network requests, downloads, file scans, audio startup) off the GUI thread.
 - Add tests for logic changes, including malformed input and failure cases.
-- Match upstream BitChord desktop behavior, and record remaining gaps in [docs/DESKTOP_PARITY.md](docs/DESKTOP_PARITY.md).
+- Match upstream BitChord desktop behavior, and list any remaining gaps in [docs/USAGE.md](docs/USAGE.md).
 - Never commit credentials, cookies or API keys. Never use a personal browser profile or account in tests.
 - AI-assisted contributions must follow [AGENTS.md](AGENTS.md).
 

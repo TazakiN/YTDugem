@@ -6,7 +6,7 @@
 - Do not expand the scope to Android, TV, Wear OS, web, or backend development unless the user requests it.
 - Do not claim feature parity with upstream until implementation and testing demonstrate it.
 - Preserve the GPL-3.0 license and attribution to the original BitChord project.
-- Match the desktop feature behavior and UI/UX against actual upstream code, not Android screenshots or assumptions. Track gaps in `docs/DESKTOP_PARITY.md`.
+- Match the desktop feature behavior and UI/UX against actual upstream code, not Android screenshots or assumptions. Record remaining gaps in `docs/USAGE.md`.
 - See `docs/PROJECT_GUIDELINES.md` for architecture, acceptance criteria, and worker coordination.
 
 ## Upstream Reference
@@ -31,7 +31,7 @@
 - `src/playback_check.rs`: audio checks using the same engine as the GUI.
 - `scripts/`: packaging, installation, and smoke tests. `dist/` and `target/` contain build outputs.
 - `xtask/`: std-only `cargo xtask` runner (`ci`, `package`, `smoke`); aliases live in `.cargo/config.toml`.
-- `docs/`: user guide (`USAGE.md`), parity inventory, project guidelines, and Windows verification.
+- `docs/`: user guide (`USAGE.md`), project guidelines, and Windows verification.
 
 ## Working Rules
 

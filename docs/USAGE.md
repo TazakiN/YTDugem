@@ -66,7 +66,7 @@ This is a working desktop rewrite, **not yet feature parity with every upstream 
 - dynamic equalizer
 - installer and update automation
 
-Android, TV, watch, backend and web targets are deliberately excluded. The [parity inventory](DESKTOP_PARITY.md) records remaining gaps.
+Android, TV, watch, backend and web targets are deliberately excluded.
 
 ## Lyrics providers
 
