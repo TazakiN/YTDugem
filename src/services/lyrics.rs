@@ -1016,7 +1016,7 @@ fn mxm_sign(url: &mut reqwest::Url) -> Result<()> {
 }
 
 fn mxm_signature(url: &str, secret: &str, date: &str) -> Result<String> {
-    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(secret.as_bytes())
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(secret.as_bytes())
         .map_err(|_| anyhow!("Musixmatch signing unavailable"))?;
     mac.update(format!("{url}{date}").as_bytes());
     Ok(base64::Engine::encode(
