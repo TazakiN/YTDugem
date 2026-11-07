@@ -9,6 +9,17 @@ pub struct Track {
     pub duration: f64,
     pub thumbnail: String,
     pub source: String,
+    /// The credited artists that YouTube links to a page, in credit order. Empty for local
+    /// files and for tracks saved before artist links existed; the UI then looks names up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artists: Vec<ArtistRef>,
+}
+
+/// One credited artist: the name as written in the credit line and its artist page id.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ArtistRef {
+    pub name: String,
+    pub browse_id: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

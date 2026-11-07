@@ -527,6 +527,7 @@ mod tests {
             duration: 120.0,
             thumbnail: "https://cdn.example/a.jpg".into(),
             source: "https://music.youtube.com/watch?v=5NV6Rdv1a3I".into(),
+            artists: Vec::new(),
         };
         let p = build_activity(&t, 12.0, 1.5, "", [true, false]);
         assert_eq!(p["details"], "Song");

@@ -271,19 +271,17 @@ impl YTDugem {
             WHITE,
             max,
         );
-        fit_text(
-            ui.painter(),
+        if let Some(link) = artist::credit_text(
+            ui,
+            base.with(("credit", track.key())),
             Pos2::new(text_x, rect.center().y + 11.0),
-            egui::Align2::LEFT_CENTER,
-            if track.artist.is_empty() {
-                "Local audio"
-            } else {
-                &track.artist
-            },
+            &artist::track_credit(track),
             FontId::proportional(14.0),
             MUTED,
             max,
-        );
+        ) {
+            self.open_artist_link(link);
+        }
         response.context_menu(|ui| self.track_menu(ui, track));
         events.remove = x.clicked();
         events.clicked = response.clicked() && !events.remove;

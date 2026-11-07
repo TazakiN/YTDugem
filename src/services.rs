@@ -1,4 +1,4 @@
-use crate::model::Track;
+use crate::model::{ArtistRef, Track};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use std::{
@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod artist;
 pub mod lyrics;
 pub mod translate;
 
@@ -30,25 +31,50 @@ pub struct ShelfItem {
     pub browse_id: Option<String>,
     pub params: Option<String>,
     pub duration: f64,
+    /// Linked artists in the subtitle, in credit order.
+    pub artists: Vec<ArtistRef>,
+    /// The artist credit as written in the subtitle, when one is linked.
+    pub credit: Option<String>,
+    /// `MUSIC_PAGE_TYPE_*` of the browse target, when YouTube states it.
+    pub page_type: Option<String>,
+    /// A 16:9 card (videos) rather than square artwork.
+    pub wide: bool,
 }
 impl ShelfItem {
     pub fn track(&self) -> Option<Track> {
         let id = self.video_id.as_ref()?;
-        Some(Track {
-            id: id.clone(),
-            title: self.title.clone(),
-            artist: self
-                .subtitle
+        let artist = self.credit.clone().unwrap_or_else(|| {
+            self.subtitle
                 .split(['•', '·'])
                 .next()
                 .unwrap_or("")
                 .trim()
-                .to_owned(),
+                .to_owned()
+        });
+        Some(Track {
+            id: id.clone(),
+            title: self.title.clone(),
+            artist,
             album: String::new(),
             duration: self.duration,
             thumbnail: self.thumbnail.clone(),
             source: format!("https://music.youtube.com/watch?v={id}"),
+            artists: self.artists.clone(),
         })
+    }
+    /// The item opens an artist page rather than an album, playlist or song.
+    pub fn is_artist(&self) -> bool {
+        self.video_id.is_none()
+            && match self.page_type.as_deref() {
+                Some(page) => page == "MUSIC_PAGE_TYPE_ARTIST",
+                None => {
+                    self.params.is_none()
+                        && self
+                            .browse_id
+                            .as_deref()
+                            .is_some_and(|id| id.starts_with("UC"))
+                }
+            }
     }
 }
 #[derive(Clone, Debug, Default)]
@@ -81,6 +107,9 @@ pub struct Collection {
     pub description: String,
     /// `PUBLIC`/`UNLISTED`/`PRIVATE`, from the owner's editable header only.
     pub privacy: Option<String>,
+    /// The header's artist credit (an album's artists), as written, and its linked artists.
+    pub credit: Option<String>,
+    pub artists: Vec<ArtistRef>,
 }
 
 fn client() -> Result<reqwest::blocking::Client> {
@@ -334,7 +363,9 @@ fn shelf_item(v: &Value) -> ShelfItem {
     });
     let browse_id = nav.and_then(|n| n["browseId"].as_str()).map(str::to_owned);
     let params = nav.and_then(|n| n["params"].as_str()).map(str::to_owned);
+    let page_type = nav.and_then(page_type).map(str::to_owned);
     let video_id = primary_video_id(v).map(str::to_owned);
+    let (credit, artists) = credits(&v["subtitle"]);
     let length = text(&v["lengthText"]);
     let length = if length.is_empty() {
         text(&v["fixedColumns"][0]["musicResponsiveListItemFixedColumnRenderer"]["text"])
@@ -349,7 +380,62 @@ fn shelf_item(v: &Value) -> ShelfItem {
         browse_id,
         params,
         duration: duration(&length),
+        artists,
+        credit,
+        page_type,
+        wide: v["aspectRatio"].as_str()
+            == Some("MUSIC_TWO_ROW_ITEM_THUMBNAIL_ASPECT_RATIO_RECTANGLE_16_9"),
     }
+}
+fn page_type(browse_endpoint: &Value) -> Option<&str> {
+    browse_endpoint
+        .pointer("/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
+        .and_then(Value::as_str)
+}
+/// The artist credit of a subtitle or byline: the `•`-separated group holding the linked
+/// artists, as written (so unlinked names and joiners such as "&" stay), and those artists.
+/// None and empty when no run links to an artist or channel page.
+pub(crate) fn credits(value: &Value) -> (Option<String>, Vec<ArtistRef>) {
+    let Some(runs) = value["runs"].as_array() else {
+        return (None, vec![]);
+    };
+    let artist_of = |run: &Value| {
+        let endpoint = run.pointer("/navigationEndpoint/browseEndpoint")?;
+        let page = page_type(endpoint)?;
+        let id = endpoint["browseId"].as_str().filter(|id| !id.is_empty())?;
+        let name = run["text"].as_str()?.trim();
+        (matches!(
+            page,
+            "MUSIC_PAGE_TYPE_ARTIST" | "MUSIC_PAGE_TYPE_USER_CHANNEL"
+        ) && !name.is_empty())
+        .then(|| ArtistRef {
+            name: name.to_owned(),
+            browse_id: id.to_owned(),
+        })
+    };
+    let mut groups: Vec<Vec<&Value>> = vec![vec![]];
+    for run in runs {
+        let text = run["text"].as_str().unwrap_or("");
+        if run.get("navigationEndpoint").is_none() && matches!(text.trim(), "•" | "·") {
+            groups.push(vec![]);
+        } else if let Some(group) = groups.last_mut() {
+            group.push(run);
+        }
+    }
+    let Some(group) = groups
+        .iter()
+        .find(|g| g.iter().any(|r| artist_of(r).is_some()))
+    else {
+        return (None, vec![]);
+    };
+    let mut artists: Vec<ArtistRef> = vec![];
+    for artist in group.iter().filter_map(|r| artist_of(r)) {
+        if !artists.contains(&artist) {
+            artists.push(artist);
+        }
+    }
+    let line: String = group.iter().filter_map(|r| r["text"].as_str()).collect();
+    (Some(line.trim().to_owned()), artists)
 }
 fn valid_video_id(id: &str) -> bool {
     id.len() == 11
@@ -658,7 +744,17 @@ fn parse_collection(v: &Value) -> Collection {
         .or_else(|| find_renderer(v, "musicDetailHeaderRenderer"))
         .or_else(|| find_renderer(v, "musicImmersiveHeaderRenderer"))
         .unwrap_or(&Value::Null);
+    let (credit, artists) = credits(&header["straplineTextOne"]);
+    // Album rows name no artist of their own: they are the album's.
+    if let Some(credit) = &credit {
+        for track in tracks.iter_mut().filter(|t| t.artist.is_empty()) {
+            track.artist = credit.clone();
+            track.artists = artists.clone();
+        }
+    }
     Collection {
+        credit,
+        artists,
         title: text(&header["title"]),
         subtitle: text(&header["subtitle"]),
         thumbnail: thumbnails(header),
@@ -1163,10 +1259,12 @@ fn collect_panel(v: &Value, out: &mut Vec<Track>) {
                 if let Some(id) = row["videoId"].as_str().filter(|id| valid_video_id(id)) {
                     let title = text(&row["title"]);
                     if !title.is_empty() {
+                        let (credit, artists) = credits(&row["longBylineText"]);
                         out.push(Track {
                             id: id.into(),
                             title,
-                            artist: text(&row["longBylineText"]),
+                            artist: credit.unwrap_or_else(|| text(&row["longBylineText"])),
+                            artists,
                             album: String::new(),
                             duration: duration(&text(&row["lengthText"])),
                             thumbnail: row
@@ -1237,16 +1335,20 @@ fn parse_renderers(value: &Value, tracks: &mut Vec<Track>) {
                         if title.is_empty() {
                             continue;
                         }
-                        let subtitle = columns
+                        let subtitle_value = columns
                             .and_then(|c| c.get(1))
-                            .map(|c| text(&c["musicResponsiveListItemFlexColumnRenderer"]["text"]))
-                            .unwrap_or_else(|| text(&row["subtitle"]));
-                        let artist = subtitle
-                            .split(['•', '·'])
-                            .next()
-                            .unwrap_or("")
-                            .trim()
-                            .to_owned();
+                            .map(|c| &c["musicResponsiveListItemFlexColumnRenderer"]["text"])
+                            .unwrap_or(&row["subtitle"]);
+                        let subtitle = text(subtitle_value);
+                        let (credit, artists) = credits(subtitle_value);
+                        let artist = credit.unwrap_or_else(|| {
+                            subtitle
+                                .split(['•', '·'])
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .to_owned()
+                        });
                         let fixed = row["fixedColumns"][0]
                             ["musicResponsiveListItemFixedColumnRenderer"]["text"]
                             .clone();
@@ -1276,6 +1378,7 @@ fn parse_renderers(value: &Value, tracks: &mut Vec<Track>) {
                             duration: seconds,
                             thumbnail,
                             source: format!("https://music.youtube.com/watch?v={id}"),
+                            artists,
                         });
                     }
                 }
@@ -1550,6 +1653,7 @@ pub fn import_local(path: &Path) -> Result<Vec<Track>> {
                 .unwrap_or(0.0),
             thumbnail: String::new(),
             source: p.to_string_lossy().into_owned(),
+            artists: Vec::new(),
         });
     }
     Ok(tracks)

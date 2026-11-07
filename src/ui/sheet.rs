@@ -749,19 +749,12 @@ impl YTDugem {
             self.account.is_some() && self.current.as_ref().is_some_and(is_youtube_track);
         let buttons = 34.0 + if can_like { 42.0 } else { 0.0 };
         let text_width = rect.width() - buttons - 10.0;
-        let (title, artist) =
-            self.current
-                .as_ref()
-                .map_or(("Nothing playing".to_owned(), String::new()), |t| {
-                    (
-                        t.title.clone(),
-                        if t.artist.is_empty() {
-                            "Local audio".to_owned()
-                        } else {
-                            t.artist.clone()
-                        },
-                    )
-                });
+        let (title, artist) = self
+            .current
+            .as_ref()
+            .map_or(("Nothing playing".to_owned(), vec![]), |t| {
+                (t.title.clone(), artist::track_credit(t))
+            });
         fit_text(
             ui.painter(),
             Pos2::new(rect.left(), rect.top() + 18.0),
@@ -771,15 +764,17 @@ impl YTDugem {
             WHITE,
             text_width,
         );
-        fit_text(
-            ui.painter(),
+        if let Some(link) = artist::credit_text(
+            ui,
+            ui.make_persistent_id("sheet-credit"),
             Pos2::new(rect.left(), rect.top() + 46.0),
-            egui::Align2::LEFT_CENTER,
             &artist,
             FontId::proportional(17.0),
             Color32::from_white_alpha(140),
             text_width,
-        );
+        ) {
+            self.open_artist_link(link);
+        }
         let mut x = rect.right() - 34.0;
         let more = Rect::from_min_size(Pos2::new(x, rect.center().y - 17.0), Vec2::splat(34.0));
         if self.current.is_some() {

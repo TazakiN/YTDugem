@@ -27,6 +27,11 @@ fn main() -> eframe::Result {
             .map_err(|e| eframe::Error::AppCreation(e.into()));
     }
     let open_player = args.iter().any(|s| s == "--screenshot-player");
+    let open_artist = args
+        .iter()
+        .position(|s| s == "--screenshot-artist")
+        .and_then(|i| args.get(i + 1))
+        .map(|id| id.to_string_lossy().into_owned());
     let screenshot = match args.iter().position(|s| s == "--screenshot") {
         Some(i) => Some(std::path::PathBuf::from(args.get(i + 1).ok_or_else(
             || eframe::Error::AppCreation("Usage: YTDugem --screenshot FILE.png".into()),
@@ -80,7 +85,8 @@ fn main() -> eframe::Result {
             Ok(Box::new(
                 ui::YTDugem::new(cc)
                     .with_screenshot(screenshot)
-                    .with_player_open(open_player),
+                    .with_player_open(open_player)
+                    .with_artist_open(open_artist),
             ))
         }),
     )

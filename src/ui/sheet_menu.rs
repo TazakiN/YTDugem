@@ -259,14 +259,7 @@ impl YTDugem {
                     ..Default::default()
                 });
             }
-            MenuAction::OpenArtist(id) => {
-                self.expanded = false;
-                self.open_item(ShelfItem {
-                    browse_id: Some(id),
-                    title: track.artist.clone(),
-                    ..Default::default()
-                });
-            }
+            MenuAction::OpenArtist(id) => self.open_artist(id),
             MenuAction::SleepIn(minutes) => {
                 self.stop_after_track = false;
                 self.sleep_until = Some(Instant::now() + Duration::from_secs(minutes * 60));

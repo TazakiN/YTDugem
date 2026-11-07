@@ -22,6 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod artist;
 mod explore;
 mod sheet;
 mod sheet_lyrics;
@@ -51,6 +52,9 @@ enum Page {
     Local,
     Playlist(usize),
     Collection,
+    Artist(String),
+    /// A "See all" grid of an artist shelf.
+    ArtistGrid(services::artist::BrowseTarget),
     Settings,
 }
 #[derive(Clone, Copy, PartialEq)]
@@ -113,6 +117,19 @@ enum Event {
     Moods(u64, Result<Vec<services::MoodGenreSection>, String>),
     /// A mood/genre tile's cover: (request, category key, url).
     MoodArtwork(u64, String, String),
+    Artist(String, Result<services::artist::ArtistPage, String>),
+    ArtistGrid(
+        services::artist::BrowseTarget,
+        Result<Vec<ShelfItem>, String>,
+    ),
+    /// The page of a credited name without a link: (request, name, browse id).
+    ArtistLookup(u64, String, Result<Option<String>, String>),
+    /// An artist's Shuffle or Mix queue: (request, origin, tracks).
+    ArtistQueue(u64, String, Result<Vec<Track>, String>),
+    /// A subscription change: (artist page, subscribed, result).
+    ArtistSubscribed(String, bool, Result<(), String>),
+    /// Artists matching a search, tagged with the song search's request.
+    ArtistResults(u64, Result<Vec<ShelfItem>, String>),
 }
 
 pub struct YTDugem {
@@ -140,6 +157,7 @@ pub struct YTDugem {
     home_more: bool,
     recents: Vec<Track>,
     explore: explore::Explore,
+    artists: artist::Artists,
     collection: Option<Collection>,
     collection_request: u64,
     tx: Sender<Event>,
@@ -263,6 +281,13 @@ impl YTDugem {
         self.screenshot = path;
         self
     }
+    /// `--screenshot-artist ID`: open an artist page, for UI checks.
+    pub fn with_artist_open(mut self, browse_id: Option<String>) -> Self {
+        if let Some(id) = browse_id {
+            self.open_artist(id);
+        }
+        self
+    }
     /// `--screenshot-player`: open Now Playing on the most recent history track, for UI checks.
     pub fn with_player_open(mut self, open: bool) -> Self {
         if let Some(t) = self.library.history.first().cloned().filter(|_| open) {
@@ -373,6 +398,7 @@ impl YTDugem {
             home_more: false,
             recents: vec![],
             explore: Default::default(),
+            artists: Default::default(),
             collection: None,
             collection_request: 0,
             tx,
@@ -555,6 +581,7 @@ impl YTDugem {
         self.submitted_query = self.query.trim().into();
         self.navigate(Page::Search);
         let q = self.submitted_query.clone();
+        self.search_artists(id, q.clone());
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(Event::Results(id, services::search(&q).map_err(err)));
@@ -563,6 +590,10 @@ impl YTDugem {
     fn open_item(&mut self, item: ShelfItem) {
         if let Some(t) = item.track() {
             self.start_tracks(vec![t], 0, "Home");
+        } else if item.is_artist() {
+            if let Some(id) = item.browse_id {
+                self.open_artist(id);
+            }
         } else if let Some(id) = item.browse_id {
             self.collection_request += 1;
             let request = self.collection_request;
@@ -893,6 +924,7 @@ impl YTDugem {
         self.home_more = false;
         self.home_pending = 0;
         self.explore.reset();
+        self.artists.reset();
         self.collection = None;
         self.lyrics.clear();
         self.lyrics_provider.clear();
@@ -3643,6 +3675,17 @@ impl YTDugem {
                 Event::MoodArtwork(id, key, url) if id == self.explore.request => {
                     self.explore.artwork_loaded(&key, url);
                 }
+                Event::Artist(id, r) => self.artist_loaded(id, r),
+                Event::ArtistGrid(target, r) => self.grid_loaded(target, r),
+                Event::ArtistLookup(id, name, r) => self.artist_found(id, name, r),
+                Event::ArtistQueue(id, origin, r) => self.artist_queue_loaded(id, origin, r),
+                Event::ArtistSubscribed(id, subscribed, r) => {
+                    self.subscription_changed(id, subscribed, r)
+                }
+                Event::ArtistResults(id, r) if id == self.request => {
+                    // A failed artist search leaves the songs alone; it is only a bonus row.
+                    self.artists.results = r.unwrap_or_default();
+                }
                 Event::Collection(id, r) if id == self.collection_request => {
                     self.busy = false;
                     match r {
@@ -4261,15 +4304,17 @@ impl YTDugem {
                 WHITE,
                 card.width() - 70.0,
             );
-            fit_text(
-                ui.painter(),
+            if let Some(link) = artist::credit_text(
+                ui,
+                ui.make_persistent_id("bar-credit"),
                 Pos2::new(card.left() + 61.0, card.top() + 33.0),
-                egui::Align2::LEFT_CENTER,
-                &t.artist,
+                &artist::track_credit(&t),
                 FontId::proportional(11.0),
                 MUTED,
                 card.width() - 70.0,
-            );
+            ) {
+                self.open_artist_link(link);
+            }
             let progress = if self.duration() > 0.0 {
                 (self.status.position / self.duration()).clamp(0.0, 1.0) as f32
             } else {
@@ -4526,19 +4571,18 @@ impl YTDugem {
             WHITE,
             max,
         );
-        fit_text(
-            ui.painter(),
+        let credit = ui.scope_id().with(("credit", track.key()));
+        if let Some(link) = artist::credit_text(
+            ui,
+            credit,
             Pos2::new(text_x, rect.top() + 46.0),
-            egui::Align2::LEFT_CENTER,
-            if track.artist.is_empty() {
-                "Local audio"
-            } else {
-                &track.artist
-            },
+            &artist::track_credit(track),
             FontId::proportional(14.0),
             MUTED,
             max,
-        );
+        ) {
+            self.open_artist_link(link);
+        }
         if index.is_some() {
             ui.painter().text(
                 Pos2::new(rect.right() - 65.0, rect.center().y),
@@ -4667,66 +4711,9 @@ impl YTDugem {
                 ui.label(RichText::new(&shelf.subtitle).color(MUTED));
             }
             ui.add_space(10.0);
-            egui::ScrollArea::horizontal()
-                .id_salt(("shelf", salt, shelf_i))
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(ui, |ui| {
-                    ui.horizontal_top(|ui| {
-                        for (i, item) in shelf.items.iter().enumerate() {
-                            ui.push_id(("card", salt, shelf_i, i), |ui| {
-                                ui.vertical(|ui| {
-                                    ui.set_width(180.0);
-                                    let (rect, response) = ui.allocate_exact_size(
-                                        Vec2::splat(180.0),
-                                        egui::Sense::click(),
-                                    );
-                                    draw_image(ui, &item.thumbnail, rect, None);
-                                    if response.hovered() {
-                                        ui.painter().rect_filled(
-                                            rect,
-                                            10.0,
-                                            Color32::from_black_alpha(35),
-                                        );
-                                        let r = Rect::from_center_size(
-                                            rect.right_bottom() - Vec2::splat(25.0),
-                                            Vec2::splat(34.0),
-                                        );
-                                        ui.painter().circle_filled(
-                                            r.center(),
-                                            20.0,
-                                            Color32::from_black_alpha(140),
-                                        );
-                                        widgets::paint(
-                                            ui.painter(),
-                                            Icon::Play,
-                                            r.shrink(7.0),
-                                            WHITE,
-                                        );
-                                    }
-                                    if response.clicked() {
-                                        self.open_item(item.clone());
-                                    }
-                                    if ui
-                                        .add(
-                                            egui::Label::new(heading(&item.title, 15.0))
-                                                .truncate()
-                                                .sense(egui::Sense::click()),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.open_item(item.clone());
-                                    }
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&item.subtitle).size(14.0).color(MUTED),
-                                        )
-                                        .truncate(),
-                                    );
-                                });
-                            });
-                        }
-                    });
-                });
+            if let Some(action) = artist::card_row(ui, &shelf.items, ("shelf", salt, shelf_i)) {
+                self.card_clicked(action);
+            }
             ui.add_space(34.0);
         }
     }
@@ -4738,6 +4725,23 @@ impl YTDugem {
                 draw_image(ui, &c.thumbnail, r, None);
                 ui.vertical(|ui| {
                     ui.label(heading(&c.title, 31.0));
+                    if let Some(credit) = &c.credit {
+                        let (line, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 22.0),
+                            egui::Sense::hover(),
+                        );
+                        if let Some(link) = artist::credit_text(
+                            ui,
+                            ui.make_persistent_id("collection-credit"),
+                            line.left_center(),
+                            &artist::credit_segments(credit, &c.artists, false),
+                            FontId::new(16.0, egui::FontFamily::Name("bold".into())),
+                            ACCENT,
+                            line.width(),
+                        ) {
+                            self.open_artist_link(link);
+                        }
+                    }
                     ui.label(RichText::new(&c.subtitle).color(MUTED));
                     let Some(id) = playlist_id.clone() else {
                         return;
@@ -4843,6 +4847,8 @@ impl YTDugem {
             Page::Home => self.home_view(ui),
             Page::Explore => self.explore_view(ui),
             Page::Collection => self.collection_view(ui),
+            Page::Artist(id) => self.artist_view(ui, &id),
+            Page::ArtistGrid(target) => self.artist_grid_view(ui, &target),
             Page::Search => {
                 ui.label(heading(
                     if self.submitted_query.is_empty() {
@@ -4852,6 +4858,7 @@ impl YTDugem {
                     },
                     26.0,
                 ));
+                self.artist_results(ui);
                 self.track_list(ui, self.results.clone(), "Search");
             }
             Page::Library => {
