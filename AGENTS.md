@@ -28,10 +28,11 @@
 - `src/model.rs`: shared data models.
 - `src/widgets.rs`: shared native controls, icons, and seek/volume sliders.
 - `src/integrations.rs`: system media controls.
+- `src/update.rs` and `src/ui/updater.rs`: GitHub release check and in-place update of the portable ZIP (see `docs/RELEASING.md`).
 - `src/playback_check.rs`: audio checks using the same engine as the GUI.
 - `scripts/`: packaging, installation, and smoke tests. `dist/` and `target/` contain build outputs.
 - `xtask/`: std-only `cargo xtask` runner (`ci`, `package`, `smoke`); aliases live in `.cargo/config.toml`.
-- `docs/`: user guide (`USAGE.md`), project guidelines, and Windows verification.
+- `docs/`: user guide (`USAGE.md`), project guidelines, release process (`RELEASING.md`), and Windows verification.
 
 ## Working Rules
 
