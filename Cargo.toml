@@ -30,7 +30,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 directories = "6"
 rand = "0.10"
 souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
-sha1 = "0.10"
+sha1 = "0.11"
 hmac = "0.12"
 sha2 = "0.10"
 # The saved sign-in is sealed under a key the system credential store holds (Meiro `secretfile`).
