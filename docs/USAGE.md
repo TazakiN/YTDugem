@@ -48,11 +48,7 @@ YTDugem automatically uses X11 and Mesa's software renderer to work around EGL/Z
 - **Audio:** a persisted seven-band manual equalizer, upstream presets and stereo balance through mpv/FFmpeg filters. You can select an audio device reported by mpv and set a Windows exclusive-output preference. This is not upstream's custom DSP or dynamic tone-pad EQ, and it does not guarantee bit-perfect output.
 - **Timers:** sleep timer, stop-after-track, and keyboard shortcuts.
 - **System media controls:** Linux MPRIS and Windows system media-control integration, when available in the desktop session.
-- **Discord Rich Presence:** opt-in, through the local Windows Discord IPC pipe, with no account token.
-  - It shows title and artist, artwork, and a playback countdown. The activity name and two button visibility options are configurable.
-  - Pausing, stopping or disabling it clears the presence.
-  - Background IPC uses bounded I/O, coalesced updates and reconnects.
-  - Real named-pipe fake-server tests pass. Real Discord profile rendering still needs [interactive verification](VERIFYING_WINDOWS.md#discord-presence-interactive-verification).
+- **Discord Rich Presence:** coming soon. Settings shows it as "Coming soon" and nothing is sent to Discord until YTDugem has its own Discord application.
 
 This is a working desktop rewrite, **not yet feature parity with every upstream desktop integration or a pixel-identical UI**. The following have not been ported:
 

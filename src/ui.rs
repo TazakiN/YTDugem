@@ -31,6 +31,9 @@ mod sheet_queue;
 
 const BG: Color32 = Color32::from_rgb(29, 31, 27);
 const SIDE: Color32 = Color32::from_rgb(21, 22, 19);
+/// Discord Rich Presence is shown as "Coming soon" until YTDugem has its own Discord
+/// application; the upstream application id would show listeners as BitChord.
+const DISCORD_READY: bool = false;
 const MUTED: Color32 = Color32::from_rgb(150, 151, 147);
 const WHITE: Color32 = Color32::from_rgb(244, 244, 242);
 /// Calls to action and progress in dialogs.
@@ -2594,7 +2597,16 @@ impl YTDugem {
         if let Some(q) = group_query(&query, "Integrations", &rows) {
             shown = true;
             settings_group(ui, "Integrations", |ui| {
-                if hit(&q, rows[0]) {
+                if hit(&q, rows[0]) && !DISCORD_READY {
+                    setting_row(
+                        ui,
+                        rows[0],
+                        "Show what you are listening to on your Discord profile",
+                        |ui| {
+                            ui.label(RichText::new("Coming soon").color(MUTED));
+                        },
+                    );
+                } else if hit(&q, rows[0]) {
                     let status = if !self.library.discord_enabled {
                         "Show what you are listening to on your Discord profile".to_owned()
                     } else {
@@ -2618,7 +2630,7 @@ impl YTDugem {
                         }
                     }
                 }
-                if self.library.discord_enabled {
+                if DISCORD_READY && self.library.discord_enabled {
                     if hit(&q, rows[1]) {
                         setting_row(ui, rows[1], "Blank shows the song title", |ui| {
                             if ui
@@ -3829,7 +3841,7 @@ impl YTDugem {
             self.stop();
             self.message = "Sleep timer finished".into();
         }
-        if self.library.discord_enabled {
+        if DISCORD_READY && self.library.discord_enabled {
             if let Some(track) = self
                 .current
                 .as_ref()

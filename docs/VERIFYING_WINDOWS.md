@@ -29,6 +29,8 @@ If `python` is the Windows Store alias, use the full path to your installed Pyth
 
 ## Discord presence: interactive verification
 
+Discord Rich Presence is disabled in the app (`DISCORD_READY` in `src/ui.rs`) until YTDugem has its own Discord application. Run these steps only after enabling it.
+
 1. Open the **Discord desktop client** on Windows; browser-only Discord has no local IPC pipe. No Discord token is needed or requested.
 2. In YTDugem Settings, enable **Discord Rich Presence** (off by default), then play a song. After an acknowledgement, the status should read **Discord: connected**. If Discord is absent it stays waiting; rejected/timed-out requests show an error and retry.
 3. Inspect your Discord profile: title, artist, artwork when public HTTPS artwork is available, album tooltip, and the countdown. Test a seek, speed change, next track, and the optional activity name/button settings. Ordinary edits are coalesced to at most one update per two seconds. Discord may control or ignore the application display name, external images or buttons; your own profile may not show your own buttons.
