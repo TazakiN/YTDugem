@@ -2039,7 +2039,12 @@ mod tests {
         let outside = dir.join("mine.opus");
         fs::write(&inside, b"a").unwrap();
         fs::write(&outside, b"b").unwrap();
-        let verbatim = format!(r"\\?\{}", inside.display());
+        // Windows reports local files with a verbatim prefix; elsewhere the path is used as is.
+        let verbatim = if cfg!(windows) {
+            format!(r"\\?\{}", inside.display())
+        } else {
+            inside.display().to_string()
+        };
         assert!(delete_download(&outside.to_string_lossy(), &downloads).is_err());
         assert!(outside.exists());
         assert!(delete_download(&verbatim, &downloads).is_ok());
