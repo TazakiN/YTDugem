@@ -62,6 +62,8 @@ pub enum Icon {
     FastForward,
     Person,
     HeadphonesFill,
+    Trending,
+    Smiley,
 }
 
 /// White at `alpha` opacity, as egui 0.31's `Color32::from_white_alpha` made it: the opacity is
@@ -205,6 +207,8 @@ fn glyph(icon: Icon) -> (&'static str, bool) {
         Icon::FastForward => (fill::FAST_FORWARD, true),
         Icon::Person => (fill::USER, true),
         Icon::HeadphonesFill => (fill::HEADPHONES, true),
+        Icon::Trending => (regular::TREND_UP, false),
+        Icon::Smiley => (regular::SMILEY, false),
     }
 }
 

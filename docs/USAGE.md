@@ -33,6 +33,7 @@ YTDugem automatically uses X11 and Mesa's software renderer to work around EGL/Z
 ## Features
 
 - **Home and search:** Desktop Home with real YouTube Music shelves, browsable albums and collections, live search and Explore, artwork, and a local audio library. Selecting a Home song starts playback.
+- **Explore:** New releases, Charts and Moods & genres buttons, YouTube Music's Explore shelves, and mood and genre tiles that open their playlists. Each sub-page has Back to Explore; the refresh button reloads everything.
 - **Expanded player:** artwork view with a blurred background, controls, synchronized lyrics and queue views.
 - **Google sign-in:** sign-in runs in a normal isolated Chrome/Edge/Chromium window. After that window closes, the session is captured securely in a headless browser. You can also enter cookies manually in a masked field (Cookie header, Netscape or JSON).
   - Encrypted saved accounts support adding, switching and removing sessions.

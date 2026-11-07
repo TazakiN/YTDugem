@@ -466,6 +466,171 @@ pub fn home_more(token: &str) -> Result<HomeFeed> {
     let v = innertube_value("browse", json!({"continuation":token}))?;
     Ok(parse_home(&v))
 }
+
+/// One server-defined group of Explore's mood and genre buttons (upstream `MoodGenreSection`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MoodGenreSection {
+    pub title: String,
+    pub items: Vec<MoodGenre>,
+}
+/// A mood or genre button and the exact browse request it stands for (upstream `MoodGenre`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MoodGenre {
+    pub title: String,
+    pub browse_id: String,
+    pub params: Option<String>,
+    /// YouTube Music's stripe colour for the button as ARGB (`solid.leftStripeColor`).
+    pub color: Option<u32>,
+    /// First cover from the category's playlist shelves, resolved in the background.
+    pub thumbnail: Option<String>,
+}
+impl MoodGenre {
+    /// Identifies the category: the same browse id with other params is another page.
+    pub fn key(&self) -> String {
+        format!(
+            "{}|{}",
+            self.browse_id,
+            self.params.as_deref().unwrap_or("")
+        )
+    }
+}
+
+/// Shelves of one browse page that actually hold cards.
+fn browse_shelves(browse_id: &str, params: Option<&str>) -> Result<Vec<HomeShelf>> {
+    let mut body = json!({ "browseId": browse_id });
+    if let Some(params) = params {
+        body["params"] = json!(params);
+    }
+    let v = innertube_value("browse", body)?;
+    Ok(filled_shelves(parse_home(&v).shelves))
+}
+fn filled_shelves(mut shelves: Vec<HomeShelf>) -> Vec<HomeShelf> {
+    shelves.retain(|s| !s.items.is_empty());
+    shelves
+}
+/// The Explore page's own shelves (new albums, trending, new videos, ...).
+pub fn explore() -> Result<Vec<HomeShelf>> {
+    browse_shelves("FEmusic_explore", None)
+}
+pub fn new_releases() -> Result<Vec<HomeShelf>> {
+    browse_shelves("FEmusic_new_releases", None)
+}
+pub fn charts() -> Result<Vec<HomeShelf>> {
+    browse_shelves("FEmusic_charts", None)
+}
+
+/// Upstream `YtMusicRepository.moodAndGenres`: the server-defined categories Explore shows.
+pub fn moods_and_genres() -> Result<Vec<MoodGenreSection>> {
+    let v = innertube_value("browse", json!({"browseId":"FEmusic_moods_and_genres"}))?;
+    Ok(parse_mood_and_genres(&v))
+}
+
+/// Upstream `InnertubeParser.parseMoodAndGenres`: navigation-button grids, each button keeping
+/// the browse params that select its exact category. A signed-in page leads with a "For you"
+/// grid of shortcuts to buttons later grids repeat; it is dropped, recognised by repeating a
+/// later section's button, with the English title as a backstop.
+fn parse_mood_and_genres(v: &Value) -> Vec<MoodGenreSection> {
+    let sections = v
+        .pointer("/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let parsed: Vec<MoodGenreSection> = sections
+        .iter()
+        .filter_map(|section| {
+            let grid = section.get("gridRenderer")?;
+            let title = text(&grid["header"]["gridHeaderRenderer"]["title"]);
+            let items: Vec<MoodGenre> = grid["items"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(mood_genre)
+                .collect();
+            (!title.trim().is_empty() && !items.is_empty())
+                .then_some(MoodGenreSection { title, items })
+        })
+        .collect();
+    parsed
+        .iter()
+        .enumerate()
+        .filter(|(i, section)| {
+            let later: HashSet<(&str, Option<&str>)> = parsed[i + 1..]
+                .iter()
+                .flat_map(|s| &s.items)
+                .map(|m| (m.browse_id.as_str(), m.params.as_deref()))
+                .collect();
+            let shortcuts = section
+                .items
+                .iter()
+                .any(|m| later.contains(&(m.browse_id.as_str(), m.params.as_deref())));
+            !shortcuts && !section.title.eq_ignore_ascii_case("For you")
+        })
+        .map(|(_, s)| s.clone())
+        .collect()
+}
+fn mood_genre(item: &Value) -> Option<MoodGenre> {
+    let button = item.get("musicNavigationButtonRenderer")?;
+    let endpoint = button
+        .pointer("/clickCommand/browseEndpoint")
+        .or_else(|| button.pointer("/navigationEndpoint/browseEndpoint"))?;
+    let browse_id = endpoint["browseId"].as_str()?.to_owned();
+    let title = text(&button["buttonText"]);
+    if title.trim().is_empty() {
+        return None;
+    }
+    // Upstream reads the colour with `toLongOrNull` and draws it as a 32-bit ARGB int.
+    let stripe = &button["solid"]["leftStripeColor"];
+    let color = stripe
+        .as_i64()
+        .or_else(|| stripe.as_str().and_then(|s| s.trim().parse().ok()))
+        .filter(|c| (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(c))
+        .map(|c| c as u32);
+    Some(MoodGenre {
+        title,
+        browse_id,
+        params: endpoint["params"].as_str().map(str::to_owned),
+        color,
+        thumbnail: None,
+    })
+}
+
+/// Shelves already fetched per category: the artwork prefetch fetches the same page a click
+/// opens, as upstream's `moodGenreShelfCache`.
+static MOOD_SHELVES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<HomeShelf>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Upstream `YtMusicRepository.moodGenreShelves`: the playlist shelves behind one category.
+pub fn mood_genre_shelves(browse_id: &str, params: Option<&str>) -> Result<Vec<HomeShelf>> {
+    let key = format!("{browse_id}|{}", params.unwrap_or(""));
+    if let Some(shelves) = MOOD_SHELVES.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return Ok(shelves);
+    }
+    let shelves = browse_shelves(browse_id, params)?;
+    if let Ok(mut cache) = MOOD_SHELVES.lock() {
+        cache.entry(key).or_insert_with(|| shelves.clone());
+    }
+    Ok(shelves)
+}
+/// Drops cached category shelves, so a refresh or another account fetches them again.
+pub fn forget_mood_genre_shelves() {
+    if let Ok(mut cache) = MOOD_SHELVES.lock() {
+        cache.clear();
+    }
+}
+/// Upstream `moodGenreArtwork`: a category tile borrows the first cover its shelves hold.
+pub fn mood_genre_artwork(browse_id: &str, params: Option<&str>) -> Result<Option<String>> {
+    Ok(first_artwork(&mood_genre_shelves(browse_id, params)?))
+}
+fn first_artwork(shelves: &[HomeShelf]) -> Option<String> {
+    shelves
+        .iter()
+        .flat_map(|s| &s.items)
+        .map(|i| i.thumbnail.as_str())
+        .find(|t| !t.is_empty())
+        .map(str::to_owned)
+}
 pub fn recent() -> Result<Vec<Track>> {
     if crate::auth::snapshot().is_none() {
         return Ok(vec![]);
@@ -1193,11 +1358,6 @@ pub fn search(query: &str) -> Result<Vec<Track>> {
         "search",
         json!({"query":query,"params":"EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"}),
     )
-}
-
-#[cfg(test)]
-pub fn browse() -> Result<Vec<Track>> {
-    innertube("browse", json!({"browseId":"FEmusic_explore"}))
 }
 
 const AUDIO: &[&str] = &[
@@ -1970,6 +2130,132 @@ mod tests {
         assert_eq!(c.tracks.len(), 1);
         assert_eq!(c.continuation.as_deref(), Some("more"));
     }
+    fn mood_button(title: &str, id: &str, params: Option<&str>, color: Value) -> Value {
+        let mut endpoint = json!({ "browseId": id });
+        if let Some(p) = params {
+            endpoint["params"] = json!(p);
+        }
+        json!({"musicNavigationButtonRenderer":{
+            "buttonText":{"runs":[{"text":title}]},
+            "solid":{"leftStripeColor":color},
+            "clickCommand":{"browseEndpoint":endpoint}
+        }})
+    }
+    fn mood_page(grids: Vec<(&str, Vec<Value>)>) -> Value {
+        let contents: Vec<Value> = grids
+            .into_iter()
+            .map(|(title, items)| {
+                json!({"gridRenderer":{
+                    "header":{"gridHeaderRenderer":{"title":{"runs":[{"text":title}]}}},
+                    "items":items
+                }})
+            })
+            .collect();
+        json!({"contents":{"singleColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"sectionListRenderer":{"contents":contents}}}}]}}})
+    }
+    #[test]
+    fn parses_mood_and_genre_grids_with_params_and_colours() {
+        let cat = "FEmusic_moods_and_genres_category";
+        let page = mood_page(vec![
+            (
+                "Moods & moments",
+                vec![
+                    mood_button("Chill", cat, Some("p-chill"), json!(4283584335u64)),
+                    // A colour sent as a string and a signed Java int both decode to ARGB.
+                    mood_button("Focus", cat, Some("p-focus"), json!("-16777216")),
+                    // No colour, and the older navigationEndpoint form.
+                    json!({"musicNavigationButtonRenderer":{"buttonText":{"runs":[{"text":"Sleep"}]},"navigationEndpoint":{"browseEndpoint":{"browseId":"FEsleep"}}}}),
+                ],
+            ),
+            (
+                "Genres",
+                vec![
+                    mood_button("Pop", cat, Some("p-pop"), json!("not a colour")),
+                    // Skipped: no title, no endpoint, not a button.
+                    mood_button("", cat, Some("p-x"), Value::Null),
+                    json!({"musicNavigationButtonRenderer":{"buttonText":{"runs":[{"text":"Broken"}]}}}),
+                    json!({"musicTwoRowItemRenderer":{}}),
+                ],
+            ),
+            ("Empty", vec![]),
+            ("", vec![mood_button("Untitled", "FEx", None, Value::Null)]),
+        ]);
+        let sections = parse_mood_and_genres(&page);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].title, "Moods & moments");
+        let chill = &sections[0].items[0];
+        assert_eq!(chill.title, "Chill");
+        assert_eq!(chill.browse_id, cat);
+        assert_eq!(chill.params.as_deref(), Some("p-chill"));
+        assert_eq!(chill.color, Some(4283584335));
+        assert_eq!(chill.thumbnail, None);
+        assert_eq!(chill.key(), format!("{cat}|p-chill"));
+        assert_eq!(sections[0].items[1].color, Some(0xFF00_0000));
+        assert_eq!(sections[0].items[2].params, None);
+        assert_eq!(sections[0].items[2].color, None);
+        assert_eq!(sections[1].items.len(), 1);
+        assert_eq!(sections[1].items[0].color, None);
+        assert!(parse_mood_and_genres(&json!({})).is_empty());
+    }
+    #[test]
+    fn drops_signed_in_shortcut_grid() {
+        let pop = || mood_button("Pop", "FEcat", Some("p-pop"), Value::Null);
+        let page = mood_page(vec![
+            // A localised "For you" heading is caught by repeating a later button.
+            ("Pour vous", vec![pop()]),
+            (
+                "For You",
+                vec![mood_button("Rare", "FEcat", Some("p-rare"), Value::Null)],
+            ),
+            (
+                "Genres",
+                vec![
+                    pop(),
+                    mood_button("Pop", "FEcat", Some("p-other"), Value::Null),
+                ],
+            ),
+        ]);
+        let sections = parse_mood_and_genres(&page);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].title, "Genres");
+        assert_eq!(sections[0].items.len(), 2);
+    }
+    #[test]
+    fn mood_artwork_is_first_real_cover_and_empty_shelves_drop() {
+        let shelf = |title: &str, thumbnail: Option<&str>| HomeShelf {
+            title: title.into(),
+            subtitle: String::new(),
+            items: thumbnail
+                .map(|t| ShelfItem {
+                    title: "x".into(),
+                    thumbnail: t.into(),
+                    ..Default::default()
+                })
+                .into_iter()
+                .collect(),
+        };
+        let shelves = filled_shelves(vec![
+            shelf("Empty", None),
+            shelf("A", Some("")),
+            shelf("B", Some("https://cover")),
+        ]);
+        assert_eq!(shelves.len(), 2);
+        assert_eq!(first_artwork(&shelves).as_deref(), Some("https://cover"));
+        assert_eq!(first_artwork(&shelves[..1]), None);
+        // A category page is ordinary carousels of playlist cards.
+        let category = parse_home(
+            &json!({"contents":{"sectionListRenderer":{"contents":[{"gridRenderer":{"items":[]}},{"musicCarouselShelfRenderer":{"header":{"musicCarouselShelfBasicHeaderRenderer":{"title":{"runs":[{"text":"Featured playlists"}]}}},"contents":[{"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Chill Mix"}]},"thumbnailRenderer":{"musicThumbnailRenderer":{"thumbnail":{"thumbnails":[{"url":"https://mix"}]}}},"navigationEndpoint":{"browseEndpoint":{"browseId":"VLRDCLAK"}}}}]}}]}}}),
+        );
+        assert_eq!(category.shelves[0].title, "Featured playlists");
+        assert_eq!(
+            category.shelves[0].items[0].browse_id.as_deref(),
+            Some("VLRDCLAK")
+        );
+        assert_eq!(
+            first_artwork(&category.shelves).as_deref(),
+            Some("https://mix")
+        );
+    }
     #[test]
     fn ignores_shelf_tokens_and_reads_nested_collection_and_radio_rows() {
         let response = json!({
@@ -2079,9 +2365,40 @@ mod tests {
             tracks[0].title,
             tracks[0].artist
         );
-        let tracks = browse().unwrap();
-        assert!(!tracks.is_empty());
-        println!("explore: {} tracks", tracks.len());
+    }
+    #[test]
+    #[ignore = "requires internet access to YouTube Music"]
+    fn live_explore() {
+        let sections = moods_and_genres().unwrap();
+        let count: usize = sections.iter().map(|s| s.items.len()).sum();
+        println!(
+            "moods & genres: {} sections / {count} categories",
+            sections.len()
+        );
+        assert!(count > 0);
+        let category = &sections[0].items[0];
+        let params = category.params.as_deref();
+        let shelves = mood_genre_shelves(&category.browse_id, params).unwrap();
+        assert!(!shelves.is_empty(), "A category must open playlist shelves");
+        let artwork = mood_genre_artwork(&category.browse_id, params).unwrap();
+        println!(
+            "{}: {} shelves; artwork {}",
+            category.title,
+            shelves.len(),
+            artwork.is_some()
+        );
+        for (name, shelves) in [
+            ("explore", explore().unwrap()),
+            ("charts", charts().unwrap()),
+            ("new releases", new_releases().unwrap()),
+        ] {
+            let titles: Vec<String> = shelves
+                .iter()
+                .map(|s| format!("{} ({})", s.title, s.items.len()))
+                .collect();
+            println!("{name}: {}", titles.join(", "));
+            assert!(!shelves.is_empty(), "{name} must have shelves");
+        }
     }
     #[test]
     #[ignore = "requires internet access to YouTube Music; guest home may be empty"]

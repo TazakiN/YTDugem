@@ -22,6 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod explore;
 mod sheet;
 mod sheet_lyrics;
 mod sheet_menu;
@@ -104,6 +105,11 @@ enum Event {
     AudioDevices(Result<Vec<(String, String)>, String>),
     Artwork(String, Result<(egui::ColorImage, egui::ColorImage), String>),
     Radio(u64, String, Result<Vec<Track>, String>),
+    /// Shelves for one Explore page, tagged with the request they answer.
+    ExploreShelves(u64, explore::Feed, Result<Vec<HomeShelf>, String>),
+    Moods(u64, Result<Vec<services::MoodGenreSection>, String>),
+    /// A mood/genre tile's cover: (request, category key, url).
+    MoodArtwork(u64, String, String),
 }
 
 pub struct YTDugem {
@@ -130,6 +136,7 @@ pub struct YTDugem {
     home_token: Option<String>,
     home_more: bool,
     recents: Vec<Track>,
+    explore: explore::Explore,
     collection: Option<Collection>,
     collection_request: u64,
     tx: Sender<Event>,
@@ -362,6 +369,7 @@ impl YTDugem {
             home_token: None,
             home_more: false,
             recents: vec![],
+            explore: Default::default(),
             collection: None,
             collection_request: 0,
             tx,
@@ -881,6 +889,7 @@ impl YTDugem {
         self.home_token = None;
         self.home_more = false;
         self.home_pending = 0;
+        self.explore.reset();
         self.collection = None;
         self.lyrics.clear();
         self.lyrics_provider.clear();
@@ -3615,6 +3624,13 @@ impl YTDugem {
                         self.recents = t;
                     }
                 }
+                Event::ExploreShelves(id, feed, r) if id == self.explore.request_for(feed) => {
+                    self.explore.shelves_loaded(feed, r);
+                }
+                Event::Moods(id, r) if id == self.explore.request => self.moods_loaded(r),
+                Event::MoodArtwork(id, key, url) if id == self.explore.request => {
+                    self.explore.artwork_loaded(&key, url);
+                }
                 Event::Collection(id, r) if id == self.collection_request => {
                     self.busy = false;
                     match r {
@@ -3956,6 +3972,10 @@ impl YTDugem {
                 Vec2::new(rect.width() - 28.0, 38.0),
             );
             if nav_row(ui, r, ("nav", i), icon, label, self.page == page).clicked() {
+                // Upstream `selectDestination` closes an open mood: Explore opens on its landing page.
+                if page == Page::Explore {
+                    self.explore.view = explore::View::Main;
+                }
                 self.navigate(page);
                 if self.page == Page::Search {
                     ui.ctx()
@@ -4611,19 +4631,37 @@ impl YTDugem {
             ui.add_space(32.0);
         }
         let shelves = self.home.clone();
-        for (shelf_i, shelf) in shelves.into_iter().enumerate() {
+        self.shelf_rows(ui, &shelves, "home");
+        if self.home_pending > 0 || self.home_more {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Loading YouTube Music…").color(MUTED));
+            });
+        } else if self.home.is_empty() {
+            ui.label("Could not load Home. Check your connection or account.");
+            if ui.button("Retry Home").clicked() {
+                self.load_home();
+            }
+        }
+        if self.home_token.is_some() && ui.button("Load more music").clicked() {
+            self.more_home();
+        }
+    }
+    /// Titled rows of cards (Home and Explore shelves); a click opens or plays the card.
+    fn shelf_rows(&mut self, ui: &mut egui::Ui, shelves: &[HomeShelf], salt: &str) {
+        for (shelf_i, shelf) in shelves.iter().enumerate() {
             ui.label(heading(&shelf.title, 24.0));
             if !shelf.subtitle.is_empty() {
                 ui.label(RichText::new(&shelf.subtitle).color(MUTED));
             }
             ui.add_space(10.0);
             egui::ScrollArea::horizontal()
-                .id_salt(("shelf", shelf_i))
+                .id_salt(("shelf", salt, shelf_i))
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.horizontal_top(|ui| {
                         for (i, item) in shelf.items.iter().enumerate() {
-                            ui.push_id(("card", shelf_i, i), |ui| {
+                            ui.push_id(("card", salt, shelf_i, i), |ui| {
                                 ui.vertical(|ui| {
                                     ui.set_width(180.0);
                                     let (rect, response) = ui.allocate_exact_size(
@@ -4678,20 +4716,6 @@ impl YTDugem {
                     });
                 });
             ui.add_space(34.0);
-        }
-        if self.home_pending > 0 || self.home_more {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(RichText::new("Loading YouTube Music…").color(MUTED));
-            });
-        } else if self.home.is_empty() {
-            ui.label("Could not load Home. Check your connection or account.");
-            if ui.button("Retry Home").clicked() {
-                self.load_home();
-            }
-        }
-        if self.home_token.is_some() && ui.button("Load more music").clicked() {
-            self.more_home();
         }
     }
     fn collection_view(&mut self, ui: &mut egui::Ui) {
@@ -4804,7 +4828,8 @@ impl YTDugem {
     }
     fn content(&mut self, ui: &mut egui::Ui) {
         match self.page.clone() {
-            Page::Home | Page::Explore => self.home_view(ui),
+            Page::Home => self.home_view(ui),
+            Page::Explore => self.explore_view(ui),
             Page::Collection => self.collection_view(ui),
             Page::Search => {
                 ui.label(heading(
@@ -5445,7 +5470,7 @@ impl eframe::App for YTDugem {
                     // One scroll position per page: opening Settings from a scrolled Home page
                     // used to land halfway down it.
                     egui::ScrollArea::vertical()
-                        .id_salt(("page", self.page.clone()))
+                        .id_salt(("page", self.page.clone(), self.explore_scroll_key()))
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
                             if !self.message.is_empty() {
