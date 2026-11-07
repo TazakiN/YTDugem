@@ -29,6 +29,7 @@ mod sheet_lyrics;
 mod sheet_menu;
 mod sheet_output;
 mod sheet_queue;
+mod updater;
 
 const BG: Color32 = Color32::from_rgb(29, 31, 27);
 const SIDE: Color32 = Color32::from_rgb(21, 22, 19);
@@ -130,6 +131,7 @@ enum Event {
     ArtistSubscribed(String, bool, Result<(), String>),
     /// Artists matching a search, tagged with the song search's request.
     ArtistResults(u64, Result<Vec<ShelfItem>, String>),
+    Update(updater::UpdateEvent),
 }
 
 pub struct YTDugem {
@@ -272,6 +274,7 @@ pub struct YTDugem {
     translating: bool,
     translation_request: u64,
     settings_query: String,
+    updates: updater::Updates,
 }
 
 const SCREENSHOT_FRAMES: u32 = 120;
@@ -487,6 +490,7 @@ impl YTDugem {
             translating: false,
             translation_request: 0,
             settings_query: String::new(),
+            updates: Default::default(),
         };
         if app.account.is_some() {
             // The saved session is shown at once and checked with YouTube in the background;
@@ -498,6 +502,9 @@ impl YTDugem {
             });
         }
         app.load_home();
+        if std::env::var_os("YTDUGEM_NO_UPDATE_CHECK").is_none() {
+            app.check_updates(false);
+        }
         app
     }
     fn save(&mut self) {
@@ -2709,6 +2716,8 @@ impl YTDugem {
             });
         }
 
+        shown |= self.about_settings(ui, &query);
+
         if !shown {
             ui.add_space(30.0);
             ui.label(RichText::new("No settings match your search").color(MUTED));
@@ -3854,6 +3863,7 @@ impl YTDugem {
                         Err(e) => self.message = e,
                     }
                 }
+                Event::Update(e) => self.update_event(ctx, e),
                 _ => {}
             }
         }
@@ -5506,6 +5516,7 @@ impl eframe::App for YTDugem {
         self.sign_in_dialog(ctx);
         self.playlist_dialog(ctx);
         self.download_delete_dialog(ctx);
+        self.update_dialog(ctx);
         self.screenshot_step(ctx);
     }
 }

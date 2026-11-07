@@ -1,0 +1,58 @@
+name: Release
+
+# Push a tag `v<version>` matching Cargo.toml to publish a release (see docs/RELEASING.md).
+# A tag with a dash (`v0.2.0-beta1`) becomes a pre-release, which the in-app update check ignores.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Tag must match the Cargo.toml version
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object name -eq 'ytdugem' | Select-Object -ExpandProperty version
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            throw "Tag $env:GITHUB_REF_NAME does not match Cargo.toml version $version"
+          }
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked
+      - name: Package Windows audio tools
+        env:
+          SEVENZIP: 'C:\Program Files\7-Zip\7z.exe'
+        run: python scripts/package-windows.py
+      - name: Test extracted Windows package playback without installed tools
+        run: ./scripts/windows-playback-smoke.ps1
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $zip = 'YTDugem-windows-x86_64.zip'
+          $hash = (Get-FileHash "dist/$zip" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "dist/$zip.sha256" -Value "$hash  $zip" -Encoding ascii
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $flags = @('--title', "YTDugem $($tag.TrimStart('v'))", '--generate-notes', '--verify-tag')
+          if ($tag.Contains('-')) { $flags += '--prerelease' }
+          gh release create $tag dist/YTDugem-windows-x86_64.zip dist/YTDugem-windows-x86_64.zip.sha256 @flags

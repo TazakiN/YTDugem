@@ -6,7 +6,7 @@ A native desktop YouTube Music player written in Rust, rewritten from [BitChord]
 
 ## Download
 
-Download `YTDugem-windows-x86_64.zip` from the artifacts of a [CI run](https://github.com/TazakiN/YTDugem/actions), or build it yourself with `cargo xtask package`. Extract the **whole** archive and run `YTDugem/YTDugem.exe`. Keep the `tools` folder beside the executable, because it contains mpv, yt-dlp, FFmpeg and Deno.
+Download `YTDugem-windows-x86_64.zip` from the [latest release](https://github.com/TazakiN/YTDugem/releases/latest). Untested builds of every `main` commit are in the artifacts of a [CI run](https://github.com/TazakiN/YTDugem/actions). You can also build it yourself with `cargo xtask package`. Extract the **whole** archive and run `YTDugem/YTDugem.exe`. Keep the `tools` folder beside the executable, because it contains mpv, yt-dlp, FFmpeg and Deno.
 
 ## Build
 

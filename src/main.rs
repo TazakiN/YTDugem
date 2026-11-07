@@ -12,6 +12,7 @@ mod store;
 #[cfg(windows)]
 mod tray;
 mod ui;
+mod update;
 mod widgets;
 
 fn main() -> eframe::Result {
@@ -52,8 +53,10 @@ fn main() -> eframe::Result {
             "YTDugem: WSL compatibility rendering enabled (BITCHORD_WSL_COMPAT=0 to disable)"
         );
     }
+    let after_update = args.iter().any(|s| s == update::AFTER_UPDATE);
     let _instance =
-        store::lock(&store::data_path()).map_err(|e| eframe::Error::AppCreation(e.into()))?;
+        lock_instance(after_update).map_err(|e| eframe::Error::AppCreation(e.into()))?;
+    update::cleanup();
     let icon = image::load_from_memory(include_bytes!("../assets/icon.png"))
         .ok()
         .map(|image| {
@@ -86,8 +89,24 @@ fn main() -> eframe::Result {
                 ui::YTDugem::new(cc)
                     .with_screenshot(screenshot)
                     .with_player_open(open_player)
-                    .with_artist_open(open_artist),
+                    .with_artist_open(open_artist)
+                    .with_updated(after_update),
             ))
         }),
     )
+}
+
+/// One app per library. Restarted by an update, the old app may still be closing: wait for it.
+fn lock_instance(after_update: bool) -> anyhow::Result<std::fs::File> {
+    let path = store::data_path();
+    let mut tries = if after_update { 50 } else { 1 };
+    loop {
+        match store::lock(&path) {
+            Err(_) if tries > 1 => {
+                tries -= 1;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            result => return result,
+        }
+    }
 }
