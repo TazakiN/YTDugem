@@ -550,6 +550,17 @@ impl Player {
             valid_range(value, 0.1, 10.0, "speed")?
         ]))
     }
+    /// Switch the output device of the running player; empty means `auto`. No-op when idle.
+    /// The device applies as given: WASAPI exclusive is a load-time setting and is not re-checked.
+    #[allow(dead_code)] // used by the player sheet (in progress)
+    pub fn set_audio_device(&mut self, device: &str) -> Result<()> {
+        if self.commands.is_none() {
+            return Ok(());
+        }
+        let device = device.trim();
+        let device = if device.is_empty() { "auto" } else { device };
+        self.command(json!(["set_property", "audio-device", device]))
+    }
     pub fn take_error(&mut self) -> Option<String> {
         self.last_error.take()
     }

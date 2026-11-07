@@ -1,6 +1,7 @@
-use eframe::egui::{self, Color32, Pos2, Rect, Response, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, Pos2, Rect, Response, Sense, Vec2};
 use std::sync::Arc;
 
+#[allow(dead_code)] // New variants are wired up by later UI work.
 #[derive(Clone, Copy)]
 pub enum Icon {
     Logo,
@@ -38,6 +39,29 @@ pub enum Icon {
     AddToQueue,
     Music,
     Broom,
+    LyricsQuote,
+    More,
+    Heart,
+    HeartFill,
+    Dislike,
+    Radio,
+    Moon,
+    Share,
+    Disc,
+    Infinity,
+    Globe,
+    Speaker,
+    Waveform,
+    CaretRight,
+    VolumeLow,
+    DragHandle,
+    Playlist,
+    ListBullets,
+    PlayNext,
+    Rewind,
+    FastForward,
+    Person,
+    HeadphonesFill,
 }
 
 /// White at `alpha` opacity, as egui 0.31's `Color32::from_white_alpha` made it: the opacity is
@@ -158,6 +182,29 @@ fn glyph(icon: Icon) -> (&'static str, bool) {
         Icon::AddToQueue => (regular::LIST_PLUS, false),
         Icon::Music => (regular::MUSIC_NOTES, false),
         Icon::Broom => (regular::BROOM, false),
+        Icon::LyricsQuote => (regular::CHAT_TEARDROP_TEXT, false),
+        Icon::More => (regular::DOTS_THREE, false),
+        Icon::Heart => (regular::HEART, false),
+        Icon::HeartFill => (fill::HEART, true),
+        Icon::Dislike => (regular::THUMBS_DOWN, false),
+        Icon::Radio => (regular::RADIO, false),
+        Icon::Moon => (fill::MOON, true),
+        Icon::Share => (regular::SHARE_NETWORK, false),
+        Icon::Disc => (regular::VINYL_RECORD, false),
+        Icon::Infinity => (regular::INFINITY, false),
+        Icon::Globe => (regular::GLOBE, false),
+        Icon::Speaker => (regular::SPEAKER_HIFI, false),
+        Icon::Waveform => (regular::WAVEFORM, false),
+        Icon::CaretRight => (regular::CARET_RIGHT, false),
+        Icon::VolumeLow => (regular::SPEAKER_LOW, false),
+        Icon::DragHandle => (regular::EQUALS, false),
+        Icon::Playlist => (regular::PLAYLIST, false),
+        Icon::ListBullets => (regular::LIST_BULLETS, false),
+        Icon::PlayNext => (regular::ARROW_BEND_DOWN_RIGHT, false),
+        Icon::Rewind => (fill::REWIND, true),
+        Icon::FastForward => (fill::FAST_FORWARD, true),
+        Icon::Person => (fill::USER, true),
+        Icon::HeadphonesFill => (fill::HEADPHONES, true),
     }
 }
 
@@ -205,17 +252,26 @@ pub fn slider(
     let a = Pos2::new(rect.left() + 4.0, rect.center().y);
     let b = Pos2::new(rect.right() - 4.0, rect.center().y);
     let knob = a.lerp(b, fraction);
+    // Thicker while held, as upstream `ThinSlider` (6 dp idle, 10 dp active), with round ends.
+    let active = response.hovered() || response.dragged();
+    let thickness = ui.ctx().animate_value_with_time(
+        response.id.with("thickness"),
+        if active { 8.0 } else { 6.0 },
+        0.12,
+    );
+    let bar = |to: Pos2| {
+        Rect::from_min_max(
+            Pos2::new(a.x - thickness / 2.0, a.y - thickness / 2.0),
+            Pos2::new(to.x + thickness / 2.0, to.y + thickness / 2.0),
+        )
+    };
+    let radius = thickness / 2.0;
+    ui.painter().rect_filled(bar(b), radius, white_alpha(50));
     ui.painter()
-        .line_segment([a, b], Stroke::new(3.5_f32, white_alpha(50)));
-    ui.painter()
-        .line_segment([a, knob], Stroke::new(3.5_f32, Color32::from_gray(235)));
+        .rect_filled(bar(knob), radius, Color32::from_gray(235));
     ui.painter().circle_filled(
         knob,
-        if response.hovered() || response.dragged() {
-            5.0
-        } else {
-            3.2
-        },
+        if active { thickness * 0.85 } else { radius },
         Color32::WHITE,
     );
     response.on_hover_text(label)

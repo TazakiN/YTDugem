@@ -4,8 +4,8 @@ use crate::{
     integrations::{Integrations, MediaEvent},
     model::{clock, Track},
     player::{Player, PlayerStatus, Stream},
-    services::translate::{self, Translation},
-    services::{self, Collection, HomeFeed, HomeShelf, LyricLine, ShelfItem},
+    services::translate::{self, Romanization, Translation},
+    services::{self, Collection, HomeFeed, HomeShelf, LikeStatus, LyricLine, ShelfItem},
     store::{self, Library},
     widgets::{self, Icon},
 };
@@ -21,6 +21,12 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+mod sheet;
+mod sheet_lyrics;
+mod sheet_menu;
+mod sheet_output;
+mod sheet_queue;
 
 const BG: Color32 = Color32::from_rgb(29, 31, 27);
 const SIDE: Color32 = Color32::from_rgb(21, 22, 19);
@@ -44,10 +50,19 @@ enum Page {
     Settings,
 }
 #[derive(Clone, Copy, PartialEq)]
-enum PlayerTab {
-    Controls,
+enum PlayerPane {
+    Main,
     Lyrics,
     Queue,
+}
+/// What the lyrics show under each line. One at a time, as upstream: turning on romanization
+/// turns off the translation and the other way round.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum LyricsMode {
+    #[default]
+    Original,
+    Romanized,
+    Translated,
 }
 // ponytail: low-volume worker events own their payloads; no shared mutable UI state.
 #[allow(clippy::large_enum_variant)]
@@ -57,6 +72,10 @@ enum Event {
     AccountPlaylists(u64, Result<Vec<ShelfItem>, String>),
     Suggestions(u64, String, Result<Vec<String>, String>),
     Translated(u64, Result<Translation, String>),
+    Romanized(u64, String, Result<Romanization, String>),
+    SongInfo(u64, String, Result<services::SongInfo, String>),
+    /// A rating sent for (track key); carries the rating it replaced, to restore on failure.
+    Rated(String, LikeStatus, Result<(), String>),
     PlaylistEdited(Result<PlaylistEdit, String>),
     /// Every track of a playlist, fetched for a bulk action.
     BulkTracks(PlaylistBulk, String, Result<Vec<Track>, String>),
@@ -119,7 +138,7 @@ pub struct YTDugem {
     importing: bool,
     downloads: Vec<DownloadItem>,
     expanded: bool,
-    tab: PlayerTab,
+    tab: PlayerPane,
     shuffle: bool,
     repeat: u8,
     lyrics: Vec<LyricLine>,
@@ -205,8 +224,19 @@ pub struct YTDugem {
     bulk_loading: bool,
     /// The lyrics translated for (track key, language), when asked for.
     translation: Option<(String, String, Translation)>,
-    /// The Translate toggle; stays on across songs, as upstream.
-    show_translation: bool,
+    /// Romanized or translated sub-lines; stays on across songs, as upstream.
+    lyrics_mode: LyricsMode,
+    /// The lyrics romanized for (track key), when asked for.
+    romanization: Option<(String, Romanization)>,
+    romanizing: bool,
+    romanization_request: u64,
+    /// The Audio output dialog over the player sheet.
+    output_open: bool,
+    /// Rating and album/artist pages of (track key), for the sheet's like button and menu.
+    song_info: Option<(String, services::SongInfo)>,
+    song_info_request: u64,
+    /// How far the player sheet is dragged down from fully open, in points.
+    sheet_drag: f32,
     translating: bool,
     translation_request: u64,
     settings_query: String,
@@ -336,7 +366,7 @@ impl YTDugem {
             importing: false,
             downloads: vec![],
             expanded: false,
-            tab: PlayerTab::Controls,
+            tab: PlayerPane::Main,
             shuffle: false,
             repeat: 0,
             lyrics: vec![],
@@ -403,7 +433,14 @@ impl YTDugem {
             playlist_error: String::new(),
             bulk_loading: false,
             translation: None,
-            show_translation: false,
+            lyrics_mode: LyricsMode::Original,
+            romanization: None,
+            romanizing: false,
+            romanization_request: 0,
+            output_open: false,
+            song_info: None,
+            song_info_request: 0,
+            sheet_drag: 0.0,
             translating: false,
             translation_request: 0,
             settings_query: String::new(),
@@ -605,6 +642,7 @@ impl YTDugem {
                 });
             }
             self.current = Some(t.clone());
+            self.request_song_info();
             if self.library.lyrics_enabled {
                 self.request_lyrics(None);
             } else {
@@ -639,6 +677,9 @@ impl YTDugem {
         self.translation_request += 1;
         self.translation = None;
         self.translating = false;
+        self.romanization_request += 1;
+        self.romanization = None;
+        self.romanizing = false;
         let (enabled, order) = (
             self.library.lyrics_sources.clone(),
             self.library.lyrics_order.clone(),
@@ -648,6 +689,62 @@ impl YTDugem {
             let result =
                 services::lyrics::lookup(&song, &enabled, &order, only.as_deref()).map_err(err);
             let _ = tx.send(Event::Lyrics(request, key, result));
+        });
+    }
+    /// The current song's rating and album/artist pages, for the player sheet.
+    fn request_song_info(&mut self) {
+        self.song_info_request += 1;
+        self.song_info = None;
+        let Some(t) = self.current.clone().filter(is_youtube_track) else {
+            return;
+        };
+        let (id, tx) = (self.song_info_request, self.tx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Event::SongInfo(
+                id,
+                t.key().to_owned(),
+                services::song_info(&t.id).map_err(err),
+            ));
+        });
+    }
+    /// The current song's rating on the account, once known.
+    fn like_status(&self) -> Option<LikeStatus> {
+        let key = self.current.as_ref()?.key();
+        self.song_info
+            .as_ref()
+            .filter(|(k, _)| k == key)
+            .and_then(|(_, info)| info.like)
+    }
+    /// Rate the current song; shown at once, and put back if YouTube refuses it.
+    fn rate(&mut self, status: LikeStatus) {
+        let Some(t) = self.current.clone().filter(is_youtube_track) else {
+            return;
+        };
+        if self.account.is_none() {
+            self.message = "Sign in to YouTube Music to rate songs".into();
+            return;
+        }
+        let key = t.key().to_owned();
+        let previous = self.like_status().unwrap_or_default();
+        match self.song_info.as_mut().filter(|(k, _)| *k == key) {
+            Some((_, info)) => info.like = Some(status),
+            None => {
+                self.song_info = Some((
+                    key.clone(),
+                    services::SongInfo {
+                        like: Some(status),
+                        ..Default::default()
+                    },
+                ))
+            }
+        }
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Event::Rated(
+                key,
+                previous,
+                services::rate_song(&t.id, status).map_err(err),
+            ));
         });
     }
     fn lyrics_settings_changed(&mut self, reload: bool) {
@@ -2038,54 +2135,6 @@ impl YTDugem {
         #[cfg(not(windows))]
         let _ = ctx;
     }
-    fn translation_target(&self) -> String {
-        if self.library.translation_language.is_empty() {
-            translate::system_language()
-        } else {
-            self.library.translation_language.clone()
-        }
-    }
-    /// Translate the lyrics on screen into the chosen language, unless already done for them.
-    fn request_translation(&mut self) {
-        let Some(key) = self.current.as_ref().map(|t| t.key().to_owned()) else {
-            return;
-        };
-        let target = self.translation_target();
-        let done = self
-            .translation
-            .as_ref()
-            .is_some_and(|(k, lang, _)| *k == key && *lang == target);
-        if done || self.lyrics.is_empty() || self.translating {
-            return;
-        }
-        self.translation_request += 1;
-        self.translating = true;
-        let (id, lines, tx) = (
-            self.translation_request,
-            self.lyrics.clone(),
-            self.tx.clone(),
-        );
-        std::thread::spawn(move || {
-            let _ = tx.send(Event::Translated(
-                id,
-                translate::translate(&lines, &target).map_err(err),
-            ));
-        });
-    }
-    /// What the lyrics panel shows: the translation when it is on and ready, else the original.
-    fn display_lyrics(&self) -> Vec<LyricLine> {
-        let key = self.current.as_ref().map(Track::key);
-        match &self.translation {
-            Some((k, lang, Translation::Translated { lines, .. }))
-                if self.show_translation
-                    && Some(k.as_str()) == key
-                    && *lang == self.translation_target() =>
-            {
-                lines.clone()
-            }
-            _ => self.lyrics.clone(),
-        }
-    }
     /// Settings, grouped as upstream's `DesktopSettingsSection`s: titled groups of rows, each a
     /// title and explanation on the left and its control on the right, filtered by a search box.
     fn settings_view(&mut self, ui: &mut egui::Ui) {
@@ -2417,7 +2466,7 @@ impl YTDugem {
                             if chosen != current {
                                 self.library.translation_language = chosen;
                                 self.save();
-                                if self.show_translation {
+                                if self.lyrics_mode == LyricsMode::Translated {
                                     self.request_translation();
                                 }
                             }
@@ -3466,6 +3515,30 @@ impl YTDugem {
                         Err(e) => self.message = format!("Translation unavailable: {e}"),
                     }
                 }
+                Event::Romanized(id, key, r) if id == self.romanization_request => {
+                    self.romanizing = false;
+                    match r {
+                        Ok(romanized) => self.romanization = Some((key, romanized)),
+                        Err(e) => self.message = format!("Romanization unavailable: {e}"),
+                    }
+                }
+                // Quiet on failure: the like button and the album/artist entries just stay off.
+                Event::SongInfo(id, key, Ok(info)) if id == self.song_info_request => {
+                    // A rating sent before the details arrived wins over the older reading.
+                    let like = self
+                        .song_info
+                        .as_ref()
+                        .filter(|(k, _)| *k == key)
+                        .and_then(|(_, i)| i.like)
+                        .or(info.like);
+                    self.song_info = Some((key, services::SongInfo { like, ..info }));
+                }
+                Event::Rated(key, previous, Err(e)) => {
+                    if let Some((_, info)) = self.song_info.as_mut().filter(|(k, _)| *k == key) {
+                        info.like = Some(previous);
+                    }
+                    self.message = format!("Could not save the rating: {e}");
+                }
                 Event::Prepared(key, stream) => {
                     if self.preparing.as_deref() == Some(key.as_str()) {
                         self.preparing = None;
@@ -3584,8 +3657,10 @@ impl YTDugem {
                             self.lyrics = found.lines;
                             self.lyrics_provider = found.provider.into();
                             self.lyrics_message.clear();
-                            if self.show_translation {
-                                self.request_translation();
+                            match self.lyrics_mode {
+                                LyricsMode::Translated => self.request_translation(),
+                                LyricsMode::Romanized => self.request_romanization(),
+                                LyricsMode::Original => {}
                             }
                         }
                         Err(e) => self.lyrics_message = e,
@@ -4115,7 +4190,7 @@ impl YTDugem {
         response.clone().on_hover_text("Open Now Playing");
         if response.clicked() {
             self.expanded = true;
-            self.tab = PlayerTab::Controls;
+            self.tab = PlayerPane::Main;
         }
         if let Some(t) = self.current.clone() {
             let art = Rect::from_min_size(card.min, Vec2::splat(card.height()));
@@ -4191,17 +4266,17 @@ impl YTDugem {
                         ui,
                         Icon::Lyrics,
                         30.0,
-                        self.expanded && self.tab == PlayerTab::Lyrics,
+                        self.expanded && self.tab == PlayerPane::Lyrics,
                         "Lyrics",
                     )
                     .clicked()
                     {
                         self.expanded = true;
-                        self.tab = PlayerTab::Lyrics;
+                        self.tab = PlayerPane::Lyrics;
                     }
                     if widgets::button(ui, Icon::Queue, 30.0, false, "Queue").clicked() {
                         self.expanded = true;
-                        self.tab = PlayerTab::Queue;
+                        self.tab = PlayerPane::Queue;
                     }
                     self.account_button(ui);
                 });
@@ -4437,6 +4512,7 @@ impl YTDugem {
             let column = (ui.available_width() / 3.0).clamp(310.0, 510.0);
             egui::ScrollArea::horizontal()
                 .id_salt("recent-shelf")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.horizontal_top(|ui| {
                         for base in (0..recent.len().min(32)).step_by(4) {
@@ -4464,6 +4540,7 @@ impl YTDugem {
             ui.add_space(10.0);
             egui::ScrollArea::horizontal()
                 .id_salt(("shelf", shelf_i))
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.horizontal_top(|ui| {
                         for (i, item) in shelf.items.iter().enumerate() {
@@ -4752,823 +4829,6 @@ impl YTDugem {
             }
             Page::Settings => self.settings_view(ui),
         }
-    }
-    /// The Now Playing sheet. It rises over the window like upstream's `DesktopPlayerSheet`
-    /// (`shown` runs 0 to 1 with the slide) and covers the page; the chevron or Escape lowers it.
-    fn expanded_view(&mut self, ctx: &egui::Context, shown: f32) {
-        let screen = ctx.content_rect();
-        let top = screen.top() + (1.0 - shown) * screen.height();
-        egui::Area::new(egui::Id::unique("player-sheet"))
-            .order(egui::Order::Middle)
-            .fixed_pos(Pos2::new(screen.left(), top))
-            .movable(false)
-            .constrain(false)
-            .show(ctx, |ui| {
-                // Claims the whole sheet, so clicks never reach the page underneath.
-                let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
-                self.player_sheet(ui, rect);
-            });
-    }
-    fn player_sheet(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        let painter = ui.painter().clone();
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(18, 19, 17));
-        if let Some(back) = &self.backdrop {
-            painter.image(
-                back.id(),
-                rect,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        }
-        painter.rect_filled(rect, 0.0, Color32::from_black_alpha(150));
-        // Darker towards the bottom, where the controls sit.
-        let mut shade = egui::Mesh::default();
-        let clear = Color32::TRANSPARENT;
-        let dark = Color32::from_black_alpha(120);
-        shade.colored_vertex(Pos2::new(rect.left(), rect.center().y), clear);
-        shade.colored_vertex(Pos2::new(rect.right(), rect.center().y), clear);
-        shade.colored_vertex(rect.right_bottom(), dark);
-        shade.colored_vertex(rect.left_bottom(), dark);
-        shade.add_triangle(0, 1, 2);
-        shade.add_triangle(0, 2, 3);
-        painter.add(shade);
-
-        const PAD: f32 = 36.0;
-        const HEADER: f32 = 68.0;
-        let body = Rect::from_min_max(
-            Pos2::new(rect.left() + PAD, rect.top() + HEADER),
-            Pos2::new(rect.right() - PAD, rect.bottom() - 28.0),
-        );
-        let wide = body.width() >= 960.0;
-        if wide && self.tab == PlayerTab::Controls {
-            // Side by side there is no artwork-only view; the column shows the lyrics.
-            self.tab = PlayerTab::Lyrics;
-        }
-        self.sheet_header(
-            ui,
-            Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEADER)),
-            wide,
-        );
-
-        const CONTROLS: f32 = 236.0;
-        if wide {
-            let gap = (body.width() * 0.05).clamp(32.0, 72.0);
-            let column = ((body.width() - gap) * 0.46).min(620.0);
-            let art = (body.height() - CONTROLS - 28.0).min(column).max(160.0);
-            let width = art.max(380.0).min(column);
-            let block = art + 28.0 + CONTROLS;
-            let y = body.top() + ((body.height() - block) / 2.0).max(0.0);
-            let x = body.left() + (column - width) / 2.0;
-            self.sheet_artwork(
-                ui,
-                Rect::from_min_size(Pos2::new(x + (width - art) / 2.0, y), Vec2::splat(art)),
-            );
-            self.sheet_controls(
-                ui,
-                Rect::from_min_size(Pos2::new(x, y + art + 28.0), Vec2::new(width, CONTROLS)),
-            );
-            let panel =
-                Rect::from_min_max(Pos2::new(body.left() + column + gap, body.top()), body.max);
-            self.sheet_panel(ui, panel);
-        } else {
-            let width = body.width().min(640.0);
-            let x = body.center().x - width / 2.0;
-            let controls = Rect::from_min_size(
-                Pos2::new(x, body.bottom() - CONTROLS),
-                Vec2::new(width, CONTROLS),
-            );
-            let upper =
-                Rect::from_min_max(body.min, Pos2::new(body.right(), controls.top() - 24.0));
-            if self.tab == PlayerTab::Controls {
-                let art = upper.width().min(upper.height()).max(120.0);
-                self.sheet_artwork(ui, Rect::from_center_size(upper.center(), Vec2::splat(art)));
-            } else {
-                self.sheet_panel(ui, upper);
-            }
-            self.sheet_controls(ui, controls);
-        }
-        // The page's status line is hidden behind the sheet; failures must still be seen.
-        if !self.message.is_empty() {
-            fit_text(
-                &painter,
-                Pos2::new(rect.center().x, rect.bottom() - 14.0),
-                egui::Align2::CENTER_CENTER,
-                &self.message,
-                FontId::proportional(12.0),
-                MUTED,
-                rect.width() - 80.0,
-            );
-        }
-    }
-    fn sheet_header(&mut self, ui: &mut egui::Ui, rect: Rect, wide: bool) {
-        let painter = ui.painter().clone();
-        region(
-            ui,
-            Rect::from_min_size(rect.min + Vec2::new(24.0, 16.0), Vec2::splat(38.0)),
-            |u| {
-                if widgets::button(u, Icon::Collapse, 38.0, false, "Close player · Esc").clicked()
-                {
-                    self.expanded = false;
-                }
-            },
-        );
-        if self.current.is_some() {
-            painter.text(
-                Pos2::new(rect.center().x, rect.top() + 25.0),
-                egui::Align2::CENTER_CENTER,
-                "PLAYING FROM",
-                FontId::proportional(11.0),
-                MUTED,
-            );
-            // Between the collapse button and the tabs, which take up to ~340 px on the right.
-            fit_text(
-                &painter,
-                Pos2::new(rect.center().x, rect.top() + 43.0),
-                egui::Align2::CENTER_CENTER,
-                &self.now_origin,
-                FontId::new(14.0, egui::FontFamily::Name("bold".into())),
-                WHITE,
-                (rect.width() - 2.0 * 360.0).max(120.0),
-            );
-        }
-        let tabs: &[(&str, PlayerTab)] = if wide {
-            &[("Lyrics", PlayerTab::Lyrics), ("Up next", PlayerTab::Queue)]
-        } else {
-            &[
-                ("Now playing", PlayerTab::Controls),
-                ("Lyrics", PlayerTab::Lyrics),
-                ("Up next", PlayerTab::Queue),
-            ]
-        };
-        let item = 98.0;
-        let total = item * tabs.len() as f32 + 8.0;
-        let seg = Rect::from_min_size(
-            Pos2::new(rect.right() - 36.0 - total, rect.top() + 17.0),
-            Vec2::new(total, 36.0),
-        );
-        // Dark, not white, glass: the backdrop can be a bright cover, which washed the labels out.
-        painter.rect_filled(seg, 18.0, Color32::from_black_alpha(110));
-        for (i, (label, tab)) in tabs.iter().enumerate() {
-            let r = Rect::from_min_size(
-                seg.min + Vec2::new(4.0 + item * i as f32, 4.0),
-                Vec2::new(item, 28.0),
-            );
-            let selected = self.tab == *tab;
-            let response = ui.interact(
-                r,
-                ui.scope_id().with(("sheet-tab", i)),
-                egui::Sense::click(),
-            );
-            response.widget_info(|| {
-                egui::WidgetInfo::selected(egui::Role::Button, true, selected, *label)
-            });
-            if selected {
-                painter.rect_filled(r, 14.0, Color32::from_gray(236));
-            } else if response.hovered() {
-                painter.rect_filled(r, 14.0, widgets::white_alpha(14));
-            }
-            painter.text(
-                r.center(),
-                egui::Align2::CENTER_CENTER,
-                *label,
-                FontId::new(13.0, egui::FontFamily::Name("bold".into())),
-                if selected {
-                    Color32::from_rgb(20, 21, 19)
-                } else {
-                    MUTED
-                },
-            );
-            if response.clicked() {
-                self.tab = *tab;
-            }
-        }
-    }
-    fn sheet_artwork(&self, ui: &mut egui::Ui, art: Rect) {
-        let radius = (art.width() * 0.03).clamp(8.0, 16.0);
-        ui.painter().add(
-            egui::Shadow {
-                offset: [0, 18],
-                blur: 60,
-                spread: 0,
-                color: Color32::from_black_alpha(150),
-            }
-            .as_shape(art, radius),
-        );
-        match (&self.cover, &self.current) {
-            (Some(tex), _) => {
-                egui::Image::new(tex)
-                    .fit_to_exact_size(art.size())
-                    .corner_radius(radius)
-                    .paint_at(ui, art);
-            }
-            // Optimistic: the list's thumbnail stands in until the full artwork arrives.
-            (None, Some(t)) => draw_image(ui, &t.thumbnail, art, None),
-            (None, None) => {
-                ui.painter()
-                    .rect_filled(art, radius, widgets::white_alpha(12));
-                widgets::paint(
-                    ui.painter(),
-                    Icon::Logo,
-                    art.shrink(art.width() * 0.36),
-                    MUTED,
-                );
-            }
-        }
-    }
-    fn sheet_controls(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        let width = rect.width();
-        region(ui, rect, |u| {
-            u.spacing_mut().item_spacing.y = 0.0;
-            // Title, artist and like.
-            u.allocate_ui_with_layout(
-                Vec2::new(width, 58.0),
-                egui::Layout::left_to_right(Align::Center),
-                |u| {
-                    u.vertical(|u| {
-                        u.set_width(width - 48.0);
-                        let (title, artist) = self
-                            .current
-                            .as_ref()
-                            .map_or(("Nothing playing".to_owned(), String::new()), |t| {
-                                (t.title.clone(), t.artist.clone())
-                            });
-                        u.add(egui::Label::new(heading(title, 24.0)).truncate());
-                        u.add_space(4.0);
-                        u.add(
-                            egui::Label::new(RichText::new(artist).color(MUTED).size(16.0))
-                                .truncate(),
-                        );
-                    });
-                },
-            );
-            u.add_space(14.0);
-            u.add_enabled_ui(!self.loading && self.player.is_active(), |u| {
-                self.seekbar(u, width, "sheet-seek");
-            });
-            u.allocate_ui_with_layout(
-                Vec2::new(width, 18.0),
-                egui::Layout::left_to_right(Align::Center),
-                |u| {
-                    let small = |s: String| RichText::new(s).size(12.0).color(MUTED);
-                    u.label(small(if self.loading {
-                        "Opening stream…".into()
-                    } else {
-                        clock(self.status.position)
-                    }));
-                    u.with_layout(egui::Layout::right_to_left(Align::Center), |u| {
-                        let d = self.duration();
-                        u.label(small(if self.loading || d <= 0.0 {
-                            clock(d)
-                        } else {
-                            format!("-{}", clock((d - self.status.position).max(0.0)))
-                        }));
-                    });
-                },
-            );
-            u.add_space(12.0);
-            // Transport.
-            u.allocate_ui_with_layout(
-                Vec2::new(width, 72.0),
-                egui::Layout::left_to_right(Align::Center),
-                |u| {
-                    let gap = (width * 0.05).clamp(10.0, 26.0);
-                    u.spacing_mut().item_spacing.x = gap;
-                    let row = 36.0 * 2.0 + 46.0 * 2.0 + 68.0 + gap * 4.0;
-                    u.add_space(((width - row) / 2.0 - gap).max(0.0));
-                    if widgets::button(u, Icon::Shuffle, 36.0, self.shuffle, "Shuffle").clicked() {
-                        self.shuffle = !self.shuffle;
-                    }
-                    if widgets::button(u, Icon::Previous, 46.0, false, "Previous · Alt+Left")
-                        .clicked()
-                    {
-                        self.previous();
-                    }
-                    if self.play_button(u, 68.0).clicked() {
-                        self.toggle();
-                    }
-                    if widgets::button(u, Icon::Next, 46.0, false, "Next · Alt+Right").clicked() {
-                        self.next(false);
-                    }
-                    let repeat = widgets::button(
-                        u,
-                        Icon::Repeat,
-                        36.0,
-                        self.repeat > 0,
-                        match self.repeat {
-                            0 => "Repeat off",
-                            1 => "Repeat all",
-                            _ => "Repeat one",
-                        },
-                    );
-                    if self.repeat == 2 {
-                        u.painter().text(
-                            repeat.rect.right_top() + Vec2::new(-6.0, 7.0),
-                            egui::Align2::CENTER_CENTER,
-                            "1",
-                            FontId::new(10.0, egui::FontFamily::Name("bold".into())),
-                            WHITE,
-                        );
-                    }
-                    if repeat.clicked() {
-                        self.repeat = (self.repeat + 1) % 3;
-                    }
-                },
-            );
-            u.add_space(12.0);
-            // Volume.
-            u.allocate_ui_with_layout(
-                Vec2::new(width, 28.0),
-                egui::Layout::left_to_right(Align::Center),
-                |u| {
-                    let slider = (width * 0.55).clamp(140.0, 280.0);
-                    u.add_space((width - slider - 24.0) / 2.0);
-                    let (r, _) = u.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
-                    widgets::paint(u.painter(), Icon::Volume, r, MUTED);
-                    u.add_space(8.0);
-                    self.volume_slider(u, slider, "sheet-volume");
-                },
-            );
-        });
-    }
-    /// The filled play/pause disc; a spinner takes the icon's place while the stream opens.
-    fn play_button(&self, ui: &mut egui::Ui, size: f32) -> egui::Response {
-        let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::click());
-        let playing = !self.status.paused && !self.status.ended;
-        response.widget_info(|| {
-            egui::WidgetInfo::labeled(
-                egui::Role::Button,
-                !self.loading,
-                if playing {
-                    "Pause · Space"
-                } else {
-                    "Play · Space"
-                },
-            )
-        });
-        let fill = if response.hovered() {
-            Color32::WHITE
-        } else {
-            Color32::from_gray(232)
-        };
-        let scale = if response.is_pointer_button_down_on() {
-            0.94
-        } else {
-            1.0
-        };
-        ui.painter()
-            .circle_filled(rect.center(), size * 0.5 * scale, fill);
-        let icon = Rect::from_center_size(rect.center(), Vec2::splat(size * 0.36));
-        let ink = Color32::from_rgb(20, 21, 19);
-        if self.loading {
-            egui::Spinner::new()
-                .size(size * 0.4)
-                .color(ink)
-                .paint_at(ui, icon);
-        } else if playing {
-            widgets::paint(ui.painter(), Icon::Pause, icon, ink);
-        } else {
-            widgets::paint(
-                ui.painter(),
-                Icon::Play,
-                icon.translate(Vec2::new(size * 0.03, 0.0)),
-                ink,
-            );
-        }
-        response
-    }
-    fn sheet_panel(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        ui.painter()
-            .rect_filled(rect, 20.0, Color32::from_black_alpha(70));
-        let inner = rect.shrink2(Vec2::new(24.0, 20.0));
-        match self.tab {
-            PlayerTab::Queue => self.queue_panel(ui, inner),
-            _ => self.lyrics_panel(ui, inner),
-        }
-    }
-    /// The lyrics source beside the heading: the provider in use (or the one asked for), which
-    /// opens the list of sources in place; picking one loads the lyrics from it.
-    fn lyrics_source_picker(&mut self, ui: &mut egui::Ui) {
-        let label = if !self.lyrics_provider.is_empty() {
-            self.lyrics_provider.clone()
-        } else {
-            self.lyrics_override
-                .as_deref()
-                .and_then(|id| services::lyrics::PROVIDERS.iter().find(|p| p.id == id))
-                .map_or("Automatic".to_owned(), |p| p.label.to_owned())
-        };
-        let font = FontId::proportional(13.0);
-        let galley = ui.painter().layout_no_wrap(label, font, MUTED);
-        let size = Vec2::new(galley.size().x + 30.0, 26.0);
-        let (rect, chip) = ui.allocate_exact_size(size, egui::Sense::click());
-        let popup = ui.make_persistent_id("lyrics-source-popup");
-        let open = egui::Popup::is_id_open(ui.ctx(), popup);
-        let lit = chip.hovered() || open;
-        if lit {
-            ui.painter()
-                .rect_filled(rect, 13.0, widgets::white_alpha(16));
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        let color = if lit { WHITE } else { MUTED };
-        ui.painter().galley(
-            Pos2::new(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0),
-            galley,
-            color,
-        );
-        widgets::paint(
-            ui.painter(),
-            Icon::Collapse,
-            Rect::from_center_size(
-                Pos2::new(rect.right() - 12.0, rect.center().y),
-                Vec2::splat(10.0),
-            ),
-            color,
-        );
-        let chip = chip.on_hover_text("Choose where the lyrics come from");
-        if chip.clicked() {
-            egui::Popup::toggle_id(ui.ctx(), popup);
-        }
-        let mut pick = None;
-        popup_below_widget(popup, &chip, egui::PopupCloseBehavior::CloseOnClick, |ui| {
-            ui.set_min_width(230.0);
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.spacing_mut().button_padding = Vec2::new(8.0, 5.0);
-            // Fits under the name rather than being pushed up over it: the list scrolls.
-            let room = ui.ctx().content_rect().bottom() - chip.rect.bottom() - 24.0;
-            egui::ScrollArea::vertical()
-                .max_height(room.max(120.0))
-                .show(ui, |ui| {
-                    ui.set_min_width(230.0);
-                    let current = self.lyrics_override.clone();
-                    if ui
-                        .selectable_label(current.is_none(), "Automatic (enabled order)")
-                        .clicked()
-                    {
-                        pick = Some(None);
-                    }
-                    ui.separator();
-                    for provider in services::lyrics::PROVIDERS {
-                        let chosen = current.as_deref() == Some(provider.id);
-                        if ui
-                            .selectable_label(chosen, provider.label)
-                            .on_hover_text(provider.detail)
-                            .clicked()
-                        {
-                            pick = Some(Some(provider.id.to_owned()));
-                        }
-                    }
-                });
-        });
-        if let Some(choice) = pick {
-            self.lyrics_override = choice.clone();
-            self.request_lyrics(choice);
-        }
-    }
-    fn lyrics_panel(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        region(ui, rect, |panel| {
-            soft_controls(panel);
-            panel.allocate_ui_with_layout(
-                Vec2::new(rect.width(), 30.0),
-                egui::Layout::left_to_right(Align::Center),
-                |ui| {
-                    ui.label(heading("Lyrics", 18.0));
-                    ui.add_space(4.0);
-                    self.lyrics_source_picker(ui);
-                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        if ui
-                            .add_enabled_ui(self.current.is_some(), |ui| {
-                                widgets::button(ui, Icon::Refresh, 32.0, false, "Reload lyrics")
-                            })
-                            .inner
-                            .clicked()
-                        {
-                            self.request_lyrics(self.lyrics_override.clone());
-                        }
-                        if !self.lyrics.is_empty() {
-                            let on = self.show_translation;
-                            if widgets::button(
-                                ui,
-                                Icon::Translate,
-                                32.0,
-                                on,
-                                if on {
-                                    "Show the original lyrics"
-                                } else {
-                                    "Translate the lyrics"
-                                },
-                            )
-                            .clicked()
-                            {
-                                self.show_translation = !on;
-                                if self.show_translation {
-                                    self.request_translation();
-                                }
-                            }
-                            if self.show_translation && self.translating {
-                                ui.spinner();
-                            } else if let Some((_, _, Translation::SameLanguage(_))) =
-                                self.translation.as_ref().filter(|_| self.show_translation)
-                            {
-                                ui.label(
-                                    RichText::new("Already in your language")
-                                        .color(MUTED)
-                                        .size(12.0),
-                                );
-                            }
-                        }
-                    });
-                },
-            );
-            panel.add_space(12.0);
-            if self.lyrics.is_empty() {
-                panel.add_space((rect.height() * 0.3).max(0.0));
-                panel.vertical_centered(|ui| {
-                    let waiting = self.lyrics_message.starts_with("Finding");
-                    if waiting {
-                        ui.add(egui::Spinner::new().size(22.0).color(MUTED));
-                        ui.add_space(10.0);
-                    }
-                    ui.label(
-                        RichText::new(if self.current.is_none() {
-                            "Play a song to see its lyrics"
-                        } else if self.lyrics_message.is_empty() {
-                            "Lyrics not available"
-                        } else {
-                            &self.lyrics_message
-                        })
-                        .color(MUTED)
-                        .size(15.0),
-                    );
-                    if !waiting && self.current.is_some() && self.library.lyrics_enabled {
-                        ui.add_space(10.0);
-                        if ui.button("Try again").clicked() {
-                            self.request_lyrics(self.lyrics_override.clone());
-                        }
-                    }
-                });
-                return;
-            }
-            let position = self.status.position;
-            let lines = self.display_lyrics();
-            let mut active_idx = None;
-            let mut seek_to = None;
-            egui::ScrollArea::vertical()
-                .id_salt("sheet-lyrics")
-                .auto_shrink([false, false])
-                .show(panel, |u| {
-                    u.spacing_mut().item_spacing.y = 0.0;
-                    // Room above the first and below the last line, so either can sit centred.
-                    let margin = (rect.height() * 0.35).max(0.0);
-                    u.add_space(margin * 0.4);
-                    for (i, line) in lines.iter().enumerate() {
-                        let active = position >= line.time
-                            && lines.get(i + 1).is_none_or(|n| position < n.time);
-                        let past = !active && position >= line.time;
-                        if active {
-                            active_idx = Some(i);
-                        }
-                        let dim = if past {
-                            widgets::white_alpha(70)
-                        } else {
-                            widgets::white_alpha(110)
-                        };
-                        let size = if active { 28.0 } else { 24.0 };
-                        let r = if line.words.is_empty() {
-                            let r = u.add(
-                                egui::Label::new(heading(&line.text, size).color(if active {
-                                    WHITE
-                                } else {
-                                    dim
-                                }))
-                                .wrap()
-                                .sense(egui::Sense::click()),
-                            );
-                            if r.clicked() {
-                                seek_to = Some(line.time);
-                            }
-                            r
-                        } else {
-                            u.horizontal_wrapped(|u| {
-                                // Words are stored trimmed; a word gap keeps "aku milikmu" from reading "akumilikmu".
-                                u.spacing_mut().item_spacing.x = size * 0.26;
-                                for word in &line.words {
-                                    let sung = active && position >= word.start;
-                                    let r = u.add(
-                                        egui::Label::new(
-                                            heading(&word.text, size).color(if sung {
-                                                WHITE
-                                            } else {
-                                                dim
-                                            }),
-                                        )
-                                        .sense(egui::Sense::click()),
-                                    );
-                                    if r.clicked() {
-                                        seek_to = Some(word.start);
-                                    }
-                                }
-                            })
-                            .response
-                        };
-                        if r.hovered() {
-                            u.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-                        if active && self.follow_lyrics && self.active_lyric != Some(i) {
-                            r.scroll_to_me(Some(Align::Center));
-                        }
-                        u.add_space(18.0);
-                    }
-                    u.add_space(margin);
-                });
-            self.active_lyric = active_idx;
-            if let Some(time) = seek_to {
-                let result = self.player.seek(time);
-                self.report(result);
-            }
-        });
-    }
-    fn queue_panel(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        region(ui, rect, |panel| {
-            soft_controls(panel);
-            panel.allocate_ui_with_layout(
-                Vec2::new(rect.width(), 30.0),
-                egui::Layout::left_to_right(Align::Center),
-                |ui| {
-                    ui.label(heading("Up next", 18.0));
-                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                        if !self.library.queue.is_empty()
-                            && icon_action(ui, true, Icon::Trash, "Clear queue").clicked()
-                        {
-                            self.library.queue.clear();
-                            self.save();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.library.autoplay,
-                                toggle_text("∞ AutoPlay", self.library.autoplay),
-                            )
-                            .on_hover_text("Keep playing similar songs when the queue ends")
-                            .clicked()
-                        {
-                            self.library.autoplay = !self.library.autoplay;
-                            self.save();
-                        }
-                    });
-                },
-            );
-            panel.add_space(10.0);
-            egui::ScrollArea::vertical()
-                .id_salt("sheet-queue")
-                .auto_shrink([false, false])
-                .show(panel, |u| {
-                    let width = u.available_width();
-                    if let Some(t) = self.current.clone() {
-                        u.label(RichText::new("NOW PLAYING").size(11.0).color(MUTED));
-                        u.add_space(4.0);
-                        if self.queue_row(u, &t, None, width).0 {
-                            self.toggle();
-                        }
-                        u.add_space(14.0);
-                    }
-                    if self.library.queue.is_empty() {
-                        u.add_space(24.0);
-                        u.vertical_centered(|u| {
-                            u.label(RichText::new("Your queue is empty").color(MUTED).size(15.0));
-                            if self.library.autoplay {
-                                u.label(
-                                    RichText::new("AutoPlay will continue with similar songs")
-                                        .color(MUTED)
-                                        .size(12.0),
-                                );
-                            }
-                        });
-                        return;
-                    }
-                    u.label(
-                        RichText::new(format!("NEXT · {} SONGS", self.library.queue.len()))
-                            .size(11.0)
-                            .color(MUTED),
-                    );
-                    u.add_space(4.0);
-                    let mut action = None;
-                    for i in 0..self.library.queue.len() {
-                        let t = self.library.queue[i].clone();
-                        u.push_id(("queue", i), |u| {
-                            let (clicked, a) = self.queue_row(u, &t, Some(i), width);
-                            if clicked {
-                                action = Some((i, QueueAction::Play));
-                            } else if let Some(a) = a {
-                                action = Some((i, a));
-                            }
-                        });
-                    }
-                    if let Some((i, a)) = action {
-                        let q = &mut self.library.queue;
-                        match a {
-                            QueueAction::Play => {
-                                let t = q.remove(i);
-                                if let Some(old) = self.current.clone() {
-                                    self.previous.push(old);
-                                }
-                                self.play(t);
-                            }
-                            QueueAction::Up if i > 0 => q.swap(i, i - 1),
-                            QueueAction::Down if i + 1 < q.len() => q.swap(i, i + 1),
-                            QueueAction::Remove => {
-                                q.remove(i);
-                            }
-                            _ => {}
-                        }
-                        self.save();
-                    }
-                });
-        });
-    }
-    /// A compact queue row; `index` is `None` for the current track. Reorder and remove
-    /// buttons appear on hover.
-    fn queue_row(
-        &mut self,
-        ui: &mut egui::Ui,
-        track: &Track,
-        index: Option<usize>,
-        width: f32,
-    ) -> (bool, Option<QueueAction>) {
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 58.0), egui::Sense::click());
-        let current = index.is_none();
-        let hovered = ui.rect_contains_pointer(rect);
-        if hovered || current {
-            ui.painter().rect_filled(
-                rect,
-                8.0,
-                widgets::white_alpha(if current { 12 } else { 8 }),
-            );
-        }
-        let art = Rect::from_min_size(rect.min + Vec2::new(7.0, 7.0), Vec2::splat(44.0));
-        draw_cover(ui, track, art, None);
-        if current {
-            self.now_playing_badge(ui, art);
-        }
-        let buttons = if hovered && !current { 96.0 } else { 0.0 };
-        let text_x = art.right() + 12.0;
-        let max = rect.right() - text_x - buttons - 52.0;
-        fit_text(
-            ui.painter(),
-            Pos2::new(text_x, rect.top() + 21.0),
-            egui::Align2::LEFT_CENTER,
-            &track.title,
-            FontId::new(14.0, egui::FontFamily::Name("bold".into())),
-            WHITE,
-            max,
-        );
-        fit_text(
-            ui.painter(),
-            Pos2::new(text_x, rect.top() + 39.0),
-            egui::Align2::LEFT_CENTER,
-            if track.artist.is_empty() {
-                "Local audio"
-            } else {
-                &track.artist
-            },
-            FontId::proportional(13.0),
-            MUTED,
-            max,
-        );
-        let mut action = None;
-        if buttons > 0.0 {
-            region(
-                ui,
-                Rect::from_min_size(
-                    Pos2::new(rect.right() - buttons - 4.0, rect.center().y - 15.0),
-                    Vec2::new(buttons, 30.0),
-                ),
-                |u| {
-                    u.horizontal(|u| {
-                        u.spacing_mut().item_spacing.x = 2.0;
-                        if widgets::button(u, Icon::Collapse, 30.0, false, "Move down").clicked() {
-                            action = Some(QueueAction::Down);
-                        }
-                        if widgets::button(u, Icon::Raise, 30.0, false, "Move up").clicked() {
-                            action = Some(QueueAction::Up);
-                        }
-                        if widgets::button(u, Icon::Close, 30.0, false, "Remove from queue")
-                            .clicked()
-                        {
-                            action = Some(QueueAction::Remove);
-                        }
-                    });
-                },
-            );
-        } else if track.duration > 0.0 {
-            ui.painter().text(
-                Pos2::new(rect.right() - 12.0, rect.center().y),
-                egui::Align2::RIGHT_CENTER,
-                clock(track.duration),
-                FontId::proportional(12.0),
-                MUTED,
-            );
-        }
-        response.context_menu(|ui| self.track_menu(ui, track));
-        (response.clicked() && action.is_none(), action)
     }
 }
 
@@ -5934,14 +5194,6 @@ fn muted(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(RichText::new(text).color(MUTED).size(13.0)).wrap());
 }
 
-#[derive(Clone, Copy)]
-enum QueueAction {
-    Play,
-    Up,
-    Down,
-    Remove,
-}
-
 impl eframe::App for YTDugem {
     /// Runs before each `ui` and keeps ticking while the window is minimized or hidden in the
     /// tray (eframe then runs no UI pass), so playback events and tray actions are still handled.
@@ -5983,7 +5235,7 @@ impl eframe::App for YTDugem {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if escape {
-            self.expanded = false;
+            self.sheet_back(ctx);
             if self.sign_in.open {
                 self.dismiss_sign_in();
             }
@@ -6010,11 +5262,17 @@ impl eframe::App for YTDugem {
         });
         if self.expanded && !typing {
             ctx.input(|i| {
-                if !i.modifiers.any() && i.key_pressed(egui::Key::L) {
-                    self.tab = PlayerTab::Lyrics;
-                }
-                if !i.modifiers.any() && i.key_pressed(egui::Key::Q) {
-                    self.tab = PlayerTab::Queue;
+                for (key, pane) in [
+                    (egui::Key::L, PlayerPane::Lyrics),
+                    (egui::Key::Q, PlayerPane::Queue),
+                ] {
+                    if !i.modifiers.any() && i.key_pressed(key) {
+                        self.tab = if self.tab == pane {
+                            PlayerPane::Main
+                        } else {
+                            pane
+                        };
+                    }
                 }
             });
         }
@@ -6038,7 +5296,8 @@ impl eframe::App for YTDugem {
             if self.expanded { 0.36 } else { 0.28 },
             egui::emath::easing::cubic_in_out,
         );
-        if shown < 1.0 {
+        // The page stays drawn while the sheet is dragged down, so it shows behind it.
+        if shown < 1.0 || self.sheet_drag > 0.0 {
             if self.sidebar_open {
                 egui::Panel::left("sidebar")
                     .exact_size(258.0)
@@ -6218,14 +5477,6 @@ fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     response
 }
 
-/// Label for a soft toggle: dark on the light "on" pill, light otherwise.
-fn toggle_text(text: &str, on: bool) -> RichText {
-    RichText::new(text).color(if on {
-        Color32::from_rgb(20, 21, 19)
-    } else {
-        WHITE
-    })
-}
 /// Size of one caption button.
 const CAPTION: Vec2 = Vec2::new(44.0, 26.0);
 
@@ -6620,14 +5871,30 @@ fn legacy_look(style: &mut egui::Style) {
     };
 }
 
-fn configure_style(ctx: &egui::Context) {
-    egui_extras::install_image_loaders(ctx);
+/// Downward shift, in em, that lines a fallback face's baseline up with the primary's.
+/// epaint centers each face's row height inside the primary's, so faces whose
+/// ascent/descent/leading balance differs (CJK vs Inter) otherwise sit on another baseline.
+fn baseline_shift_em(primary: &[u8], fallback: &[u8]) -> Option<f32> {
+    use skrifa::instance::{LocationRef, Size};
+    use skrifa::MetadataProvider;
+    let metrics = |bytes: &[u8]| {
+        let m = skrifa::FontRef::from_index(bytes, 0)
+            .ok()?
+            .metrics(Size::unscaled(), LocationRef::default());
+        let em = f32::from(m.units_per_em);
+        (em > 0.0).then(|| (m.ascent / em, (m.ascent - m.descent + m.leading) / em))
+    };
+    let (ascent_p, height_p) = metrics(primary)?;
+    let (ascent_f, height_f) = metrics(fallback)?;
+    Some(ascent_p - (ascent_f + 0.5 * (height_p - height_f)))
+}
+
+fn font_definitions() -> egui::FontDefinitions {
+    let inter_regular: &'static [u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "inter".into(),
-        Arc::new(egui::FontData::from_static(include_bytes!(
-            "../assets/fonts/Inter-Regular.ttf"
-        ))),
+        Arc::new(egui::FontData::from_static(inter_regular)),
     );
     fonts.font_data.insert(
         "inter-semibold".into(),
@@ -6656,9 +5923,12 @@ fn configure_style(ctx: &egui::Context) {
     for (i, paths) in groups.iter().enumerate() {
         if let Some(bytes) = paths.iter().find_map(|p| std::fs::read(p).ok()) {
             let name = format!("cjk-{i}");
-            fonts
-                .font_data
-                .insert(name.clone(), Arc::new(egui::FontData::from_owned(bytes)));
+            let y_offset_factor = baseline_shift_em(inter_regular, &bytes).unwrap_or(0.0);
+            let data = egui::FontData::from_owned(bytes).tweak(egui::FontTweak {
+                y_offset_factor,
+                ..Default::default()
+            });
+            fonts.font_data.insert(name.clone(), Arc::new(data));
             for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
                 fonts.families.entry(family).or_default().push(name.clone());
             }
@@ -6670,7 +5940,12 @@ fn configure_style(ctx: &egui::Context) {
     fonts
         .families
         .insert(egui::FontFamily::Name("bold".into()), bold);
-    ctx.set_fonts(fonts);
+    fonts
+}
+
+fn configure_style(ctx: &egui::Context) {
+    egui_extras::install_image_loaders(ctx);
+    ctx.set_fonts(font_definitions());
     let mut style = (*ctx.global_style()).clone();
     style.visuals = egui::Visuals::dark();
     legacy_look(&mut style);
@@ -6845,5 +6120,64 @@ mod artwork_tests {
             artwork_at("https://example.test/w720-h720.jpg", 544),
             "https://example.test/w544-h544.jpg"
         );
+    }
+}
+
+#[cfg(test)]
+mod font_baseline_tests {
+    use super::*;
+
+    const INTER: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+
+    #[test]
+    fn identical_faces_need_no_shift() {
+        assert!(baseline_shift_em(INTER, INTER).unwrap().abs() < 1e-6);
+        assert_eq!(baseline_shift_em(INTER, b"not a font"), None);
+    }
+
+    #[test]
+    fn cjk_glyphs_share_the_latin_baseline() {
+        let fonts = font_definitions();
+        let mut factors: Vec<(String, f32)> = fonts
+            .font_data
+            .iter()
+            .filter(|(name, _)| name.starts_with("cjk-"))
+            .map(|(name, data)| (name.clone(), data.tweak.y_offset_factor))
+            .collect();
+        factors.sort_by(|a, b| a.0.cmp(&b.0));
+        let Some(&(_, factor)) = factors.first() else {
+            eprintln!("no CJK system font found; skipping");
+            return;
+        };
+        eprintln!("cjk y_offset_factor values: {factors:?}");
+        let size = 24.0;
+        let ctx = egui::Context::default();
+        ctx.set_fonts(fonts);
+        let mut baselines = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let galley = ui.painter().layout_no_wrap(
+                "夕凪 Evening".into(),
+                FontId::proportional(size),
+                Color32::WHITE,
+            );
+            for glyph in &galley.rows[0].row.glyphs {
+                // The tweak is applied at paint time, so add it to the layout baseline.
+                let shift = if glyph.chr.is_ascii() {
+                    0.0
+                } else {
+                    factor * size
+                };
+                baselines.push((glyph.chr, glyph.pos.y + shift));
+            }
+        });
+        output.textures_delta.clear();
+        eprintln!("effective baselines: {baselines:?}");
+        let latin = baselines.iter().find(|(c, _)| *c == 'E').unwrap().1;
+        for (chr, y) in baselines.iter().filter(|(c, _)| !c.is_whitespace()) {
+            assert!(
+                (y - latin).abs() < 1.5,
+                "{chr:?} baseline {y} vs Latin {latin}"
+            );
+        }
     }
 }

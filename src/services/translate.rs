@@ -45,6 +45,47 @@ pub enum Translation {
     SameLanguage(String),
 }
 
+#[allow(dead_code)] // used by the player sheet (in progress)
+#[derive(Clone, Debug, PartialEq)]
+pub enum Romanization {
+    /// One entry per input line, same length and timing; text is the romanized pronunciation.
+    Romanized {
+        lines: Vec<LyricLine>,
+        source: String,
+    },
+    /// Every line is already in Latin script: nothing to show.
+    AlreadyLatin,
+}
+
+fn http_client(agent: &str) -> Result<reqwest::blocking::Client> {
+    Ok(reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .user_agent(agent)
+        .build()?)
+}
+
+/// One request for a batch's payload; `dt` is `t` (translate) or `rm` (romanize).
+fn post_batch(
+    client: &reqwest::blocking::Client,
+    tl: &str,
+    dt: &str,
+    payload: &str,
+) -> Result<String> {
+    Ok(client
+        .post(ENDPOINT)
+        .header("Accept", "application/json")
+        .form(&[
+            ("client", "dict-chrome-ex"),
+            ("sl", "auto"),
+            ("tl", tl),
+            ("dt", dt),
+            ("q", payload),
+        ])
+        .send()?
+        .error_for_status()?
+        .text()?)
+}
+
 pub fn translate(lines: &[LyricLine], target: &str) -> Result<Translation> {
     let target = target.trim();
     if target.is_empty() {
@@ -56,39 +97,17 @@ pub fn translate(lines: &[LyricLine], target: &str) -> Result<Translation> {
     if slots.is_empty() {
         bail!("These lyrics have no text to translate");
     }
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(12))
-        .user_agent("YTDugem/0.1 (lyrics translation)")
-        .build()?;
+    let client = http_client("YTDugem/0.1 (lyrics translation)")?;
     let mut translated = Vec::with_capacity(slots.len());
     let mut sources: Vec<(String, usize)> = vec![];
     for batch in batches(&slots, lines) {
         let payload = payload(&batch, lines);
-        let body = client
-            .post(ENDPOINT)
-            .header("Accept", "application/json")
-            .form(&[
-                ("client", "dict-chrome-ex"),
-                ("sl", "auto"),
-                ("tl", target),
-                ("dt", "t"),
-                ("q", payload.as_str()),
-            ])
-            .send()?
-            .error_for_status()?
-            .text()?;
+        let body = post_batch(&client, target, "t", &payload)?;
         let (parts, source) = parse_answer(&body, batch.len())?;
         translated.extend(parts);
-        match sources.iter_mut().find(|(s, _)| *s == source) {
-            Some((_, weight)) => *weight += payload.len(),
-            None => sources.push((source, payload.len())),
-        }
+        add_weight(&mut sources, source, payload.len());
     }
-    let source = sources
-        .into_iter()
-        .max_by_key(|(_, weight)| *weight)
-        .map(|(s, _)| s)
-        .unwrap_or_default();
+    let source = dominant(sources);
     if same_language(&source, target) {
         return Ok(Translation::SameLanguage(source));
     }
@@ -132,14 +151,89 @@ fn payload(batch: &[usize], lines: &[LyricLine]) -> String {
     out
 }
 
-/// The joined translation split back at the markers, and the detected source language.
+#[allow(dead_code)] // used by the player sheet (in progress)
+pub fn romanize(lines: &[LyricLine]) -> Result<Romanization> {
+    let slots: Vec<usize> = (0..lines.len())
+        .filter(|&i| !lines[i].text.trim().is_empty())
+        .collect();
+    if slots.is_empty() {
+        bail!("These lyrics have no text to romanize");
+    }
+    if !slots.iter().any(|&i| has_non_latin_letters(&lines[i].text)) {
+        return Ok(Romanization::AlreadyLatin);
+    }
+    let client = http_client("YTDugem/0.1 (lyrics translation)")?;
+    let mut romanized = Vec::with_capacity(slots.len());
+    let mut sources: Vec<(String, usize)> = vec![];
+    for batch in batches(&slots, lines) {
+        let payload = payload(&batch, lines);
+        let body = post_batch(&client, "en", "rm", &payload)?;
+        let (parts, source) = parse_romanization(&body, batch.len())?;
+        romanized.extend(parts);
+        add_weight(&mut sources, source, payload.len());
+    }
+    let source = dominant(sources);
+    if slots
+        .iter()
+        .zip(&romanized)
+        .all(|(&i, text)| lines[i].text.trim() == text)
+    {
+        bail!("Romanization is not available for these lyrics");
+    }
+    let mut out = lines.to_vec();
+    for (&i, text) in slots.iter().zip(romanized) {
+        out[i].text = text;
+        out[i].words.clear();
+    }
+    Ok(Romanization::Romanized { lines: out, source })
+}
+
+/// True for a letter outside the Latin script (U+0000..U+024F and the Latin Extended Additional block).
+fn has_non_latin_letters(text: &str) -> bool {
+    text.chars().any(|c| {
+        let code = c as u32;
+        c.is_alphabetic() && code > 0x024F && !(0x1E00..=0x1EFF).contains(&code)
+    })
+}
+
+fn add_weight(sources: &mut Vec<(String, usize)>, source: String, weight: usize) {
+    match sources.iter_mut().find(|(s, _)| *s == source) {
+        Some((_, total)) => *total += weight,
+        None => sources.push((source, weight)),
+    }
+}
+
+/// The source language that carried the most text across all batches.
+fn dominant(sources: Vec<(String, usize)>) -> String {
+    sources
+        .into_iter()
+        .max_by_key(|(_, weight)| *weight)
+        .map(|(s, _)| s)
+        .unwrap_or_default()
+}
+
+/// The romanized answers split back at the markers; the source language must be known.
+fn parse_romanization(body: &str, expected: usize) -> Result<(Vec<String>, String)> {
+    let (parts, source) = split_answer(body, expected, 3)?;
+    if source.is_empty() {
+        bail!("The romanization came back without a source language");
+    }
+    Ok((parts, source))
+}
+
 fn parse_answer(body: &str, expected: usize) -> Result<(Vec<String>, String)> {
+    split_answer(body, expected, 0)
+}
+
+/// The joined text of each answer segment (`segment` is the index: 0 for translation, 3 for
+/// romanization) split back at the markers, and the detected source language.
+fn split_answer(body: &str, expected: usize, segment: usize) -> Result<(Vec<String>, String)> {
     let root: Value = serde_json::from_str(body)?;
     let joined: String = root[0]
         .as_array()
         .ok_or_else(|| anyhow!("Unexpected translation response"))?
         .iter()
-        .filter_map(|segment| segment[0].as_str())
+        .filter_map(|seg| seg.get(segment)?.as_str())
         .collect();
     let source = root[2].as_str().unwrap_or_default().to_owned();
     let mut parts = vec![];
@@ -225,6 +319,38 @@ mod tests {
             "a dropped marker must not shift lines"
         );
         assert!(same_language("in", "id-ID") && !same_language("ja", "en"));
+    }
+
+    #[test]
+    fn latin_detection_ignores_latin_letters() {
+        assert!(!has_non_latin_letters("Aku milikmu"));
+        assert!(!has_non_latin_letters("Café"));
+        assert!(!has_non_latin_letters("Ẽ Ạ 123 !?"));
+        assert!(has_non_latin_letters("靡く"));
+        assert!(has_non_latin_letters("사랑"));
+        assert!(has_non_latin_letters("Hello мир"));
+    }
+
+    #[test]
+    fn romanization_reads_the_romanized_segment() {
+        let (open, close) = ('\u{E000}', '\u{E001}');
+        let body = format!(
+            r#"[[["ignored","x","y","nabiku\n"],[null,null,null,"{open} 0001{close}\ntoppu"]],null,"ja"]"#
+        );
+        let (parts, source) = parse_romanization(&body, 2).unwrap();
+        assert_eq!(parts, ["nabiku", "toppu"]);
+        assert_eq!(source, "ja");
+        let no_source = r#"[[[null,null,null,"nabiku"]],null,""]"#;
+        assert!(parse_romanization(no_source, 1).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires internet access to Google's translation endpoint; no account"]
+    fn live_romanization() {
+        let lines = [line(1.0, "靡く"), line(5.0, "私は道の上")];
+        let result = romanize(&lines);
+        println!("{result:?}");
+        assert!(matches!(result, Ok(Romanization::Romanized { .. })));
     }
 
     #[test]

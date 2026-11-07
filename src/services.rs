@@ -881,6 +881,103 @@ fn find_renderer<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
         _ => None,
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LikeStatus {
+    Like,
+    Dislike,
+    #[default]
+    Indifferent,
+}
+
+/// Like, dislike or clear the rating of a song on the signed-in account.
+#[allow(dead_code)] // used by the player sheet (in progress)
+pub fn rate_song(video_id: &str, status: LikeStatus) -> Result<()> {
+    if !valid_video_id(video_id) {
+        bail!("Not a YouTube video ID: {video_id}");
+    }
+    let endpoint = match status {
+        LikeStatus::Like => "like/like",
+        LikeStatus::Dislike => "like/dislike",
+        LikeStatus::Indifferent => "like/removelike",
+    };
+    account_call(endpoint, json!({"target": {"videoId": video_id}})).map(|_| ())
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SongInfo {
+    pub like: Option<LikeStatus>,
+    pub album_browse_id: Option<String>,
+    pub artist_browse_id: Option<String>,
+}
+
+/// The rating (when signed in) and the album and artist pages of a song.
+#[allow(dead_code)] // used by the player sheet (in progress)
+pub fn song_info(video_id: &str) -> Result<SongInfo> {
+    if !valid_video_id(video_id) {
+        bail!("Not a YouTube video ID: {video_id}");
+    }
+    let v = innertube_value("next", json!({"videoId": video_id, "isAudioOnly": true}))?;
+    Ok(parse_song_info(&v, video_id))
+}
+
+fn find_panel_video<'a>(v: &'a Value, video_id: &str) -> Option<&'a Value> {
+    match v {
+        Value::Object(map) => map
+            .get("playlistPanelVideoRenderer")
+            .filter(|r| r["videoId"].as_str() == Some(video_id))
+            .or_else(|| map.values().find_map(|v| find_panel_video(v, video_id))),
+        Value::Array(items) => items.iter().find_map(|v| find_panel_video(v, video_id)),
+        _ => None,
+    }
+}
+
+fn parse_song_info(v: &Value, video_id: &str) -> SongInfo {
+    let like = find_renderer(v, "likeButtonRenderer")
+        .and_then(|r| r["likeStatus"].as_str())
+        .and_then(|s| match s {
+            "LIKE" => Some(LikeStatus::Like),
+            "DISLIKE" => Some(LikeStatus::Dislike),
+            "INDIFFERENT" => Some(LikeStatus::Indifferent),
+            _ => None,
+        });
+    let mut endpoints: Vec<&Value> = vec![];
+    if let Some(panel) = find_panel_video(v, video_id) {
+        if let Some(items) = panel
+            .pointer("/menu/menuRenderer/items")
+            .and_then(Value::as_array)
+        {
+            endpoints.extend(items.iter().filter_map(|i| {
+                i.pointer("/menuNavigationItemRenderer/navigationEndpoint/browseEndpoint")
+            }));
+        }
+        if let Some(runs) = panel
+            .pointer("/longBylineText/runs")
+            .and_then(Value::as_array)
+        {
+            endpoints.extend(
+                runs.iter()
+                    .filter_map(|r| r.pointer("/navigationEndpoint/browseEndpoint")),
+            );
+        }
+    }
+    let page_of = |kinds: &[&str]| {
+        endpoints.iter().find_map(|e| {
+            let page = e
+                .pointer("/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
+                .and_then(Value::as_str)?;
+            let id = e["browseId"].as_str().filter(|id| !id.is_empty())?;
+            kinds.contains(&page).then(|| id.to_owned())
+        })
+    };
+    SongInfo {
+        like,
+        album_browse_id: page_of(&["MUSIC_PAGE_TYPE_ALBUM"]),
+        artist_browse_id: page_of(&["MUSIC_PAGE_TYPE_ARTIST"])
+            .or_else(|| page_of(&["MUSIC_PAGE_TYPE_USER_CHANNEL"])),
+    }
+}
+
 pub fn radio(video_id: &str) -> Result<Vec<Track>> {
     let v = innertube_value(
         "next",
@@ -1479,6 +1576,45 @@ fn parse_progress(line: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_song_info() {
+        let cfg = |page: &str| json!({"browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": page}}});
+        let ep = |id: &str, page: &str| {
+            let mut e = cfg(page);
+            e["browseId"] = json!(id);
+            e
+        };
+        let v = json!({"contents": [
+            {"playlistPanelVideoRenderer": {"videoId": "other", "menu": {"menuRenderer": {"items": [
+                {"menuNavigationItemRenderer": {"navigationEndpoint": {"browseEndpoint": ep("MPREb_wrong", "MUSIC_PAGE_TYPE_ALBUM")}}}]}}}},
+            {"playlistPanelVideoRenderer": {"videoId": "lYBUbBu4W08",
+                "longBylineText": {"runs": [
+                    {"text": "Artist", "navigationEndpoint": {"browseEndpoint": ep("UCartist", "MUSIC_PAGE_TYPE_USER_CHANNEL")}},
+                    {"text": " - "}]},
+                "menu": {"menuRenderer": {"items": [
+                    {"menuServiceItemRenderer": {}},
+                    {"menuNavigationItemRenderer": {"navigationEndpoint": {"browseEndpoint": ep("MPREb_right", "MUSIC_PAGE_TYPE_ALBUM")}}},
+                    {"menuNavigationItemRenderer": {"navigationEndpoint": {"browseEndpoint": ep("UCreal", "MUSIC_PAGE_TYPE_ARTIST")}}}]}}}},
+            {"likeButtonRenderer": {"likeStatus": "DISLIKE"}}]});
+        assert_eq!(
+            parse_song_info(&v, "lYBUbBu4W08"),
+            SongInfo {
+                like: Some(LikeStatus::Dislike),
+                album_browse_id: Some("MPREb_right".into()),
+                artist_browse_id: Some("UCreal".into()),
+            }
+        );
+        assert_eq!(parse_song_info(&json!({}), "x"), SongInfo::default());
+    }
+
+    #[test]
+    #[ignore = "requires internet access to YouTube Music; no account"]
+    fn live_song_info() {
+        let info = song_info("lYBUbBu4W08").unwrap();
+        println!("{info:?}");
+    }
+
     #[test]
     #[ignore = "requires yt-dlp, FFmpeg and internet access to YouTube"]
     fn downloads_with_progress_and_cancels() {
