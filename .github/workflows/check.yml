@@ -50,7 +50,7 @@ jobs:
           }
       - name: Build and test the installer
         if: runner.os == 'Windows'
-        run: ./scripts/build-installer.ps1 -Test
+        run: ./scripts/build-installer.ps1 -Test -NoGui
       - uses: actions/upload-artifact@v7
         if: runner.os == 'Windows'
         with:

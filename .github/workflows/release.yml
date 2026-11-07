@@ -48,7 +48,7 @@ jobs:
             choco install innosetup -y --no-progress
           }
       - name: Build and test the installer
-        run: ./scripts/build-installer.ps1 -Test
+        run: ./scripts/build-installer.ps1 -Test -NoGui
       - name: Checksums
         shell: pwsh
         run: |

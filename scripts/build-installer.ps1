@@ -4,11 +4,13 @@ Builds dist/YTDugem-windows-x86_64-setup.exe from dist/YTDugem-windows-x86_64.zi
 
 Run scripts/package-windows.py first. Needs Inno Setup 6 or later (ISCC.exe on PATH, in its
 default folder, or given with -Iscc). -Test installs the result silently into a temporary folder, checks
-the files, starts the app, and uninstalls it again.
+the files, runs a headless playback check, starts the app, and uninstalls it again. -NoGui skips starting
+the window, for machines without OpenGL such as GitHub's Windows runners.
 #>
 param(
     [string]$Iscc,
-    [switch]$Test
+    [switch]$Test,
+    [switch]$NoGui
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -52,13 +54,28 @@ if ($Test) {
             if (-not (Test-Path (Join-Path $dir $file))) { throw "Installed copy is missing $file" }
         }
         $env:BITCHORD_DATA_DIR = $data
+        $env:BITCHORD_AUDIO_OUTPUT = 'null'
         $env:YTDUGEM_NO_UPDATE_CHECK = '1'
-        $app = Start-Process (Join-Path $dir 'YTDugem.exe') -PassThru
-        Start-Sleep -Seconds 5
-        if ($app.HasExited) { throw "Installed YTDugem exited at start with $($app.ExitCode)" }
-        Stop-Process $app -Force
-        $app.WaitForExit()
-        Write-Host 'Installed copy starts.'
+        New-Item -ItemType Directory -Force $data | Out-Null
+        # Five seconds of silent 8 kHz mono 16-bit PCM; the check needs time to pause, seek and resume.
+        $wav = Join-Path $data 'silence.wav'
+        $header = [byte[]](82,73,70,70,164,56,1,0,87,65,86,69,102,109,116,32,16,0,0,0,1,0,1,0,64,31,0,0,128,62,0,0,2,0,16,0,100,97,116,97,128,56,1,0)
+        [IO.File]::WriteAllBytes($wav, $header + [byte[]]::new(80000))
+        $report = Join-Path $data 'playback.json'
+        $stderr = Join-Path $data 'stderr.log'
+        $check = Start-Process (Join-Path $dir 'YTDugem.exe') -ArgumentList '--check-playback', "`"$wav`"", "`"$report`"" -Wait -PassThru -RedirectStandardError $stderr
+        if ($check.ExitCode -or -not (Test-Path $report) -or -not (Get-Content $report -Raw | ConvertFrom-Json).ok) {
+            throw "Installed playback check failed with $($check.ExitCode): $(Get-Content $stderr -Raw)"
+        }
+        Write-Host 'Installed copy plays audio (null output).'
+        if (-not $NoGui) {
+            $app = Start-Process (Join-Path $dir 'YTDugem.exe') -PassThru
+            Start-Sleep -Seconds 5
+            if ($app.HasExited) { throw "Installed YTDugem exited at start with $($app.ExitCode)" }
+            Stop-Process $app -Force
+            $app.WaitForExit()
+            Write-Host 'Installed copy starts.'
+        }
     } finally {
         $u = Start-Process (Join-Path $dir 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
         # The uninstaller hands off to a temporary copy; give it a moment to finish.
