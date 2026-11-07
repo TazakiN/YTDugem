@@ -19,6 +19,8 @@ default-members = ["."]
 [dependencies]
 anyhow = "1"
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+# Only its font bytes and glyph constants are used: it targets egui 0.36, not 0.37.
+egui-phosphor = { version = "=0.14.0", default-features = false, features = ["regular", "fill"] }
 egui_extras = { version = "0.37", default-features = false, features = ["http", "image"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 serde = { version = "1", features = ["derive"] }

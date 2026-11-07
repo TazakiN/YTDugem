@@ -20,6 +20,11 @@ Inter font (assets/fonts/Inter-*.ttf)
   https://github.com/rsms/inter
   SIL Open Font License 1.1, see assets/fonts/LICENSE.txt.
 
+Phosphor Icons (via the egui-phosphor crate: font files and glyph constants)
+  Copyright (c) 2020 Phosphor Icons, https://phosphoricons.com
+  MIT License. egui-phosphor by amPerl: MIT OR Apache-2.0.
+  https://github.com/amPerl/egui-phosphor
+
 Runtime tools in the Windows portable ZIP
 -----------------------------------------
 The portable ZIP ships these programs unmodified in its tools folder. Their

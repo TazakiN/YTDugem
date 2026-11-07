@@ -1059,16 +1059,14 @@ impl YTDugem {
                     .downloads
                     .iter()
                     .any(|d| matches!(d.state, DownloadState::Failed(_)));
-                if failed
-                    && ui
-                        .button("Clear")
-                        .on_hover_text("Remove failed downloads")
-                        .clicked()
+                if failed && icon_action(ui, true, Icon::Broom, "Remove failed downloads").clicked()
                 {
                     self.downloads
                         .retain(|d| !matches!(d.state, DownloadState::Failed(_)));
                 }
-                if !self.downloads.is_empty() && ui.button("Cancel all").clicked() {
+                if !self.downloads.is_empty()
+                    && icon_action(ui, true, Icon::Close, "Cancel all downloads").clicked()
+                {
                     for d in self.downloads.drain(..) {
                         d.cancel.store(true, Ordering::SeqCst);
                     }
@@ -1411,7 +1409,7 @@ impl YTDugem {
         for (icon, label, action) in [
             (Icon::Play, "Play", PlaylistBulk::Play),
             (Icon::Shuffle, "Shuffle", PlaylistBulk::Shuffle),
-            (Icon::Queue, "Add to queue", PlaylistBulk::Queue),
+            (Icon::AddToQueue, "Add to queue", PlaylistBulk::Queue),
             (Icon::Download, "Download all", PlaylistBulk::Download),
         ] {
             if icon_action(ui, enabled, icon, label).clicked() {
@@ -1524,22 +1522,20 @@ impl YTDugem {
         ui.horizontal(|ui| {
             ui.label(heading("YouTube playlists", 20.0));
             ui.add_space(8.0);
-            if ui
-                .add_enabled(!self.playlist_busy, egui::Button::new("New playlist"))
-                .clicked()
-            {
+            if icon_action(ui, !self.playlist_busy, Icon::Plus, "New playlist").clicked() {
                 self.open_playlist_dialog(PlaylistDialog::Create {
                     name: String::new(),
                     privacy: "PRIVATE".into(),
                     seed: None,
                 });
             }
-            if ui
-                .add_enabled(
-                    !self.account_playlists_loading,
-                    egui::Button::new("Refresh"),
-                )
-                .clicked()
+            if icon_action(
+                ui,
+                !self.account_playlists_loading,
+                Icon::Refresh,
+                "Refresh playlists",
+            )
+            .clicked()
             {
                 self.load_account_playlists();
             }
@@ -2180,7 +2176,7 @@ impl YTDugem {
                         "Applies to the song that is playing now",
                         |ui| {
                             if (self.library.speed - 1.0).abs() > 0.001
-                                && ui.button("Reset").clicked()
+                                && icon_action(ui, true, Icon::Reset, "Reset to default").clicked()
                             {
                                 self.library.speed = 1.0;
                                 let _ = self.player.speed(1.0);
@@ -2231,9 +2227,13 @@ impl YTDugem {
                         "Applies when the next song starts"
                     };
                     setting_row(ui, rows[0], subtitle, |ui| {
-                        if ui
-                            .add_enabled(!self.audio_devices_loading, egui::Button::new("Refresh"))
-                            .clicked()
+                        if icon_action(
+                            ui,
+                            !self.audio_devices_loading,
+                            Icon::Refresh,
+                            "Refresh devices",
+                        )
+                        .clicked()
                         {
                             self.audio_devices_loaded = false;
                             self.load_audio_devices();
@@ -2303,7 +2303,7 @@ impl YTDugem {
                 }
                 if hit(&q, rows[1]) {
                     setting_row(ui, rows[1], "", |ui| {
-                        if ui.button("Reset").clicked() {
+                        if icon_action(ui, true, Icon::Reset, "Reset to default").clicked() {
                             self.library.audio.equalizer_enabled = false;
                             self.library.audio.equalizer_bands = vec![0.0; 7];
                             self.library.audio.stereo_balance = 0.0;
@@ -2430,7 +2430,7 @@ impl YTDugem {
                         rows[2],
                         "Tried from the top; untick one to skip it",
                         |ui| {
-                            if ui.button("Reset").clicked() {
+                            if icon_action(ui, true, Icon::Reset, "Reset to default").clicked() {
                                 self.library.lyrics_order = store::lyrics_order_default();
                                 self.library.lyrics_sources = store::lyrics_order_default();
                                 self.library.lyrics_enabled = true;
@@ -3119,7 +3119,11 @@ impl YTDugem {
                                 };
                             let text = format!(
                                 "{}  {}",
-                                if selected { "✓" } else { "   " },
+                                if selected {
+                                    egui_phosphor::regular::CHECK
+                                } else {
+                                    "   "
+                                },
                                 channel.label()
                             );
                             let row = ui.add_enabled(
@@ -3208,7 +3212,11 @@ impl YTDugem {
                         );
                     }
                     ui.add_space(8.0);
-                    let chevron = if self.sign_in.advanced { "⌃" } else { "⌄" };
+                    let chevron = if self.sign_in.advanced {
+                        egui_phosphor::regular::CARET_UP
+                    } else {
+                        egui_phosphor::regular::CARET_DOWN
+                    };
                     if ui
                         .add(egui::Button::new(format!("Advanced {chevron}")).frame(false))
                         .clicked()
@@ -3254,7 +3262,13 @@ impl YTDugem {
     fn sign_in_advanced(&mut self, ui: &mut egui::Ui, busy: bool) {
         muted(ui, "Or use a browser you are already signed in with. This copy can stop working when that browser renews its cookies. Sign in at https://music.youtube.com there first, then pick it:");
         ui.add_space(6.0);
-        let picker = ui.add_enabled(!busy, egui::Button::new("Import from a browser  ⌄"));
+        let picker = ui.add_enabled(
+            !busy,
+            egui::Button::new(format!(
+                "Import from a browser  {}",
+                egui_phosphor::regular::CARET_DOWN
+            )),
+        );
         let popup = ui.make_persistent_id("import-browsers");
         if picker.clicked() {
             egui::Popup::toggle_id(ui.ctx(), popup);
@@ -3823,7 +3837,7 @@ impl YTDugem {
             (Page::Search, Icon::Search, "Search"),
             (Page::History, Icon::History, "History"),
             (Page::Downloads, Icon::Download, "Downloads"),
-            (Page::Local, Icon::Library, "Local Music"),
+            (Page::Local, Icon::Music, "Local Music"),
         ];
         let rule = |ui: &egui::Ui, y: &mut f32| {
             *y += 12.0;
@@ -4390,10 +4404,10 @@ impl YTDugem {
         }
         if header {
             ui.horizontal(|ui| {
-                if ui.button("Play all").clicked() {
+                if icon_action(ui, true, Icon::Play, "Play all").clicked() {
                     self.start_tracks(tracks.clone(), 0, origin);
                 }
-                if ui.button("Add all to queue").clicked() {
+                if icon_action(ui, true, Icon::AddToQueue, "Add all to queue").clicked() {
                     self.library.queue.extend(tracks.clone());
                     self.save();
                 }
@@ -4556,7 +4570,9 @@ impl YTDugem {
                                     current: c.title.clone(),
                                 });
                             }
-                            if icon_action(ui, true, Icon::Info, "Edit description").clicked() {
+                            if icon_action(ui, true, Icon::Description, "Edit description")
+                                .clicked()
+                            {
                                 self.open_playlist_dialog(PlaylistDialog::Description {
                                     id: id.clone(),
                                     text: c.description.clone(),
@@ -5380,7 +5396,9 @@ impl YTDugem {
                 |ui| {
                     ui.label(heading("Up next", 18.0));
                     ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                        if !self.library.queue.is_empty() && ui.button("Clear").clicked() {
+                        if !self.library.queue.is_empty()
+                            && icon_action(ui, true, Icon::Trash, "Clear queue").clicked()
+                        {
                             self.library.queue.clear();
                             self.save();
                         }
@@ -6646,6 +6664,7 @@ fn configure_style(ctx: &egui::Context) {
             }
         }
     }
+    widgets::install_icon_fonts(&mut fonts);
     let mut bold = vec!["inter-semibold".into()];
     bold.extend(fonts.families[&egui::FontFamily::Proportional].clone());
     fonts

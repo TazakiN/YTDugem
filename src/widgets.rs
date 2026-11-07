@@ -1,4 +1,5 @@
 use eframe::egui::{self, Color32, Pos2, Rect, Response, Sense, Stroke, Vec2};
+use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 pub enum Icon {
@@ -29,10 +30,14 @@ pub enum Icon {
     Refresh,
     Close,
     Edit,
-    Info,
+    Description,
     Trash,
     Plus,
     Check,
+    Reset,
+    AddToQueue,
+    Music,
+    Broom,
 }
 
 /// White at `alpha` opacity, as egui 0.31's `Color32::from_white_alpha` made it: the opacity is
@@ -86,335 +91,89 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, selected: bool, label: &
     response.on_hover_text(label)
 }
 
-pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
-    let point = |x: f32, y: f32| Pos2::new(r.left() + r.width() * x, r.top() + r.height() * y);
-    let line = |a: (f32, f32), b: (f32, f32)| {
-        p.line_segment(
-            [point(a.0, a.1), point(b.0, b.1)],
-            Stroke::new(1.8_f32, color),
-        );
-    };
-    let path = |pts: &[(f32, f32)], closed: bool, fill: bool| {
-        let pts = pts.iter().map(|v| point(v.0, v.1)).collect();
-        p.add(if fill {
-            egui::Shape::convex_polygon(pts, color, Stroke::NONE)
-        } else if closed {
-            egui::Shape::closed_line(pts, Stroke::new(1.8_f32, color))
-        } else {
-            egui::Shape::line(pts, Stroke::new(1.8_f32, color))
-        });
-    };
-    match icon {
-        Icon::Play => path(&[(0.25, 0.08), (0.9, 0.5), (0.25, 0.92)], true, true),
-        Icon::Pause => {
-            p.rect_filled(
-                Rect::from_min_max(point(0.18, 0.08), point(0.4, 0.92)),
-                2.0,
-                color,
-            );
-            p.rect_filled(
-                Rect::from_min_max(point(0.6, 0.08), point(0.82, 0.92)),
-                2.0,
-                color,
-            );
-        }
-        Icon::Next | Icon::Previous => {
-            let flip = matches!(icon, Icon::Previous);
-            let x = |n: f32| if flip { 1.0 - n } else { n };
-            path(
-                &[(x(0.05), 0.15), (x(0.54), 0.5), (x(0.05), 0.85)],
-                true,
-                true,
-            );
-            path(
-                &[(x(0.5), 0.15), (x(0.99), 0.5), (x(0.5), 0.85)],
-                true,
-                true,
-            );
-        }
-        Icon::Home => {
-            path(
-                &[
-                    (0.08, 0.43),
-                    (0.5, 0.08),
-                    (0.92, 0.43),
-                    (0.86, 0.43),
-                    (0.86, 0.94),
-                    (0.6, 0.94),
-                    (0.6, 0.6),
-                    (0.4, 0.6),
-                    (0.4, 0.94),
-                    (0.14, 0.94),
-                    (0.14, 0.43),
-                ],
-                true,
-                true,
-            );
-        }
-        Icon::Search => {
-            p.circle_stroke(
-                point(0.42, 0.4),
-                r.width() * 0.29,
-                Stroke::new(1.8_f32, color),
-            );
-            line((0.64, 0.64), (0.94, 0.94));
-        }
-        Icon::Compass => {
-            p.circle_stroke(r.center(), r.width() * 0.43, Stroke::new(1.8_f32, color));
-            path(
-                &[(0.67, 0.25), (0.57, 0.6), (0.3, 0.75), (0.4, 0.4)],
-                true,
-                false,
-            );
-        }
-        Icon::Library => {
-            for x in [0.12, 0.32, 0.52] {
-                line((x, 0.12), (x, 0.9));
-            }
-            line((0.69, 0.1), (0.92, 0.88));
-        }
-        Icon::History => {
-            p.circle_stroke(r.center(), r.width() * 0.42, Stroke::new(1.8_f32, color));
-            path(&[(0.5, 0.2), (0.5, 0.52), (0.72, 0.65)], false, false);
-        }
-        Icon::Download => {
-            path(&[(0.2, 0.48), (0.5, 0.76), (0.8, 0.48)], false, false);
-            line((0.5, 0.05), (0.5, 0.73));
-            path(
-                &[(0.14, 0.72), (0.14, 0.94), (0.86, 0.94), (0.86, 0.72)],
-                false,
-                false,
-            );
-        }
-        Icon::Queue => {
-            for y in [0.2, 0.5, 0.8] {
-                p.circle_filled(point(0.1, y), 1.2, color);
-                line((0.3, y), (0.95, y));
-            }
-        }
-        Icon::Lyrics => {
-            path(
-                &[
-                    (0.08, 0.1),
-                    (0.92, 0.1),
-                    (0.92, 0.76),
-                    (0.5, 0.76),
-                    (0.25, 0.97),
-                    (0.25, 0.76),
-                    (0.08, 0.76),
-                ],
-                true,
-                false,
-            );
-            line((0.34, 0.3), (0.28, 0.55));
-            line((0.65, 0.3), (0.59, 0.55));
-        }
-        Icon::Volume => {
-            path(
-                &[
-                    (0.05, 0.38),
-                    (0.25, 0.38),
-                    (0.5, 0.16),
-                    (0.5, 0.84),
-                    (0.25, 0.62),
-                    (0.05, 0.62),
-                ],
-                true,
-                true,
-            );
-            path(
-                &[(0.68, 0.28), (0.78, 0.42), (0.78, 0.58), (0.68, 0.72)],
-                false,
-                false,
-            );
-        }
-        Icon::Headphones => {
-            path(
-                &[
-                    (0.1, 0.8),
-                    (0.1, 0.38),
-                    (0.2, 0.16),
-                    (0.4, 0.06),
-                    (0.6, 0.06),
-                    (0.8, 0.16),
-                    (0.9, 0.38),
-                    (0.9, 0.8),
-                ],
-                false,
-                false,
-            );
-            p.rect_filled(
-                Rect::from_min_max(point(0.08, 0.5), point(0.27, 0.9)),
-                2.0,
-                color,
-            );
-            p.rect_filled(
-                Rect::from_min_max(point(0.73, 0.5), point(0.92, 0.9)),
-                2.0,
-                color,
-            );
-        }
-        Icon::User => {
-            p.circle_filled(point(0.5, 0.25), r.width() * 0.19, color);
-            path(
-                &[
-                    (0.14, 0.96),
-                    (0.2, 0.65),
-                    (0.4, 0.55),
-                    (0.6, 0.55),
-                    (0.8, 0.65),
-                    (0.86, 0.96),
-                ],
-                true,
-                true,
-            );
-        }
-        Icon::Back => path(&[(0.65, 0.13), (0.28, 0.5), (0.65, 0.87)], false, false),
-        Icon::Collapse => path(&[(0.15, 0.36), (0.5, 0.68), (0.85, 0.36)], false, false),
-        Icon::Sidebar => {
-            // A panel outline with a divider: the left column is the sidebar.
-            let frame = Rect::from_min_max(point(0.08, 0.16), point(0.92, 0.84));
-            p.rect_stroke(
-                frame,
-                2.0,
-                Stroke::new(1.6_f32, color),
-                egui::StrokeKind::Middle,
-            );
-            line((0.36, 0.16), (0.36, 0.84));
-        }
-        Icon::Raise => path(&[(0.15, 0.64), (0.5, 0.32), (0.85, 0.64)], false, false),
-        Icon::Translate => {
-            // The common "文A" translation glyph; the bundled fonts include CJK.
-            p.text(
-                r.center(),
-                egui::Align2::CENTER_CENTER,
-                "文A",
-                egui::FontId::proportional(r.height() * 0.95),
-                color,
-            );
-        }
-        Icon::Refresh => {
-            // A circular arrow: an open arc with its head at the top right.
-            let centre = point(0.5, 0.5);
-            let radius = r.width() * 0.36;
-            let at = |deg: f32| {
-                let a = deg.to_radians();
-                Pos2::new(centre.x + radius * a.cos(), centre.y + radius * a.sin())
-            };
-            let arc: Vec<Pos2> = (0..=24)
-                .map(|i| at(-60.0 + 290.0 * i as f32 / 24.0))
-                .collect();
-            p.add(egui::Shape::line(arc, Stroke::new(1.8_f32, color)));
-            let tip = at(-60.0);
-            let s = r.width() * 0.2;
-            p.add(egui::Shape::convex_polygon(
-                vec![
-                    tip + Vec2::new(-s * 0.2, -s),
-                    tip + Vec2::new(s, 0.1 * s),
-                    tip + Vec2::new(-s * 0.6, s * 0.55),
-                ],
-                color,
-                Stroke::NONE,
-            ));
-        }
-        Icon::Close => {
-            line((0.2, 0.2), (0.8, 0.8));
-            line((0.8, 0.2), (0.2, 0.8));
-        }
-        Icon::Plus => {
-            line((0.5, 0.12), (0.5, 0.88));
-            line((0.12, 0.5), (0.88, 0.5));
-        }
-        Icon::Check => path(&[(0.12, 0.54), (0.4, 0.8), (0.9, 0.2)], false, false),
-        Icon::Edit => {
-            // A pencil on the diagonal with its tip at the lower left.
-            path(
-                &[
-                    (0.14, 0.86),
-                    (0.2, 0.62),
-                    (0.66, 0.16),
-                    (0.84, 0.34),
-                    (0.38, 0.8),
-                ],
-                true,
-                false,
-            );
-            line((0.55, 0.27), (0.73, 0.45));
-        }
-        Icon::Info => {
-            p.circle_stroke(r.center(), r.width() * 0.42, Stroke::new(1.8_f32, color));
-            line((0.5, 0.46), (0.5, 0.74));
-            p.circle_filled(point(0.5, 0.29), 1.3, color);
-        }
-        Icon::Trash => {
-            line((0.12, 0.22), (0.88, 0.22));
-            path(
-                &[(0.38, 0.22), (0.38, 0.08), (0.62, 0.08), (0.62, 0.22)],
-                false,
-                false,
-            );
-            path(
-                &[(0.2, 0.22), (0.27, 0.92), (0.73, 0.92), (0.8, 0.22)],
-                false,
-                false,
-            );
-            line((0.42, 0.42), (0.42, 0.72));
-            line((0.58, 0.42), (0.58, 0.72));
-        }
-        Icon::Repeat => {
-            path(
-                &[(0.15, 0.55), (0.15, 0.22), (0.82, 0.22), (0.68, 0.08)],
-                false,
-                false,
-            );
-            path(
-                &[(0.85, 0.45), (0.85, 0.78), (0.18, 0.78), (0.32, 0.92)],
-                false,
-                false,
-            );
-        }
-        Icon::Shuffle => {
-            path(
-                &[(0.06, 0.2), (0.3, 0.2), (0.68, 0.8), (0.94, 0.8)],
-                false,
-                false,
-            );
-            path(
-                &[(0.06, 0.8), (0.3, 0.8), (0.68, 0.2), (0.94, 0.2)],
-                false,
-                false,
-            );
-            path(&[(0.8, 0.06), (0.96, 0.2), (0.8, 0.34)], false, false);
-            path(&[(0.8, 0.66), (0.96, 0.8), (0.8, 0.94)], false, false);
-        }
-        Icon::Settings => {
-            p.circle_stroke(r.center(), r.width() * 0.3, Stroke::new(3.0_f32, color));
-            p.circle_stroke(r.center(), r.width() * 0.1, Stroke::new(1.5_f32, color));
-            for i in 0..8 {
-                let a = i as f32 * std::f32::consts::TAU / 8.0;
-                p.line_segment(
-                    [
-                        r.center() + Vec2::angled(a) * r.width() * 0.3,
-                        r.center() + Vec2::angled(a) * r.width() * 0.44,
-                    ],
-                    Stroke::new(3.0_f32, color),
-                );
-            }
-        }
-        Icon::Logo => {
-            p.circle_stroke(
-                r.center(),
-                r.width() * 0.43,
-                Stroke::new(r.width() * 0.075, color),
-            );
-            p.circle_stroke(
-                r.center(),
-                r.width() * 0.31,
-                Stroke::new(r.width() * 0.025, color),
-            );
-            path(&[(0.4, 0.29), (0.7, 0.5), (0.4, 0.71)], true, true);
-        }
+/// Registers the Phosphor icon fonts (MIT, https://phosphoricons.com) with egui 0.37 types.
+/// Only the font bytes of the `egui-phosphor` crate are used; its egui 0.36 API is never called.
+/// The regular font is also a `Proportional` fallback so glyph constants work inside text.
+pub fn install_icon_fonts(fonts: &mut egui::FontDefinitions) {
+    for (name, bytes) in [
+        (REGULAR_FAMILY, egui_phosphor::bytes::regular::FONT),
+        (FILL_FAMILY, egui_phosphor::bytes::fill::FONT),
+    ] {
+        fonts
+            .font_data
+            .insert(name.into(), Arc::new(egui::FontData::from_static(bytes)));
+        fonts
+            .families
+            .insert(egui::FontFamily::Name(name.into()), vec![name.into()]);
     }
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .push(REGULAR_FAMILY.into());
+}
+
+const REGULAR_FAMILY: &str = "phosphor";
+const FILL_FAMILY: &str = "phosphor-fill";
+
+/// Phosphor draws its glyphs in about 88% of the em square.
+const GLYPH_SCALE: f32 = 1.12;
+
+/// The glyph and whether it comes from the fill font.
+fn glyph(icon: Icon) -> (&'static str, bool) {
+    use egui_phosphor::{fill, regular};
+    match icon {
+        Icon::Logo => (regular::MUSIC_NOTES, false),
+        Icon::Home => (regular::HOUSE, false),
+        Icon::Compass => (regular::COMPASS, false),
+        Icon::Library => (regular::BOOKS, false),
+        Icon::Search => (regular::MAGNIFYING_GLASS, false),
+        Icon::History => (regular::CLOCK_COUNTER_CLOCKWISE, false),
+        Icon::Download => (regular::DOWNLOAD_SIMPLE, false),
+        Icon::Settings => (regular::GEAR, false),
+        Icon::Play => (fill::PLAY, true),
+        Icon::Pause => (fill::PAUSE, true),
+        Icon::Next => (fill::SKIP_FORWARD, true),
+        Icon::Previous => (fill::SKIP_BACK, true),
+        Icon::Shuffle => (regular::SHUFFLE, false),
+        Icon::Repeat => (regular::REPEAT, false),
+        Icon::Queue => (regular::QUEUE, false),
+        Icon::Lyrics => (regular::MICROPHONE_STAGE, false),
+        Icon::Volume => (regular::SPEAKER_HIGH, false),
+        Icon::Headphones => (regular::HEADPHONES, false),
+        Icon::User => (regular::USER, false),
+        Icon::Back => (regular::CARET_LEFT, false),
+        Icon::Collapse => (regular::CARET_DOWN, false),
+        Icon::Raise => (regular::CARET_UP, false),
+        Icon::Sidebar => (regular::SIDEBAR, false),
+        Icon::Translate => (regular::TRANSLATE, false),
+        Icon::Refresh => (regular::ARROWS_CLOCKWISE, false),
+        Icon::Close => (regular::X, false),
+        Icon::Edit => (regular::PENCIL_SIMPLE, false),
+        Icon::Description => (regular::NOTE_PENCIL, false),
+        Icon::Trash => (regular::TRASH, false),
+        Icon::Plus => (regular::PLUS, false),
+        Icon::Check => (regular::CHECK, false),
+        Icon::Reset => (regular::ARROW_COUNTER_CLOCKWISE, false),
+        Icon::AddToQueue => (regular::LIST_PLUS, false),
+        Icon::Music => (regular::MUSIC_NOTES, false),
+        Icon::Broom => (regular::BROOM, false),
+    }
+}
+
+fn family(fill: bool) -> egui::FontFamily {
+    egui::FontFamily::Name(if fill { FILL_FAMILY } else { REGULAR_FAMILY }.into())
+}
+
+pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
+    let (text, fill) = glyph(icon);
+    p.text(
+        r.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::new(r.width().min(r.height()) * GLYPH_SCALE, family(fill)),
+        color,
+    );
 }
 
 pub fn slider(
@@ -489,5 +248,57 @@ mod tests {
         let [r, g, b, a] = white_alpha(30).to_array();
         assert_eq!((r, g, b, a), (96, 96, 96, 30));
         assert!(white_alpha(16).r() > 16);
+    }
+
+    /// Reads a table offset from a TrueType file's directory.
+    fn table(font: &[u8], tag: &[u8; 4]) -> usize {
+        let count = u16::from_be_bytes([font[4], font[5]]) as usize;
+        (0..count)
+            .map(|i| 12 + i * 16)
+            .find(|&o| &font[o..o + 4] == tag)
+            .map(|o| u32::from_be_bytes(font[o + 8..o + 12].try_into().unwrap()) as usize)
+            .expect("table present")
+    }
+
+    fn i16_at(font: &[u8], at: usize) -> f32 {
+        f32::from(i16::from_be_bytes([font[at], font[at + 1]]))
+    }
+
+    #[test]
+    fn phosphor_glyphs_are_vertically_centred() {
+        for bytes in [
+            egui_phosphor::bytes::regular::FONT,
+            egui_phosphor::bytes::fill::FONT,
+        ] {
+            let head = table(bytes, b"head");
+            let hhea = table(bytes, b"hhea");
+            let units = f32::from(u16::from_be_bytes([bytes[head + 18], bytes[head + 19]]));
+            // The row spans descent..ascent around the baseline and `CENTER_CENTER` centres
+            // that row on the target, so the ink must be centred in the row too.
+            let row_centre = (i16_at(bytes, hhea + 4) + i16_at(bytes, hhea + 6)) / 2.0;
+            let ink_centre = (i16_at(bytes, head + 38) + i16_at(bytes, head + 42)) / 2.0;
+            let off = (row_centre - ink_centre) / units * 16.0 * GLYPH_SCALE;
+            assert!(off.abs() < 1.0, "glyphs sit {off}px off centre");
+        }
+    }
+
+    #[test]
+    fn icon_glyphs_lay_out_in_their_families() {
+        let mut fonts = egui::FontDefinitions::default();
+        install_icon_fonts(&mut fonts);
+        let ctx = egui::Context::default();
+        ctx.set_fonts(fonts);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for icon in [Icon::Play, Icon::Home, Icon::Broom, Icon::Description] {
+                let (text, fill) = glyph(icon);
+                let galley = ui.painter().layout_no_wrap(
+                    text.into(),
+                    egui::FontId::new(16.0, family(fill)),
+                    Color32::WHITE,
+                );
+                assert!(galley.rect.width() > 4.0, "missing glyph for {text:?}");
+            }
+        });
+        output.textures_delta.clear();
     }
 }
