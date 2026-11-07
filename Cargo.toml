@@ -31,7 +31,7 @@ directories = "6"
 rand = "0.10"
 souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
 sha1 = "0.10"
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 # The saved sign-in is sealed under a key the system credential store holds (Meiro `secretfile`).
 aes-gcm = "0.11.1"
