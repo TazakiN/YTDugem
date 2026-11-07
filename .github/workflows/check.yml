@@ -41,8 +41,20 @@ jobs:
       - name: Test extracted Windows package playback without installed tools
         if: runner.os == 'Windows'
         run: ./scripts/windows-playback-smoke.ps1
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue)) {
+            choco install innosetup -y --no-progress
+          }
+      - name: Build and test the installer
+        if: runner.os == 'Windows'
+        run: ./scripts/build-installer.ps1 -Test
       - uses: actions/upload-artifact@v7
         if: runner.os == 'Windows'
         with:
           name: YTDugem-windows-x86_64
-          path: dist/YTDugem-windows-x86_64.zip
+          path: |
+            dist/YTDugem-windows-x86_64.zip
+            dist/YTDugem-windows-x86_64-setup.exe

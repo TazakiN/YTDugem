@@ -41,12 +41,21 @@ jobs:
         run: python scripts/package-windows.py
       - name: Test extracted Windows package playback without installed tools
         run: ./scripts/windows-playback-smoke.ps1
-      - name: Checksum
+      - name: Install Inno Setup
         shell: pwsh
         run: |
-          $zip = 'YTDugem-windows-x86_64.zip'
-          $hash = (Get-FileHash "dist/$zip" -Algorithm SHA256).Hash.ToLower()
-          Set-Content -Path "dist/$zip.sha256" -Value "$hash  $zip" -Encoding ascii
+          if (-not (Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue)) {
+            choco install innosetup -y --no-progress
+          }
+      - name: Build and test the installer
+        run: ./scripts/build-installer.ps1 -Test
+      - name: Checksums
+        shell: pwsh
+        run: |
+          foreach ($file in 'YTDugem-windows-x86_64.zip', 'YTDugem-windows-x86_64-setup.exe') {
+            $hash = (Get-FileHash "dist/$file" -Algorithm SHA256).Hash.ToLower()
+            Set-Content -Path "dist/$file.sha256" -Value "$hash  $file" -Encoding ascii
+          }
       - name: Publish release
         shell: pwsh
         env:
@@ -55,4 +64,6 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           $flags = @('--title', "YTDugem $($tag.TrimStart('v'))", '--generate-notes', '--verify-tag')
           if ($tag.Contains('-')) { $flags += '--prerelease' }
-          gh release create $tag dist/YTDugem-windows-x86_64.zip dist/YTDugem-windows-x86_64.zip.sha256 @flags
+          $files = 'YTDugem-windows-x86_64-setup.exe', 'YTDugem-windows-x86_64.zip' |
+            ForEach-Object { "dist/$_", "dist/$_.sha256" }
+          gh release create $tag @files @flags

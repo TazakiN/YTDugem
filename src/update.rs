@@ -294,6 +294,35 @@ fn swap(dir: &Path, staged: &Path, old: &Path, names: Vec<OsString>) -> Result<(
     Ok(())
 }
 
+/// The installer's uninstall entry (`packaging/windows/ytdugem.iss` AppId, plus Inno's `_is1`).
+const INSTALL_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{C8AB3870-DAD2-4919-849F-1B729CD32A70}_is1";
+
+/// In a copy the setup installed (its uninstaller sits beside the exe), keeps the version shown in
+/// Apps & features in step with the files an in-app update swapped in. Best effort.
+pub fn record_installed_version(dir: &Path, version: &str) {
+    if !cfg!(windows) || version.is_empty() || !dir.join("unins000.exe").is_file() {
+        return;
+    }
+    let mut command = Command::new(system_tool("reg.exe"));
+    command.args([
+        "add",
+        INSTALL_KEY,
+        "/v",
+        "DisplayVersion",
+        "/t",
+        "REG_SZ",
+        "/d",
+        version,
+        "/f",
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let _ = command.output();
+}
+
 /// Starts the updated app, which waits for this one to exit.
 pub fn restart(dir: &Path) -> Result<()> {
     Command::new(dir.join("YTDugem.exe"))

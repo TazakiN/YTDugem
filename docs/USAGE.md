@@ -2,6 +2,10 @@
 
 ## Install
 
+### Windows installer
+
+Run `YTDugem-windows-x86_64-setup.exe` from the [latest release](https://github.com/TazakiN/YTDugem/releases/latest). It installs for the current user into `%LOCALAPPDATA%\Programs\YTDugem` without administrator access, and adds a Start menu entry (and, optionally, a desktop shortcut). It contains the same files as the portable ZIP. Uninstall it from **Settings → Apps**. Your library and sign-in are kept.
+
 ### Windows portable ZIP
 
 Extract **all** of `YTDugem-windows-x86_64.zip`, then double-click `YTDugem/YTDugem.exe`. Keep its `tools` folder beside the executable. mpv, yt-dlp, FFmpeg/ffprobe and Deno are included. You do not need to install audio tools, use administrator access, or change the system `PATH`. **The `.exe` alone is not a portable distribution.** The app prepends its own `tools` folder to the environment inherited by its audio processes.
@@ -10,7 +14,7 @@ Extract **all** of `YTDugem-windows-x86_64.zip`, then double-click `YTDugem/YTDu
 
 At startup, YTDugem checks the [latest release](https://github.com/TazakiN/YTDugem/releases/latest) on GitHub. **Settings → About → Check for updates** runs the same check. When a newer stable release exists, a dialog offers **Update now**. The app downloads the release ZIP into a `.update` folder beside `YTDugem.exe` and checks its SHA-256 against the release's `.sha256` file. When you choose **Restart now**, it stops playback, swaps in the new files and restarts. Your library and sign-in live in the application-data directory and are not touched. If any file cannot be replaced, the folder is restored and an error is shown. Pre-releases are never offered.
 
-In-place updates need a portable folder you can write to: `YTDugem.exe` with `tools/mpv.exe` beside it. Elsewhere (a build from `target/`, a renamed exe, Linux), the dialog opens the release page instead. Set `YTDUGEM_NO_UPDATE_CHECK=1` to skip the startup check. This differs from upstream, whose dialog only opens the installer in the browser.
+Installed and portable copies update the same way. In-place updates need a folder you can write to, with `YTDugem.exe` and `tools/mpv.exe` beside it. The installer's folder qualifies, and for an installed copy the update also changes the version shown in Apps & features. Elsewhere (a build from `target/`, a renamed exe, Linux), the dialog opens the release page instead. Set `YTDUGEM_NO_UPDATE_CHECK=1` to skip the startup check. This differs from upstream, whose dialog only opens the installer in the browser.
 
 ### From source
 
@@ -67,7 +71,7 @@ This is a working desktop rewrite, **not yet feature parity with every upstream 
 - canvas video
 - Automix and crossfade
 - dynamic equalizer
-- installer (the portable ZIP updates itself; there is no MSI/setup.exe)
+- MSI package (the release has an Inno Setup `setup.exe` instead)
 
 Android, TV, watch, backend and web targets are deliberately excluded.
 
