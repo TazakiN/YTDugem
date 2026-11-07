@@ -138,6 +138,12 @@ impl YTDugem {
         self.stop();
         self.prepared = None;
         self.updates.applying = true;
+        let version = self
+            .updates
+            .available
+            .as_ref()
+            .map(|r| r.version.clone())
+            .unwrap_or_default();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             // A stream lookup may still be running a bundled tool; give it a few seconds.
@@ -148,6 +154,9 @@ impl YTDugem {
                 }
                 std::thread::sleep(Duration::from_secs(1));
                 result = update::apply(&dir, &staged);
+            }
+            if result.is_ok() {
+                update::record_installed_version(&dir, &version);
             }
             let _ = tx.send(Event::Update(UpdateEvent::Applied(result.map_err(err))));
         });

@@ -40,13 +40,36 @@ long-lived `stable` or `nightly` branches:
 
 4. `.github/workflows/release.yml` runs on the tag. It checks the version, then runs fmt, clippy,
    the tests, the release build, the packager and the offline playback smoke test. It then
-   publishes a GitHub release with generated notes and two files:
-   - `YTDugem-windows-x86_64.zip`
-   - `YTDugem-windows-x86_64.zip.sha256` (`<hash>  <file>`, as `sha256sum` prints it)
+   publishes a GitHub release with generated notes and these files:
+   - `YTDugem-windows-x86_64-setup.exe`: the installer
+   - `YTDugem-windows-x86_64.zip`: the portable package
+   - a `.sha256` for each (`<hash>  <file>`, as `sha256sum` prints it)
+
+   It also builds the installer and test-installs it silently: install, start, uninstall.
 5. Edit the release notes on GitHub if you want. The update dialog shows them.
 
 If the workflow fails, fix the problem on `main`, delete the tag (`git push origin :v0.2.0`,
 `git tag -d v0.2.0`), and tag again. Do not reuse a version that has already been published.
+
+## The installer
+
+`packaging/windows/ytdugem.iss` (Inno Setup 6 or later) is built by
+`scripts/build-installer.ps1`. That script extracts the portable ZIP and packages exactly those files,
+so build the ZIP first. Locally:
+
+```powershell
+cargo build --release --locked
+python scripts/package-windows.py
+powershell -NoProfile -File scripts/build-installer.ps1 -Test
+```
+
+- It installs per user into `%LOCALAPPDATA%\Programs\YTDugem`. There is no admin prompt and no
+  folder choice. The folder stays writable, so the in-app updater works on installed copies too.
+- **Never change `AppId`.** Upgrades, the uninstaller and `src/update.rs` (`INSTALL_KEY`, which
+  updates the version shown in Apps & features after an in-app update) all depend on it.
+- Running a newer setup over an installed copy upgrades it in place.
+- The installer is unsigned, so Windows SmartScreen warns on first run until the app gains
+  reputation or the files are code-signed.
 
 ## Rules the update check depends on
 
