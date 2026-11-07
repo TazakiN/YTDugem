@@ -1306,8 +1306,33 @@ pub(crate) fn run_streaming(
     })
 }
 
+/// `path` without the Windows verbatim prefix `fs::canonicalize` adds (`\\?\C:\…` → `C:\…`),
+/// so it compares equal to user-entered paths such as the download folder. UNC paths are kept.
+pub fn plain_path(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Delete the downloaded audio file `source` from disk. Refuses anything outside `directory`,
+/// so a library entry that points elsewhere can never remove the user's own music.
+pub fn delete_download(source: &str, directory: &Path) -> Result<PathBuf> {
+    let path = plain_path(Path::new(source));
+    if !path.starts_with(directory) {
+        bail!("That file is not in your download folder");
+    }
+    if !path.is_file() || !is_audio(&path) {
+        bail!("No downloaded audio file at {}", path.display());
+    }
+    fs::remove_file(&path)?;
+    Ok(path)
+}
+
 pub fn import_local(path: &Path) -> Result<Vec<Track>> {
-    let path = fs::canonicalize(path).with_context(|| format!("Opening {}", path.display()))?;
+    let path =
+        plain_path(&fs::canonicalize(path).with_context(|| format!("Opening {}", path.display()))?);
     let mut paths = vec![];
     if path.is_file() {
         if !is_audio(&path) {
@@ -1330,8 +1355,11 @@ pub fn import_local(path: &Path) -> Result<Vec<Track>> {
             .args([
                 "-v",
                 "quiet",
+                "-select_streams",
+                "a:0",
                 "-show_entries",
-                "format=duration:format_tags=title,artist,album",
+                // Ogg/Opus keep their tags on the audio stream rather than the container.
+                "format=duration:format_tags=title,artist,album:stream_tags=title,artist,album",
                 "-of",
                 "json",
             ])
@@ -1341,11 +1369,12 @@ pub fn import_local(path: &Path) -> Result<Vec<Track>> {
             .filter(|o| o.status.success())
             .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
             .unwrap_or(Value::Null);
-        let tags = &meta["format"]["tags"];
         let tag = |key: &str| {
-            tags[key]
-                .as_str()
-                .or_else(|| tags[key.to_uppercase()].as_str())
+            [&meta["format"]["tags"], &meta["streams"][0]["tags"]]
+                .into_iter()
+                .flat_map(|tags| [&tags[key], &tags[key.to_uppercase()]])
+                .filter_map(Value::as_str)
+                .find(|v| !v.trim().is_empty())
                 .unwrap_or("")
                 .to_owned()
         };
@@ -1842,6 +1871,38 @@ mod tests {
     }
 
     #[test]
+    fn delete_download_only_touches_files_in_folder() {
+        let dir = std::env::temp_dir().join(format!("bitchord-del-{}", std::process::id()));
+        let downloads = dir.join("downloads");
+        fs::create_dir_all(&downloads).unwrap();
+        let inside = downloads.join("song.opus");
+        let outside = dir.join("mine.opus");
+        fs::write(&inside, b"a").unwrap();
+        fs::write(&outside, b"b").unwrap();
+        let verbatim = format!(r"\\?\{}", inside.display());
+        assert!(delete_download(&outside.to_string_lossy(), &downloads).is_err());
+        assert!(outside.exists());
+        assert!(delete_download(&verbatim, &downloads).is_ok());
+        assert!(!inside.exists());
+        assert!(delete_download(&verbatim, &downloads).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn plain_path_drops_only_drive_verbatim_prefix() {
+        assert_eq!(
+            plain_path(Path::new(r"\\?\C:\Music\a.opus")),
+            Path::new(r"C:\Music\a.opus")
+        );
+        assert_eq!(
+            plain_path(Path::new(r"C:\Music\a.opus")),
+            Path::new(r"C:\Music\a.opus")
+        );
+        let unc = Path::new(r"\\?\UNC\server\share\a.opus");
+        assert_eq!(plain_path(unc), unc);
+    }
+
+    #[test]
     fn parses_download_progress_template() {
         assert_eq!(parse_progress("YTDUGEM-PROGRESS 512 1024"), Some(0.5));
         assert_eq!(parse_progress("YTDUGEM-PROGRESS 2048 1024.0"), Some(1.0));
@@ -1938,6 +1999,40 @@ mod tests {
         files(&dir, &mut paths, 0).unwrap();
         assert_eq!(paths.len(), 1);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg and ffprobe"]
+    fn imports_opus_stream_tags() {
+        let dir = std::env::temp_dir().join(format!("bitchord-opus-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("file_name [id].opus");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "quiet",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=d=1",
+                "-c:a",
+                "libopus",
+            ])
+            .args([
+                "-metadata",
+                "title=Real Title",
+                "-metadata",
+                "artist=Real Artist",
+            ])
+            .arg(&file)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let tracks = import_local(&file).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+        assert_eq!(tracks[0].title, "Real Title");
+        assert_eq!(tracks[0].artist, "Real Artist");
+        assert!(!tracks[0].source.starts_with(r"\\?\"));
     }
 
     #[test]

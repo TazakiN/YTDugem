@@ -216,6 +216,8 @@ pub struct YTDugem {
     account_playlists_request: u64,
     account_playlists_loading: bool,
     playlist_dialog: Option<PlaylistDialog>,
+    /// A download awaiting confirmation before its file is deleted from disk.
+    delete_download: Option<Track>,
     /// One account-playlist change at a time.
     playlist_busy: bool,
     /// Set when the open dialog started the running change; its result then closes the dialog or
@@ -431,6 +433,7 @@ impl YTDugem {
             account_playlists_request: 0,
             account_playlists_loading: false,
             playlist_dialog: None,
+            delete_download: None,
             playlist_busy: false,
             playlist_pending: false,
             playlist_error: String::new(),
@@ -1136,10 +1139,17 @@ impl YTDugem {
                 })
                 .and_then(|path| services::import_local(&path))
                 .map(|mut tracks| {
-                    // Tags carry title and artist; the artwork comes from where it was found.
+                    // Tags carry title and artist; the artwork, and anything the tags lack,
+                    // comes from where it was found.
                     for t in &mut tracks {
                         if t.thumbnail.is_empty() {
                             t.thumbnail = track.thumbnail.clone();
+                        }
+                        if t.artist.is_empty() {
+                            t.artist = track.artist.clone();
+                        }
+                        if t.album.is_empty() {
+                            t.album = track.album.clone();
                         }
                     }
                     tracks
@@ -3625,11 +3635,7 @@ impl YTDugem {
                     match r {
                         Ok(ts) => {
                             let n = ts.len();
-                            for t in ts {
-                                if !self.library.local.iter().any(|s| s.key() == t.key()) {
-                                    self.library.local.push(t);
-                                }
-                            }
+                            merge_local(&mut self.library.local, ts);
                             self.message = format!("Imported {n} audio files");
                             self.navigate(Page::Local);
                             self.save();
@@ -3652,11 +3658,7 @@ impl YTDugem {
                         (Some(i), Ok(tracks)) => {
                             let d = self.downloads.remove(i);
                             self.message = format!("Downloaded {}", d.track.title);
-                            for t in tracks {
-                                if !self.library.local.iter().any(|s| s.key() == t.key()) {
-                                    self.library.local.push(t);
-                                }
-                            }
+                            merge_local(&mut self.library.local, tracks);
                             self.save();
                         }
                         (Some(i), Err(e)) => self.downloads[i].state = DownloadState::Failed(e),
@@ -4387,7 +4389,64 @@ impl YTDugem {
             self.download(track.clone());
             ui.close();
         }
+        if self.page == Page::Downloads && ui.button("Delete from computer").clicked() {
+            self.delete_download = Some(track.clone());
+            ui.close();
+        }
         self.playlist_row_menu(ui, track);
+    }
+    /// Confirm, then delete a downloaded file from disk (upstream has no equivalent: this is a
+    /// YTDugem addition). The file must sit in the download folder.
+    fn download_delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(track) = self.delete_download.clone() else {
+            return;
+        };
+        let mut close = false;
+        let mut confirmed = false;
+        egui::Window::new("Delete download")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_width(340.0);
+                ui.label(format!(
+                    "“{}” will be deleted from this computer, and removed from your local music and playlists.",
+                    track.title
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if confirmed {
+            self.delete_download_file(&track);
+        }
+        if confirmed || close {
+            self.delete_download = None;
+        }
+    }
+    fn delete_download_file(&mut self, track: &Track) {
+        let path = match services::delete_download(&track.source, &self.library.download_dir) {
+            Ok(path) => path,
+            Err(e) => {
+                self.message = format!("Could not delete {}: {e}", track.title);
+                return;
+            }
+        };
+        // Drop every entry for this file, including ones saved before path cleanup.
+        let gone = |t: &Track| services::plain_path(Path::new(&t.source)) == path;
+        self.library.local.retain(|t| !gone(t));
+        self.library.queue.retain(|t| !gone(t));
+        for p in &mut self.library.playlists {
+            p.tracks.retain(|t| !gone(t));
+        }
+        self.message = format!("Deleted {}", track.title);
+        self.save();
     }
     fn song_row(
         &mut self,
@@ -4792,7 +4851,10 @@ impl YTDugem {
                     .library
                     .local
                     .iter()
-                    .filter(|t| Path::new(&t.source).starts_with(&self.library.download_dir))
+                    .filter(|t| {
+                        services::plain_path(Path::new(&t.source))
+                            .starts_with(&self.library.download_dir)
+                    })
                     .cloned()
                     .collect();
                 self.track_list(ui, tracks, "Downloads");
@@ -4878,6 +4940,24 @@ mod fade_tests {
         for t in [0.1, 0.25, 0.5, 0.9, 2.0, -1.0] {
             let (old, new) = fade_gains(t);
             assert!((old * old + new * new - 1.0).abs() < 1e-9);
+        }
+    }
+}
+
+/// Add imported `tracks` to `local`. A file already there (matched by path, ignoring the Windows
+/// `\\?\` prefix older imports stored) is refreshed in place, keeping its artwork if the new
+/// entry has none, so re-importing repairs stale titles and artists.
+fn merge_local(local: &mut Vec<Track>, tracks: Vec<Track>) {
+    let path = |t: &Track| services::plain_path(Path::new(&t.source));
+    for mut t in tracks {
+        match local.iter_mut().find(|s| path(s) == path(&t)) {
+            Some(old) => {
+                if t.thumbnail.is_empty() {
+                    t.thumbnail = std::mem::take(&mut old.thumbnail);
+                }
+                *old = t;
+            }
+            None => local.push(t),
         }
     }
 }
@@ -5063,6 +5143,28 @@ mod playlist_tests {
             source: source.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn merge_local_refreshes_stale_imports() {
+        let mut old = track(r"\\?\C:\Music\a.opus", r"\\?\C:\Music\a.opus");
+        old.title = "a".into();
+        old.thumbnail = "art".into();
+        let mut local = vec![old];
+        let mut fresh = track(r"C:\Music\a.opus", r"C:\Music\a.opus");
+        fresh.title = "Real title".into();
+        fresh.artist = "Artist".into();
+        merge_local(
+            &mut local,
+            vec![fresh, track(r"C:\Music\b.opus", r"C:\Music\b.opus")],
+        );
+        assert_eq!(local.len(), 2);
+        assert_eq!(local[0].source, r"C:\Music\a.opus");
+        assert_eq!(
+            (&*local[0].title, &*local[0].artist),
+            ("Real title", "Artist")
+        );
+        assert_eq!(local[0].thumbnail, "art");
     }
 
     #[test]
@@ -5359,6 +5461,7 @@ impl eframe::App for YTDugem {
         self.palette(ctx);
         self.sign_in_dialog(ctx);
         self.playlist_dialog(ctx);
+        self.download_delete_dialog(ctx);
         self.screenshot_step(ctx);
     }
 }
