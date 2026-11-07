@@ -16,7 +16,6 @@ pub enum Icon {
     Previous,
     Shuffle,
     Repeat,
-    Heart,
     Queue,
     Lyrics,
     Volume,
@@ -29,6 +28,11 @@ pub enum Icon {
     Translate,
     Refresh,
     Close,
+    Edit,
+    Info,
+    Trash,
+    Plus,
+    Check,
 }
 
 /// White at `alpha` opacity, as egui 0.31's `Color32::from_white_alpha` made it: the opacity is
@@ -205,24 +209,6 @@ pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
             line((0.34, 0.3), (0.28, 0.55));
             line((0.65, 0.3), (0.59, 0.55));
         }
-        Icon::Heart => {
-            // Two open halves, notch to tip. As one closed line, the stroke's miter joins at the
-            // notch and the tip shot out as long spikes that read as stray lines.
-            let at = |i: usize| {
-                let t = i as f32 * std::f32::consts::TAU / 40.0;
-                let x = 16.0 * t.sin().powi(3);
-                let y = 13.0 * t.cos()
-                    - 5.0 * (2.0 * t).cos()
-                    - 2.0 * (3.0 * t).cos()
-                    - (4.0 * t).cos();
-                point(0.5 + x / 35.0, 0.43 - y / 35.0)
-            };
-            let stroke = Stroke::new(1.8_f32, color);
-            p.add(egui::Shape::line((0..=20).map(at).collect(), stroke));
-            p.add(egui::Shape::line((20..=40).map(at).collect(), stroke));
-            p.circle_filled(at(0), 0.9, color);
-            p.circle_filled(at(20), 0.9, color);
-        }
         Icon::Volume => {
             path(
                 &[
@@ -334,6 +320,46 @@ pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
         Icon::Close => {
             line((0.2, 0.2), (0.8, 0.8));
             line((0.8, 0.2), (0.2, 0.8));
+        }
+        Icon::Plus => {
+            line((0.5, 0.12), (0.5, 0.88));
+            line((0.12, 0.5), (0.88, 0.5));
+        }
+        Icon::Check => path(&[(0.12, 0.54), (0.4, 0.8), (0.9, 0.2)], false, false),
+        Icon::Edit => {
+            // A pencil on the diagonal with its tip at the lower left.
+            path(
+                &[
+                    (0.14, 0.86),
+                    (0.2, 0.62),
+                    (0.66, 0.16),
+                    (0.84, 0.34),
+                    (0.38, 0.8),
+                ],
+                true,
+                false,
+            );
+            line((0.55, 0.27), (0.73, 0.45));
+        }
+        Icon::Info => {
+            p.circle_stroke(r.center(), r.width() * 0.42, Stroke::new(1.8_f32, color));
+            line((0.5, 0.46), (0.5, 0.74));
+            p.circle_filled(point(0.5, 0.29), 1.3, color);
+        }
+        Icon::Trash => {
+            line((0.12, 0.22), (0.88, 0.22));
+            path(
+                &[(0.38, 0.22), (0.38, 0.08), (0.62, 0.08), (0.62, 0.22)],
+                false,
+                false,
+            );
+            path(
+                &[(0.2, 0.22), (0.27, 0.92), (0.73, 0.92), (0.8, 0.22)],
+                false,
+                false,
+            );
+            line((0.42, 0.42), (0.42, 0.72));
+            line((0.58, 0.42), (0.58, 0.72));
         }
         Icon::Repeat => {
             path(

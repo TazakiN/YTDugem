@@ -48,6 +48,8 @@ fn clean_playlist_name(name: &str) -> Result<String> {
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Library {
+    /// No longer shown (YouTube Music's own Liked Music playlist replaces it), but still saved
+    /// so songs liked in earlier versions are not erased from the library file.
     pub liked: Vec<Track>,
     pub local: Vec<Track>,
     pub history: Vec<Track>,
@@ -409,14 +411,6 @@ impl Library {
         std::fs::rename(temp, path).context("Cannot commit library")
     }
 
-    pub fn like(&mut self, track: &Track) {
-        if let Some(i) = self.liked.iter().position(|t| t.key() == track.key()) {
-            self.liked.remove(i);
-        } else {
-            self.liked.push(track.clone());
-        }
-    }
-
     pub fn remember(&mut self, track: &Track) {
         self.history.retain(|t| t.key() != track.key());
         self.history.insert(0, track.clone());
@@ -508,10 +502,7 @@ mod tests {
             ..Default::default()
         };
         let mut library = Library::default();
-        library.like(&t);
-        library.like(&t);
-        assert!(library.liked.is_empty());
-        library.like(&t);
+        library.liked.push(t.clone());
         library.remember(&t);
         library.remember(&t);
         library.save(&path).unwrap();

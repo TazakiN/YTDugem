@@ -39,7 +39,6 @@ enum Page {
     History,
     Downloads,
     Local,
-    Liked,
     Playlist(usize),
     Collection,
     Settings,
@@ -1409,13 +1408,13 @@ impl YTDugem {
         browse_id: Option<String>,
     ) {
         let enabled = !tracks.is_empty() && !self.bulk_loading;
-        for (label, action) in [
-            ("Play", PlaylistBulk::Play),
-            ("Shuffle", PlaylistBulk::Shuffle),
-            ("Add to queue", PlaylistBulk::Queue),
-            ("Download all", PlaylistBulk::Download),
+        for (icon, label, action) in [
+            (Icon::Play, "Play", PlaylistBulk::Play),
+            (Icon::Shuffle, "Shuffle", PlaylistBulk::Shuffle),
+            (Icon::Queue, "Add to queue", PlaylistBulk::Queue),
+            (Icon::Download, "Download all", PlaylistBulk::Download),
         ] {
-            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+            if icon_action(ui, enabled, icon, label).clicked() {
                 self.bulk(action, origin, tracks.to_vec(), browse_id.clone());
             }
         }
@@ -3825,20 +3824,22 @@ impl YTDugem {
             (Page::History, Icon::History, "History"),
             (Page::Downloads, Icon::Download, "Downloads"),
             (Page::Local, Icon::Library, "Local Music"),
-            (Page::Liked, Icon::Queue, "Liked Music"),
         ];
+        let rule = |ui: &egui::Ui, y: &mut f32| {
+            *y += 12.0;
+            ui.painter().line_segment(
+                [
+                    Pos2::new(rect.left() + 14.0, *y),
+                    Pos2::new(rect.right() - 14.0, *y),
+                ],
+                Stroke::new(1.0_f32, Color32::from_gray(42)),
+            );
+            *y += 12.0;
+        };
         let mut y = rect.top() + 108.0;
         for (i, (page, icon, label)) in rows.into_iter().enumerate() {
-            if i == 4 || i == 7 {
-                y += 12.0;
-                ui.painter().line_segment(
-                    [
-                        Pos2::new(rect.left() + 14.0, y),
-                        Pos2::new(rect.right() - 14.0, y),
-                    ],
-                    Stroke::new(1.0_f32, Color32::from_gray(42)),
-                );
-                y += 12.0;
+            if i == 4 {
+                rule(ui, &mut y);
             }
             let r = Rect::from_min_size(
                 Pos2::new(rect.left() + 14.0, y),
@@ -3853,6 +3854,7 @@ impl YTDugem {
             }
             y += 40.0;
         }
+        rule(ui, &mut y);
         let bottom = rect.bottom() - 67.0;
         if self.account.is_some()
             && self.account_playlists.is_none()
@@ -3887,11 +3889,11 @@ impl YTDugem {
                                     .browse_id
                                     .as_deref()
                                     .is_some_and(|b| open_id.as_deref() == b.strip_prefix("VL"));
-                                if nav_row(
+                                if nav_thumb_row(
                                     ui,
                                     r,
                                     ("account-playlist-nav", i),
-                                    Icon::Queue,
+                                    &p.thumbnail,
                                     &p.title,
                                     active,
                                 )
@@ -3900,23 +3902,33 @@ impl YTDugem {
                                     self.open_item(p.clone());
                                 }
                             }
-                            let locals: Vec<String> = self
+                            // Local playlists have no artwork of their own; the first track's
+                            // cover stands in for it.
+                            let locals: Vec<(String, String)> = self
                                 .library
                                 .playlists
                                 .iter()
-                                .map(|p| p.name.clone())
+                                .map(|p| {
+                                    let thumb = p
+                                        .tracks
+                                        .iter()
+                                        .map(|t| t.thumbnail.as_str())
+                                        .find(|t| t.starts_with("https://"))
+                                        .unwrap_or_default();
+                                    (p.name.clone(), thumb.to_owned())
+                                })
                                 .collect();
-                            for (i, name) in locals.iter().enumerate() {
+                            for (i, (name, thumb)) in locals.iter().enumerate() {
                                 let r = Rect::from_min_size(
                                     ui.cursor().min,
                                     Vec2::new(ui.available_width(), 35.0),
                                 );
                                 ui.allocate_space(r.size());
-                                if nav_row(
+                                if nav_thumb_row(
                                     ui,
                                     r,
                                     ("playlist", i),
-                                    Icon::Queue,
+                                    thumb,
                                     name,
                                     self.page == Page::Playlist(i),
                                 )
@@ -4261,19 +4273,6 @@ impl YTDugem {
             self.save();
             ui.close();
         }
-        let liked = self.library.liked.iter().any(|t| t.key() == track.key());
-        if ui
-            .button(if liked {
-                "Remove from Liked Music"
-            } else {
-                "Add to Liked Music"
-            })
-            .clicked()
-        {
-            self.library.like(track);
-            self.save();
-            ui.close();
-        }
         self.playlist_menu(ui, track);
         if ui.button("Download audio").clicked() {
             self.download(track.clone());
@@ -4543,18 +4542,21 @@ impl YTDugem {
                     }
                     ui.add_space(10.0);
                     let more = c.continuation.as_ref().map(|_| format!("VL{id}"));
-                    ui.horizontal_wrapped(|ui| self.bulk_buttons(ui, &c.title, &c.tracks, more));
-                    ui.add_space(4.0);
+                    // One row: what plays the playlist, a divider, then what manages it.
                     ui.horizontal_wrapped(|ui| {
+                        self.bulk_buttons(ui, &c.title, &c.tracks, more);
+                        if c.editable || c.saved.is_some() {
+                            toolbar_divider(ui);
+                        }
                         if c.editable {
-                            if ui.button("Rename").clicked() {
+                            if icon_action(ui, true, Icon::Edit, "Rename").clicked() {
                                 self.open_playlist_dialog(PlaylistDialog::Rename {
                                     id: id.clone(),
                                     name: c.title.clone(),
                                     current: c.title.clone(),
                                 });
                             }
-                            if ui.button("Edit description").clicked() {
+                            if icon_action(ui, true, Icon::Info, "Edit description").clicked() {
                                 self.open_playlist_dialog(PlaylistDialog::Description {
                                     id: id.clone(),
                                     text: c.description.clone(),
@@ -4588,22 +4590,19 @@ impl YTDugem {
                                     Ok(PlaylistEdit::Privacy { id, privacy })
                                 });
                             }
-                            if ui.button("Delete playlist").clicked() {
+                            if icon_action(ui, true, Icon::Trash, "Delete playlist").clicked() {
                                 self.open_playlist_dialog(PlaylistDialog::Delete {
                                     id: id.clone(),
                                     title: c.title.clone(),
                                 });
                             }
                         } else if let Some(saved) = c.saved {
-                            let label = if saved {
-                                "Remove from library"
+                            let (icon, label) = if saved {
+                                (Icon::Check, "Remove from library")
                             } else {
-                                "Save to library"
+                                (Icon::Plus, "Save to library")
                             };
-                            if ui
-                                .add_enabled(!self.playlist_busy, egui::Button::new(label))
-                                .clicked()
-                            {
+                            if icon_action(ui, !self.playlist_busy, icon, label).clicked() {
                                 let id = id.clone();
                                 self.edit_account_playlist(move || {
                                     services::set_playlist_saved(&id, !saved)?;
@@ -4672,9 +4671,6 @@ impl YTDugem {
                         self.navigate(Page::Playlist(i));
                     }
                 }
-                ui.add_space(24.0);
-                ui.label(heading("Liked Music", 20.0));
-                self.track_list(ui, self.library.liked.clone(), "Liked Music");
             }
             Page::History => self.track_list(ui, self.library.history.clone(), "History"),
             Page::Downloads => {
@@ -4710,7 +4706,6 @@ impl YTDugem {
                 ui.add_space(12.0);
                 self.track_list(ui, self.library.local.clone(), "Local music");
             }
-            Page::Liked => self.track_list(ui, self.library.liked.clone(), "Liked Music"),
             Page::Playlist(i) => {
                 let Some(p) = self.library.playlists.get(i).cloned() else {
                     self.page = Page::Library;
@@ -4721,14 +4716,15 @@ impl YTDugem {
                 ui.add_space(10.0);
                 ui.horizontal_wrapped(|ui| {
                     self.bulk_buttons(ui, &p.name, &p.tracks, None);
-                    if ui.button("Rename").clicked() {
+                    toolbar_divider(ui);
+                    if icon_action(ui, true, Icon::Edit, "Rename").clicked() {
                         self.open_playlist_dialog(PlaylistDialog::RenameLocal {
                             index: i,
                             name: p.name.clone(),
                             current: p.name.clone(),
                         });
                     }
-                    if ui.button("Delete").clicked() {
+                    if icon_action(ui, true, Icon::Trash, "Delete playlist").clicked() {
                         self.open_playlist_dialog(PlaylistDialog::DeleteLocal {
                             index: i,
                             title: p.name.clone(),
@@ -4986,31 +4982,6 @@ impl YTDugem {
                             egui::Label::new(RichText::new(artist).color(MUTED).size(16.0))
                                 .truncate(),
                         );
-                    });
-                    u.with_layout(egui::Layout::right_to_left(Align::Center), |u| {
-                        let liked = self
-                            .current
-                            .as_ref()
-                            .is_some_and(|t| self.library.liked.iter().any(|l| l.key() == t.key()));
-                        let like = u.add_enabled_ui(self.current.is_some(), |u| {
-                            widgets::button(
-                                u,
-                                Icon::Heart,
-                                40.0,
-                                liked,
-                                if liked {
-                                    "Remove from Liked Music"
-                                } else {
-                                    "Add to Liked Music"
-                                },
-                            )
-                        });
-                        if like.inner.clicked() {
-                            if let Some(t) = self.current.clone() {
-                                self.library.like(&t);
-                                self.save();
-                            }
-                        }
                     });
                 },
             );
@@ -6394,6 +6365,39 @@ fn nav_row(
     label: &str,
     selected: bool,
 ) -> egui::Response {
+    nav_row_with(ui, r, id, label, selected, |ui, color| {
+        widgets::paint(
+            ui.painter(),
+            icon,
+            Rect::from_min_size(r.min + Vec2::new(11.0, 10.0), Vec2::splat(18.0)),
+            color,
+        );
+    })
+}
+/// A sidebar playlist row: the playlist's artwork stands where `nav_row` draws its icon.
+fn nav_thumb_row(
+    ui: &mut egui::Ui,
+    r: Rect,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    thumbnail: &str,
+    label: &str,
+    selected: bool,
+) -> egui::Response {
+    nav_row_with(ui, r, id, label, selected, |ui, _| {
+        let side = (r.height() - 8.0).min(28.0);
+        let art =
+            Rect::from_center_size(Pos2::new(r.left() + 20.0, r.center().y), Vec2::splat(side));
+        draw_image(ui, thumbnail, art, None);
+    })
+}
+fn nav_row_with(
+    ui: &mut egui::Ui,
+    r: Rect,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    label: &str,
+    selected: bool,
+    leading: impl FnOnce(&mut egui::Ui, Color32),
+) -> egui::Response {
     let response = ui.interact(r, ui.make_persistent_id(id), egui::Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     if selected || response.hovered() {
@@ -6401,12 +6405,7 @@ fn nav_row(
             .rect_filled(r, 6.0, widgets::white_alpha(if selected { 30 } else { 12 }));
     }
     let color = if selected { WHITE } else { MUTED };
-    widgets::paint(
-        ui.painter(),
-        icon,
-        Rect::from_min_size(r.min + Vec2::new(11.0, 10.0), Vec2::splat(18.0)),
-        color,
-    );
+    leading(ui, color);
     fit_text(
         ui.painter(),
         Pos2::new(r.left() + 43.0, r.center().y),
@@ -6417,6 +6416,17 @@ fn nav_row(
         r.right() - r.left() - 51.0,
     );
     response
+}
+/// A round icon button whose label is its tooltip; disabled buttons dim instead of vanishing.
+fn icon_action(ui: &mut egui::Ui, enabled: bool, icon: Icon, label: &str) -> egui::Response {
+    ui.add_enabled_ui(enabled, |ui| widgets::button(ui, icon, 36.0, false, label))
+        .inner
+}
+fn toolbar_divider(ui: &mut egui::Ui) {
+    ui.add_space(6.0);
+    let (sep, _) = ui.allocate_exact_size(Vec2::new(1.0, 22.0), egui::Sense::hover());
+    ui.painter().rect_filled(sep, 0.0, Color32::from_gray(63));
+    ui.add_space(6.0);
 }
 fn draw_cover(
     ui: &mut egui::Ui,
