@@ -24,6 +24,7 @@ use std::{
 
 mod artist;
 mod explore;
+mod floating_bar;
 mod sheet;
 mod sheet_lyrics;
 mod sheet_menu;
@@ -2246,6 +2247,42 @@ impl YTDugem {
         let query = self.settings_query.trim().to_lowercase();
         let mut shown = false;
 
+        // Appearance
+        let rows = ["Playback controls"];
+        if let Some(q) = group_query(&query, "Appearance", &rows) {
+            shown = true;
+            settings_group(ui, "Appearance", |ui| {
+                if hit(&q, rows[0]) {
+                    setting_row(
+                        ui,
+                        rows[0],
+                        "Show the controls in the top bar or in a floating bar at the bottom of the window",
+                        |ui| {
+                            use store::PlayerBarStyle;
+                            let label = |style| match style {
+                                PlayerBarStyle::TopBar => "Top bar",
+                                PlayerBarStyle::Floating => "Floating bar",
+                            };
+                            let mut chosen = self.library.player_bar;
+                            egui::ComboBox::from_id_salt("player-bar-style")
+                                .width(280.0)
+                                .selected_text(label(chosen))
+                                .show_ui(ui, |ui| {
+                                    for style in [PlayerBarStyle::TopBar, PlayerBarStyle::Floating]
+                                    {
+                                        ui.selectable_value(&mut chosen, style, label(style));
+                                    }
+                                });
+                            if chosen != self.library.player_bar {
+                                self.library.player_bar = chosen;
+                                self.save();
+                            }
+                        },
+                    );
+                }
+            });
+        }
+
         // Playback
         let rows = [
             "Autoplay similar music",
@@ -4204,7 +4241,73 @@ impl YTDugem {
             self.navigate(Page::Settings);
         }
     }
+    /// Shuffle, previous, play/pause (a spinner while loading), next and repeat, or just the
+    /// middle three without `extras`. Shared by the top bar and the floating bar.
+    fn transport_buttons(&mut self, ui: &mut egui::Ui, t: Transport) {
+        if t.extras && widgets::button(ui, Icon::Shuffle, t.side, self.shuffle, "Shuffle").clicked()
+        {
+            self.shuffle = !self.shuffle;
+        }
+        if widgets::button(ui, t.previous, t.skip, false, "Previous · Alt+Left").clicked() {
+            self.previous();
+        }
+        if self.loading {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(t.play), egui::Sense::hover());
+            let spinner = t.play - 14.0;
+            egui::Spinner::new()
+                .size(spinner)
+                .color(WHITE)
+                .paint_at(ui, Rect::from_center_size(r.center(), Vec2::splat(spinner)));
+        } else if widgets::button(
+            ui,
+            if self.status.paused || self.current.is_none() {
+                Icon::Play
+            } else {
+                Icon::Pause
+            },
+            t.play,
+            false,
+            "Play / pause · Space",
+        )
+        .clicked()
+        {
+            self.toggle();
+        }
+        if widgets::button(ui, t.next, t.skip, false, "Next · Alt+Right").clicked() {
+            self.next(false);
+        }
+        if t.extras
+            && widgets::button(
+                ui,
+                Icon::Repeat,
+                t.side,
+                self.repeat > 0,
+                if self.repeat == 2 {
+                    "Repeat one"
+                } else {
+                    "Repeat"
+                },
+            )
+            .clicked()
+        {
+            self.repeat = (self.repeat + 1) % 3;
+        }
+    }
+    fn settings_button(&mut self, ui: &mut egui::Ui) {
+        if widgets::button(
+            ui,
+            Icon::Headphones,
+            30.0,
+            false,
+            "Audio output and playback settings",
+        )
+        .clicked()
+        {
+            self.navigate(Page::Settings);
+        }
+    }
     fn topbar(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let floating = self.library.player_bar == store::PlayerBarStyle::Floating;
         ui.painter().rect_filled(rect, 0.0, SIDE);
         ui.painter().line_segment(
             [rect.left_bottom(), rect.right_bottom()],
@@ -4258,57 +4361,31 @@ impl YTDugem {
                             self.page = p;
                         }
                     }
-                    if widgets::button(ui, Icon::Shuffle, 30.0, self.shuffle, "Shuffle").clicked() {
-                        self.shuffle = !self.shuffle;
-                    }
-                    if widgets::button(ui, Icon::Previous, 32.0, false, "Previous · Alt+Left")
-                        .clicked()
-                    {
-                        self.previous();
-                    }
-                    if self.loading {
-                        let (r, _) =
-                            ui.allocate_exact_size(Vec2::splat(34.0), egui::Sense::hover());
-                        egui::Spinner::new()
-                            .size(20.0)
-                            .color(WHITE)
-                            .paint_at(ui, Rect::from_center_size(r.center(), Vec2::splat(20.0)));
-                    } else if widgets::button(
-                        ui,
-                        if self.status.paused || self.current.is_none() {
-                            Icon::Play
-                        } else {
-                            Icon::Pause
-                        },
-                        34.0,
-                        false,
-                        "Play / pause · Space",
-                    )
-                    .clicked()
-                    {
-                        self.toggle();
-                    }
-                    if widgets::button(ui, Icon::Next, 32.0, false, "Next · Alt+Right").clicked() {
-                        self.next(false);
-                    }
-                    if widgets::button(
-                        ui,
-                        Icon::Repeat,
-                        30.0,
-                        self.repeat > 0,
-                        if self.repeat == 2 {
-                            "Repeat one"
-                        } else {
-                            "Repeat"
-                        },
-                    )
-                    .clicked()
-                    {
-                        self.repeat = (self.repeat + 1) % 3;
+                    if !floating {
+                        self.transport_buttons(ui, Transport::TOP_BAR);
                     }
                 });
             },
         );
+        if floating {
+            // Only the tools that are not playback controls stay; those moved to the floating bar.
+            region(
+                ui,
+                Rect::from_min_size(
+                    Pos2::new(rect.right() - 84.0, rect.top() + 26.0),
+                    Vec2::new(72.0, 40.0),
+                ),
+                |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        self.settings_button(ui);
+                        self.account_button(ui);
+                    });
+                },
+            );
+            window_controls(ui, rect);
+            return;
+        }
         let tools_width = if rect.width() < 900.0 { 160.0 } else { 282.0 };
         let card_left = rect.left() + 300.0;
         let card_right = rect.right() - tools_width - 12.0;
@@ -4396,17 +4473,7 @@ impl YTDugem {
                         widgets::paint(ui.painter(), Icon::Volume, r, MUTED);
                         self.volume_slider(ui, 76.0, "top-volume");
                     }
-                    if widgets::button(
-                        ui,
-                        Icon::Headphones,
-                        30.0,
-                        false,
-                        "Audio output and playback settings",
-                    )
-                    .clicked()
-                    {
-                        self.navigate(Page::Settings);
-                    }
+                    self.settings_button(ui);
                     if widgets::button(
                         ui,
                         Icon::Lyrics,
@@ -5532,6 +5599,9 @@ impl eframe::App for YTDugem {
                         .inner_margin(egui::Margin::same(28)),
                 )
                 .show(ui, |ui| {
+                    let floating = self.library.player_bar == store::PlayerBarStyle::Floating;
+                    // The whole panel, margin included: the floating bar is placed in it.
+                    let page = ui.max_rect().expand(28.0);
                     // One scroll position per page: opening Settings from a scrolled Home page
                     // used to land halfway down it.
                     egui::ScrollArea::vertical()
@@ -5542,7 +5612,14 @@ impl eframe::App for YTDugem {
                                 ui.label(RichText::new(&self.message).color(MUTED));
                             }
                             self.content(ui);
+                            if floating {
+                                // Room to scroll the last row out from under the floating bar.
+                                ui.add_space(floating_bar::RESERVED);
+                            }
                         });
+                    if floating {
+                        self.floating_bar(ui, page, shown);
+                    }
                 });
         }
         if shown > 0.0 {
@@ -5796,6 +5873,25 @@ fn soft_controls(ui: &mut egui::Ui) {
     let selection = &mut ui.visuals_mut().selection;
     selection.bg_fill = Color32::from_gray(236);
     selection.stroke.color = Color32::from_rgb(20, 21, 19);
+}
+/// Sizes and glyphs of the transport row (see `YTDugem::transport_buttons`).
+struct Transport {
+    side: f32,
+    skip: f32,
+    play: f32,
+    previous: Icon,
+    next: Icon,
+    extras: bool,
+}
+impl Transport {
+    const TOP_BAR: Self = Self {
+        side: 30.0,
+        skip: 32.0,
+        play: 34.0,
+        previous: Icon::Previous,
+        next: Icon::Next,
+        extras: true,
+    };
 }
 fn region<R>(ui: &mut egui::Ui, rect: Rect, f: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let mut child = ui.new_child(
