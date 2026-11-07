@@ -87,6 +87,24 @@ pub struct Library {
     /// One of `services::DOWNLOAD_FORMATS`; unknown values fall back to `best`.
     #[serde(default = "download_format_default")]
     pub download_format: String,
+    /// Where the playback controls live: the original top bar, or a floating bar at the bottom.
+    #[serde(default, deserialize_with = "deserialize_player_bar")]
+    pub player_bar: PlayerBarStyle,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayerBarStyle {
+    #[default]
+    TopBar,
+    Floating,
+}
+
+/// Unknown or malformed values fall back to the top bar instead of failing the whole library.
+fn deserialize_player_bar<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<PlayerBarStyle, D::Error> {
+    serde_json::Value::deserialize(d).map(|value| serde_json::from_value(value).unwrap_or_default())
 }
 
 fn download_format_default() -> String {
@@ -328,6 +346,7 @@ impl Default for Library {
             close_to_tray: false,
             translation_language: String::new(),
             download_format: download_format_default(),
+            player_bar: PlayerBarStyle::default(),
             download_dir: directories::UserDirs::new()
                 .and_then(|d| d.audio_dir().map(Path::to_path_buf))
                 .unwrap_or_else(|| PathBuf::from("."))
@@ -486,6 +505,26 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_bar_defaults_roundtrips_and_tolerates_unknown_values() {
+        assert_eq!(Library::default().player_bar, PlayerBarStyle::TopBar);
+        let old: Library = serde_json::from_str(r#"{"volume":70.0}"#).unwrap();
+        assert_eq!(old.player_bar, PlayerBarStyle::TopBar);
+        let mut library = Library::default();
+        library.player_bar = PlayerBarStyle::Floating;
+        let json = serde_json::to_string(&library).unwrap();
+        assert!(json.contains(r#""player_bar":"floating""#));
+        let read: Library = serde_json::from_str(&json).unwrap();
+        assert_eq!(read.player_bar, PlayerBarStyle::Floating);
+        for bad in [r#""sideways""#, "42", "null", r#"{"x":1}"#] {
+            let lib: Library =
+                serde_json::from_str(&format!(r#"{{"volume":55.0,"player_bar":{bad}}}"#)).unwrap();
+            assert_eq!(lib.player_bar, PlayerBarStyle::TopBar);
+            assert_eq!(lib.volume, 55.0);
+        }
+    }
+
     #[test]
     fn library_roundtrip_and_corruption_is_not_silently_discarded() {
         let dir = std::env::temp_dir().join(format!("bitchord-store-test-{}", std::process::id()));
