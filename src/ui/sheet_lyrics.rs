@@ -315,7 +315,7 @@ impl YTDugem {
                         ui.add(egui::Spinner::new().size(22.0).color(MUTED));
                         ui.add_space(10.0);
                     }
-                    ui.label(
+                    let message = ui.label(
                         RichText::new(if self.current.is_none() {
                             "Play a song to see its lyrics"
                         } else if self.lyrics_message.is_empty() {
@@ -324,8 +324,11 @@ impl YTDugem {
                             &self.lyrics_message
                         })
                         .color(MUTED)
-                        .size(15.0),
+                        .size(17.0),
                     );
+                    if !waiting && !self.lyrics_detail.is_empty() {
+                        message.on_hover_text(self.lyrics_detail.replace("; ", "\n"));
+                    }
                     if !waiting && self.current.is_some() && self.library.lyrics_enabled {
                         ui.add_space(10.0);
                         if ui.button("Try again").clicked() {
@@ -621,7 +624,32 @@ fn sub_lyric(
     let (Some(progress), true) = (reveal.sparkle, sparkle) else {
         return;
     };
-    let painter = ui.painter();
+    // The motes belong to the sub-line: drawn under its clip (upstream draws them inside the
+    // revealing layer), so none rises over the lyric above while the line slides in, and at
+    // the sub-line's own opacity, so a dim or unlit line does not get bright specks.
+    let mut painter = painter;
+    painter.multiply_opacity(SUB_ALPHA * open * alpha);
+    // On real letters, as upstream anchors them on glyph boxes: a point picked anywhere in the
+    // text's bounding box lands in the empty end of a wrapped row or between words.
+    let letters: Vec<Pos2> = galley
+        .rows
+        .iter()
+        .flat_map(|placed| {
+            placed
+                .row
+                .glyphs
+                .iter()
+                .filter(|g| g.chr.is_alphanumeric())
+                .map(move |g| {
+                    text_rect.min
+                        + placed.pos.to_vec2()
+                        + Vec2::new(g.pos.x + g.advance_width / 2.0, placed.row.size.y * 0.55)
+                })
+        })
+        .collect();
+    if letters.is_empty() {
+        return;
+    }
     let mut seed = text
         .bytes()
         .fold(index as u32 ^ 0x9e37_79b9, |h, b| {
@@ -636,10 +664,7 @@ fn sub_lyric(
         (seed % 10_000) as f32 / 10_000.0
     };
     for _ in 0..PARTICLES {
-        let anchor = Pos2::new(
-            text_rect.left() + random() * text_rect.width(),
-            text_rect.top() + (0.2 + random() * 0.6) * text_rect.height(),
-        );
+        let anchor = letters[((random() * letters.len() as f32) as usize).min(letters.len() - 1)];
         let drift = Vec2::new((random() - 0.5) * 12.0, -(5.0 + random() * 11.0));
         let radius = 0.65 + random() * 0.65;
         let delay = 0.16 * random();
@@ -1051,6 +1076,28 @@ fn stamp_opacities(alpha: f32) -> [f32; 3] {
     BLUR_WEIGHTS.map(|w| s * w)
 }
 
+/// Said when no source has lyrics for the song: most often a video or a track nobody has
+/// transcribed, which is nothing to apologise for in provider error codes.
+const NO_LYRICS_LINES: [&str; 8] = [
+    "No lyrics for this one. Just enjoy the music",
+    "This track is keeping its words to itself",
+    "Couldn't find the words this time",
+    "No lyrics here. Sing along anyway?",
+    "The lyrics are taking a break",
+    "Nothing to read, just listen",
+    "This one speaks without words",
+    "No words found. Hum it your way",
+];
+
+/// One of the no-lyrics lines, picked afresh each time a lookup comes back empty.
+pub(super) fn no_lyrics_line() -> &'static str {
+    use rand::seq::IndexedRandom;
+    NO_LYRICS_LINES
+        .choose(&mut rand::rng())
+        .copied()
+        .unwrap_or(NO_LYRICS_LINES[0])
+}
+
 /// How far along the current mode's extra text is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Prep {
@@ -1153,6 +1200,15 @@ mod tests {
         assert_eq!(line_falloff(true, false, Some(5), 40), (0.46, 2.85));
         // With nothing to measure from (a short intro) nothing recedes.
         assert_eq!(line_falloff(true, false, None, 40), (1.0, 0.0));
+    }
+
+    #[test]
+    fn no_lyrics_lines_are_short_and_plain() {
+        for _ in 0..20 {
+            let line = no_lyrics_line();
+            assert!(NO_LYRICS_LINES.contains(&line));
+            assert!(!line.contains("HTTP") && line.len() < 60);
+        }
     }
 
     #[test]

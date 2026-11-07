@@ -143,6 +143,8 @@ pub struct YTDugem {
     repeat: u8,
     lyrics: Vec<LyricLine>,
     lyrics_message: String,
+    /// Why the last lookup found nothing, provider by provider; shown on hover only.
+    lyrics_detail: String,
     lyrics_provider: String,
     lyrics_override: Option<String>,
     lyrics_request: u64,
@@ -371,6 +373,7 @@ impl YTDugem {
             repeat: 0,
             lyrics: vec![],
             lyrics_message: String::new(),
+            lyrics_detail: String::new(),
             lyrics_provider: String::new(),
             lyrics_override: None,
             lyrics_request: 0,
@@ -674,6 +677,7 @@ impl YTDugem {
         self.lyrics.clear();
         self.lyrics_provider.clear();
         self.lyrics_message = "Finding lyrics…".into();
+        self.lyrics_detail.clear();
         self.translation_request += 1;
         self.translation = None;
         self.translating = false;
@@ -2138,9 +2142,20 @@ impl YTDugem {
     /// Settings, grouped as upstream's `DesktopSettingsSection`s: titled groups of rows, each a
     /// title and explanation on the left and its control on the right, filtered by a search box.
     fn settings_view(&mut self, ui: &mut egui::Ui) {
+        // Centre the 820 px column in the page: a gutter as wide as the space left beside it.
+        let gutter = ((ui.available_width() - 820.0) / 2.0).max(0.0);
+        ui.horizontal_top(|ui| {
+            ui.add_space(gutter);
+            ui.vertical(|ui| {
+                ui.set_max_width(820.0);
+                self.settings_body(ui);
+            });
+        });
+    }
+
+    fn settings_body(&mut self, ui: &mut egui::Ui) {
         self.load_lyrics_keys();
         self.load_audio_devices();
-        ui.set_max_width(820.0);
         ui.horizontal(|ui| {
             ui.label(heading("Settings", 26.0));
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -3663,7 +3678,11 @@ impl YTDugem {
                                 LyricsMode::Original => {}
                             }
                         }
-                        Err(e) => self.lyrics_message = e,
+                        // The providers' reasons are for whoever asks; the pane says it plainly.
+                        Err(e) => {
+                            self.lyrics_message = sheet_lyrics::no_lyrics_line().into();
+                            self.lyrics_detail = e;
+                        }
                     }
                 }
                 Event::Artwork(key, Ok((cover, back)))
