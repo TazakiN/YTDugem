@@ -441,7 +441,15 @@ impl YTDugem {
                                 if chars > 0.0 && chars < total {
                                     animating = true;
                                     let lit = lyric_galley(u, line, true);
-                                    paint_sweep(u.painter(), rect.min, &galley, &lit, sweep, alpha);
+                                    paint_sweep(
+                                        u.painter(),
+                                        rect.min,
+                                        &galley,
+                                        &lit,
+                                        sweep,
+                                        alpha,
+                                        WIPE_FEATHER,
+                                    );
                                 } else {
                                     paint_blurred(u.painter(), rect.min, &galley, alpha, blur);
                                 }
@@ -696,7 +704,7 @@ const FALLOFF_BLUR: [f32; 5] = [0.0, 1.2, 1.2, 2.0, 2.85];
 /// Upstream `LYRIC_SETTLE_MS`.
 const LYRIC_SETTLE: f32 = 0.4;
 /// How bright words not sung yet are: a line lights up only as the song reaches it.
-const UNSUNG_ALPHA: f32 = 0.45;
+pub(super) const UNSUNG_ALPHA: f32 = 0.45;
 /// Upstream `WIPE_FEATHER` (30 dp), scaled for our slightly smaller 30 pt font.
 const WIPE_FEATHER: f32 = 26.0;
 /// Slices the feathered edge of the sweep is cut into.
@@ -805,10 +813,10 @@ fn extrapolate(reading: f64, since: f64, playing: bool) -> f64 {
 }
 
 impl YTDugem {
-    fn status_playing(&self) -> bool {
+    pub(super) fn status_playing(&self) -> bool {
         self.player.is_active() && !self.status.paused && !self.status.ended
     }
-    fn playhead(&self, ctx: &egui::Context) -> f64 {
+    pub(super) fn playhead(&self, ctx: &egui::Context) -> f64 {
         let id = egui::Id::unique("lyrics-playhead");
         let now = ctx.input(|i| i.time);
         let reading = self.status.position;
@@ -839,7 +847,7 @@ fn line_falloff(synced: bool, active: bool, focus: Option<usize>, index: usize) 
 }
 
 /// The text a line is drawn with: its words joined by single spaces when it has word timings.
-fn line_text(line: &LyricLine) -> String {
+pub(super) fn line_text(line: &LyricLine) -> String {
     if line.words.is_empty() {
         line.text.clone()
     } else {
@@ -856,7 +864,7 @@ fn line_text(line: &LyricLine) -> String {
 /// between two words it is the space after the first, filling over the pause (as upstream
 /// `revealedChars`). A line without word timings lights whole when it is reached.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Sweep {
+pub(super) struct Sweep {
     from: usize,
     to: usize,
     t: f32,
@@ -868,12 +876,12 @@ impl Sweep {
         to: usize::MAX / 2,
         t: 1.0,
     };
-    fn chars(self) -> f32 {
+    pub(super) fn chars(self) -> f32 {
         self.from as f32 + (self.to - self.from) as f32 * self.t
     }
 }
 
-fn line_sweep(line: &LyricLine, position: f64) -> Sweep {
+pub(super) fn line_sweep(line: &LyricLine, position: f64) -> Sweep {
     let total = line_text(line).chars().count();
     let at = |n: usize, t: f32| Sweep { from: n, to: n, t };
     if line.words.is_empty() {
@@ -928,13 +936,14 @@ fn row_x(glyphs: &[(f32, f32)], chars: f32) -> f32 {
 /// The lit copy of a line over its unlit one, revealed up to `sweep` with a feathered leading
 /// edge: per row, everything left of the edge is lit, and the last `WIPE_FEATHER` of it fades
 /// out in slices (upstream `sweepTo`). Rows wrap, so each is cut on its own.
-fn paint_sweep(
+pub(super) fn paint_sweep(
     painter: &egui::Painter,
     origin: Pos2,
     dim: &Arc<egui::Galley>,
     lit: &Arc<egui::Galley>,
     sweep: Sweep,
     alpha: f32,
+    feather: f32,
 ) {
     let mut base = painter.clone();
     base.multiply_opacity(alpha);
@@ -979,7 +988,7 @@ fn paint_sweep(
             p.galley(origin, lit.clone(), Color32::WHITE);
             continue;
         };
-        let feather_from = (edge - WIPE_FEATHER).max(row_left);
+        let feather_from = (edge - feather).max(row_left);
         let mut solid =
             painter.with_clip_rect(band(min, feather_from).intersect(painter.clip_rect()));
         solid.multiply_opacity(alpha);

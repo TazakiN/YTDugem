@@ -21,6 +21,117 @@ const DISMISS_VELOCITY: f32 = 1600.0;
 /// The sleeve shrinks a little while paused (upstream `ARTWORK_PAUSE_SHRINK_SCALE`).
 const PAUSED_ART_SCALE: f32 = 0.88;
 
+/// Upstream's 340 ms lyric strip transition.
+const STRIP_TRANSITION: f32 = 0.34;
+
+/// One line of the lyric strip: a lyric (swept as sung when synced) or a muted phrase.
+#[derive(Clone)]
+struct StripLine {
+    text: String,
+    intro: bool,
+    sweep: Option<sheet_lyrics::Sweep>,
+}
+
+impl StripLine {
+    fn phrase(text: &str) -> (String, StripLine) {
+        (
+            text.to_owned(),
+            StripLine {
+                text: text.to_owned(),
+                intro: true,
+                sweep: None,
+            },
+        )
+    }
+
+    /// Paints the line `dy` below its place at `opacity`; true while its sweep is under way.
+    fn paint(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        dy: f32,
+        opacity: f32,
+        hovered: bool,
+    ) -> bool {
+        if opacity <= 0.0 {
+            return false;
+        }
+        let mut painter = painter.clone();
+        painter.multiply_opacity(opacity);
+        let y = rect.center().y + dy;
+        let color = if self.intro {
+            Color32::from_white_alpha(150)
+        } else {
+            WHITE
+        };
+        let mut left = rect.left();
+        if self.intro {
+            widgets::paint(
+                &painter,
+                Icon::Music,
+                Rect::from_min_size(Pos2::new(left + 2.0, y - 9.0), Vec2::splat(18.0)),
+                color,
+            );
+            left += 28.0;
+        }
+        let font = FontId::new(18.0, egui::FontFamily::Name("bold".into()));
+        let max_width = rect.right() - left - 30.0;
+        let mut sweeping = false;
+        let drawn = match self.sweep {
+            Some(sweep) => {
+                // One line cut to fit, laid out twice: unlit underneath, lit swept over it.
+                let layout = |color: Color32| {
+                    let mut job = egui::text::LayoutJob::single_section(
+                        self.text.clone(),
+                        egui::TextFormat::simple(font.clone(), color),
+                    );
+                    job.wrap = egui::text::TextWrapping {
+                        max_width: max_width.max(8.0),
+                        max_rows: 1,
+                        break_anywhere: true,
+                        overflow_character: Some('…'),
+                    };
+                    painter.layout_job(job)
+                };
+                let dim = layout(WHITE.gamma_multiply(sheet_lyrics::UNSUNG_ALPHA));
+                let lit = layout(WHITE);
+                let at = egui::Align2::LEFT_CENTER.anchor_size(Pos2::new(left, y), lit.size());
+                let chars = sweep.chars();
+                sweeping = chars > 0.0 && chars < self.text.chars().count() as f32;
+                // The feather scaled from the pane's 30 pt lines to this 18 pt one.
+                sheet_lyrics::paint_sweep(&painter, at.min, &dim, &lit, sweep, 1.0, 16.0);
+                at
+            }
+            None => fit_text(
+                &painter,
+                Pos2::new(left, y),
+                egui::Align2::LEFT_CENTER,
+                &self.text,
+                font,
+                color,
+                max_width,
+            ),
+        };
+        widgets::paint(
+            &painter,
+            Icon::CaretRight,
+            Rect::from_min_size(Pos2::new(drawn.right() + 8.0, y - 7.0), Vec2::splat(14.0)),
+            Color32::from_white_alpha(if hovered { 230 } else { 150 }),
+        );
+        sweeping
+    }
+}
+
+/// Which strip line is shown and since when, and the one leaving while the new one comes in.
+#[derive(Clone, Default)]
+struct StripTransition {
+    shown: Option<String>,
+    since: f64,
+    started: bool,
+    last: Option<StripLine>,
+    leaving: Option<StripLine>,
+}
+
 /// Shown in the lyric strip before the first line is sung (upstream `lyrics_intro_lines`).
 const INTRO_LINES: [&str; 11] = [
     "The song is starting",
@@ -698,70 +809,88 @@ impl YTDugem {
     }
 
     /// The current lyric on one line above the scrubber, or the line saying why there isn't
-    /// one; a click opens the lyrics (upstream `CurrentLyricStrip`).
+    /// one; a click opens the lyrics (upstream `CurrentLyricStrip`). A new line slides up into
+    /// place as the old one leaves upwards, both fading (upstream `currentLyricTransition`).
     fn lyric_strip(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let Some(key) = self.current.as_ref().map(|t| t.key().to_owned()) else {
             return;
         };
-        let position = self.status.position;
-        let (text, intro) = if !self.lyrics.is_empty() {
+        let position = self.playhead(ui.ctx());
+        // What is shown, and which one it is: a lyric by its index, a phrase by its text.
+        let line = if !self.lyrics.is_empty() {
             match self.lyrics.iter().rposition(|l| position >= l.time) {
                 Some(i) if !self.lyrics[i].text.trim().is_empty() => {
-                    (self.lyrics[i].text.clone(), false)
+                    let line = &self.lyrics[i];
+                    // Synced lyrics light up as they are sung, as in the lyrics pane.
+                    let synced = self.lyrics.iter().any(|l| l.time > 0.0);
+                    Some((
+                        format!("{key}#{i}"),
+                        StripLine {
+                            text: sheet_lyrics::line_text(line),
+                            intro: false,
+                            sweep: synced.then(|| sheet_lyrics::line_sweep(line, position)),
+                        },
+                    ))
                 }
-                Some(_) => return,
-                None => (phrase(&INTRO_LINES, &key).to_owned(), true),
+                Some(_) => None,
+                None => Some(StripLine::phrase(phrase(&INTRO_LINES, &key))),
             }
         } else if self.library.lyrics_enabled && self.lyrics_message.starts_with("Finding") {
-            (phrase(&LOADING_LINES, &key).to_owned(), true)
+            Some(StripLine::phrase(phrase(&LOADING_LINES, &key)))
         } else {
-            return;
+            None
         };
-        let response = ui
-            .interact(
+        let (shown, line) = match line {
+            Some((id, line)) => (Some(id), Some(line)),
+            None => (None, None),
+        };
+
+        let ctx = ui.ctx().clone();
+        let now = ctx.input(|i| i.time);
+        let state_id = ui.scope_id().with("lyric-strip-transition");
+        let mut state: StripTransition = ctx.data(|d| d.get_temp(state_id)).unwrap_or_default();
+        if state.shown != shown {
+            // Only a line that was on screen leaves; the very first one just appears.
+            state.leaving = if state.started {
+                state.last.take()
+            } else {
+                None
+            };
+            state.shown = shown;
+            state.since = now;
+        }
+        state.started = true;
+        state.last = line.clone();
+        let t = ((now - state.since) as f32 / STRIP_TRANSITION).clamp(0.0, 1.0);
+        let eased = egui::emath::easing::cubic_out(t);
+        if t >= 1.0 {
+            state.leaving = None;
+        } else {
+            ctx.request_repaint();
+        }
+        let shift = rect.height() * 0.35;
+
+        let response = line.as_ref().map(|_| {
+            ui.interact(
                 rect,
                 ui.scope_id().with("lyric-strip"),
                 egui::Sense::click(),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Open lyrics");
-        let color = if intro {
-            Color32::from_white_alpha(150)
-        } else {
-            WHITE
-        };
-        let mut left = rect.left();
-        if intro {
-            widgets::paint(
-                ui.painter(),
-                Icon::Music,
-                Rect::from_min_size(
-                    Pos2::new(left + 2.0, rect.center().y - 9.0),
-                    Vec2::splat(18.0),
-                ),
-                color,
-            );
-            left += 28.0;
+            .on_hover_text("Open lyrics")
+        });
+        let hovered = response.as_ref().is_some_and(|r| r.hovered());
+        if let Some(old) = &state.leaving {
+            old.paint(ui.painter(), rect, -shift * eased, 1.0 - eased, hovered);
         }
-        let drawn = fit_text(
-            ui.painter(),
-            Pos2::new(left, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            &text,
-            FontId::new(18.0, egui::FontFamily::Name("bold".into())),
-            color,
-            rect.right() - left - 30.0,
-        );
-        widgets::paint(
-            ui.painter(),
-            Icon::CaretRight,
-            Rect::from_min_size(
-                Pos2::new(drawn.right() + 8.0, rect.center().y - 7.0),
-                Vec2::splat(14.0),
-            ),
-            Color32::from_white_alpha(if response.hovered() { 230 } else { 150 }),
-        );
-        if response.clicked() {
+        if let Some(line) = &line {
+            let sweeping = line.paint(ui.painter(), rect, shift * (1.0 - eased), eased, hovered);
+            if sweeping && self.status_playing() {
+                ctx.request_repaint();
+            }
+        }
+        ctx.data_mut(|d| d.insert_temp(state_id, state));
+        if response.is_some_and(|r| r.clicked()) {
             self.tab = PlayerPane::Lyrics;
         }
     }
