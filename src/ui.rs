@@ -22,6 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod album;
 mod artist;
 mod explore;
 mod floating_bar;
@@ -3752,7 +3753,17 @@ impl YTDugem {
                     match r {
                         Ok(c) => {
                             if let Some(old) = self.collection.as_mut() {
-                                old.tracks.extend(c.tracks);
+                                let mut tracks = c.tracks;
+                                // Continuation pages have no header: reuse the page's cover and album title.
+                                for t in &mut tracks {
+                                    if t.thumbnail.is_empty() {
+                                        t.thumbnail = old.thumbnail.clone();
+                                    }
+                                    if old.is_album && t.album.is_empty() {
+                                        t.album = old.title.clone();
+                                    }
+                                }
+                                old.tracks.extend(tracks);
                                 old.set_ids.extend(c.set_ids);
                                 old.continuation = c.continuation;
                             } else {
@@ -4832,6 +4843,10 @@ impl YTDugem {
     }
     fn collection_view(&mut self, ui: &mut egui::Ui) {
         if let Some(c) = self.collection.clone() {
+            if c.is_album {
+                self.album_view(ui, c);
+                return;
+            }
             let playlist_id = c.playlist_id.clone();
             ui.horizontal_top(|ui| {
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(155.0), egui::Sense::hover());

@@ -110,6 +110,8 @@ pub struct Collection {
     /// The header's artist credit (an album's artists), as written, and its linked artists.
     pub credit: Option<String>,
     pub artists: Vec<ArtistRef>,
+    /// An album page (browse id `MPREb…`), as opposed to a playlist.
+    pub is_album: bool,
 }
 
 fn client() -> Result<reqwest::blocking::Client> {
@@ -349,6 +351,7 @@ fn continuation(v: &Value) -> Option<String> {
 fn thumbnails(v: &Value) -> String {
     v.pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails")
         .or_else(|| v.pointer("/thumbnailRenderer/musicThumbnailRenderer/thumbnail/thumbnails"))
+        .or_else(|| v.pointer("/thumbnail/croppedSquareThumbnailRenderer/thumbnail/thumbnails"))
         .and_then(Value::as_array)
         .and_then(|a| a.last())
         .and_then(|x| x["url"].as_str())
@@ -731,6 +734,12 @@ pub fn collection(browse_id: &str, params: Option<&str>) -> Result<Collection> {
     let v = innertube_value("browse", b)?;
     let mut collection = parse_collection(&v);
     collection.playlist_id = browse_id.strip_prefix("VL").map(str::to_owned);
+    collection.is_album = browse_id.starts_with("MPREb");
+    if collection.is_album {
+        for track in collection.tracks.iter_mut().filter(|t| t.album.is_empty()) {
+            track.album = collection.title.clone();
+        }
+    }
     Ok(collection)
 }
 pub fn collection_more(token: &str) -> Result<Collection> {
@@ -752,12 +761,20 @@ fn parse_collection(v: &Value) -> Collection {
             track.artists = artists.clone();
         }
     }
+    // Album rows carry no cover of their own: the page header holds it.
+    let thumbnail = thumbnails(header);
+    if !thumbnail.is_empty() {
+        for track in tracks.iter_mut().filter(|t| t.thumbnail.is_empty()) {
+            track.thumbnail = thumbnail.clone();
+        }
+    }
     Collection {
         credit,
         artists,
         title: text(&header["title"]),
         subtitle: text(&header["subtitle"]),
-        thumbnail: thumbnails(header),
+        thumbnail,
+        is_album: false,
         tracks,
         continuation: continuation(v),
         playlist_id: None,
@@ -2383,6 +2400,30 @@ mod tests {
         assert_eq!(tracks[0].duration, 123.0);
     }
     #[test]
+    fn album_tracks_inherit_the_header_cover() {
+        let row = |id: &str| {
+            json!({"musicResponsiveListItemRenderer":{
+            "flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Song","navigationEndpoint":{"watchEndpoint":{"videoId":id}}}]}}}],
+            "playlistItemData":{"videoId":id}}})
+        };
+        let own = json!({"musicResponsiveListItemRenderer":{
+            "thumbnail":{"musicThumbnailRenderer":{"thumbnail":{"thumbnails":[{"url":"own"}]}}},
+            "flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Own","navigationEndpoint":{"watchEndpoint":{"videoId":"ownownownow"}}}]}}}],
+            "playlistItemData":{"videoId":"ownownownow"}}});
+        for header in [
+            json!({"musicResponsiveHeaderRenderer":{"title":{"runs":[{"text":"Album"}]},"thumbnail":{"musicThumbnailRenderer":{"thumbnail":{"thumbnails":[{"url":"small"},{"url":"cover"}]}}}}}),
+            json!({"musicDetailHeaderRenderer":{"title":{"runs":[{"text":"Album"}]},"thumbnail":{"croppedSquareThumbnailRenderer":{"thumbnail":{"thumbnails":[{"url":"small"},{"url":"cover"}]}}}}}),
+        ] {
+            let response = json!({"header":header,"contents":{"musicShelfRenderer":{"contents":[row("abcdefghijk"),row("bcdefghijkl"),own.clone()]}}});
+            let collection = parse_collection(&response);
+            assert_eq!(collection.thumbnail, "cover");
+            assert_eq!(collection.tracks.len(), 3);
+            assert_eq!(collection.tracks[0].thumbnail, "cover");
+            assert_eq!(collection.tracks[1].thumbnail, "cover");
+            assert_eq!(collection.tracks[2].thumbnail, "own");
+        }
+    }
+    #[test]
     fn local_scan_skips_unsupported_and_symlink_loops() {
         let dir = std::env::temp_dir().join(format!("bitchord-scan-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -2544,7 +2585,24 @@ mod tests {
             collection.tracks.len() > 1,
             "An album must expose its track list"
         );
-        println!("collection: {} tracks", collection.tracks.len());
+        println!(
+            "collection: {} tracks; subtitle {:?}; credit {:?}",
+            collection.tracks.len(),
+            collection.subtitle,
+            collection.credit
+        );
+        assert!(collection.is_album);
+        assert!(
+            !collection.thumbnail.is_empty(),
+            "An album must have a cover"
+        );
+        assert!(
+            collection
+                .tracks
+                .iter()
+                .all(|t| !t.thumbnail.is_empty() && !t.album.is_empty()),
+            "Album tracks must carry the cover and album title"
+        );
         let seed = releases
             .iter()
             .flat_map(|s| &s.items)
