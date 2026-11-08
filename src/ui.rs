@@ -42,6 +42,8 @@ const WHITE: Color32 = Color32::from_rgb(244, 244, 242);
 /// Calls to action and progress in dialogs.
 const ACCENT: Color32 = Color32::from_rgb(178, 208, 158);
 const ERROR: Color32 = Color32::from_rgb(232, 120, 110);
+/// Width of a toast notification; its height follows the text.
+const TOAST_WIDTH: f32 = 340.0;
 
 #[derive(Clone, Debug, PartialEq, Hash)]
 enum Page {
@@ -166,6 +168,8 @@ pub struct YTDugem {
     tx: Sender<Event>,
     rx: Receiver<Event>,
     message: String,
+    /// Short results (signed in, downloaded, errors) shown as toasts instead of page text.
+    toasts: egui_notify::Toasts,
     importing: bool,
     downloads: Vec<DownloadItem>,
     expanded: bool,
@@ -408,6 +412,10 @@ impl YTDugem {
             tx,
             rx,
             message,
+            // Top right, below the top bar (78 px) so the account button stays clear.
+            toasts: egui_notify::Toasts::new()
+                .with_anchor(egui_notify::Anchor::TopRight)
+                .with_margin(Vec2::new(16.0, 92.0)),
             importing: false,
             downloads: vec![],
             expanded: false,
@@ -1781,6 +1789,7 @@ impl YTDugem {
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
+            .frame(widgets::dialog_card())
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_width(340.0);
@@ -1829,7 +1838,10 @@ impl YTDugem {
                 match &mut dialog {
                     PlaylistDialog::AddTo { track } => {
                         if ui
-                            .add_enabled(!busy, egui::Button::new("+  New playlist"))
+                            .add_enabled_ui(!busy, |ui| {
+                                widgets::action(ui, widgets::Action::Secondary, "+  New playlist")
+                            })
+                            .inner
                             .clicked()
                         {
                             act = DialogAct::New(track.clone());
@@ -1976,8 +1988,17 @@ impl YTDugem {
                         }
                     };
                     if let Some((label, enabled)) = confirm {
+                        let kind = if matches!(
+                            dialog,
+                            PlaylistDialog::Delete { .. } | PlaylistDialog::DeleteLocal { .. }
+                        ) {
+                            widgets::Action::Danger
+                        } else {
+                            widgets::Action::Primary
+                        };
                         if ui
-                            .add_enabled(enabled && !busy, egui::Button::new(label))
+                            .add_enabled_ui(enabled && !busy, |ui| widgets::action(ui, kind, label))
+                            .inner
                             .clicked()
                         {
                             act = DialogAct::Submit;
@@ -1987,7 +2008,7 @@ impl YTDugem {
                         seed: Some(track), ..
                     } = &dialog
                     {
-                        if ui.button("Back").clicked() {
+                        if widgets::action(ui, widgets::Action::Ghost, "Back").clicked() {
                             act = DialogAct::Back(track.clone());
                         }
                     }
@@ -1996,7 +2017,7 @@ impl YTDugem {
                     } else {
                         "Cancel"
                     };
-                    if ui.button(close).clicked() {
+                    if widgets::action(ui, widgets::Action::Ghost, close).clicked() {
                         act = DialogAct::Cancel;
                     }
                     if busy {
@@ -3213,7 +3234,7 @@ impl YTDugem {
                 if ours {
                     self.sign_in = SignIn::default();
                 }
-                self.message = format!("Signed in as {}", account.name);
+                self.toast_success(format!("Signed in as {}", account.name));
             }
             Err(e) if ours => {
                 self.sign_in.busy = false;
@@ -3232,7 +3253,7 @@ impl YTDugem {
         self.account_request += 1;
         let request = self.account_request;
         let tx = self.tx.clone();
-        self.message = format!("Switching to {}…", channel.label());
+        self.toast_info(format!("Switching to {}…", channel.label()));
         std::thread::spawn(move || {
             let _ = tx.send(Event::SignedIn(
                 request,
@@ -3245,10 +3266,23 @@ impl YTDugem {
         match auth::logout() {
             Ok(()) => {
                 self.sync_account();
-                self.message = "Signed out".into();
+                self.toast_success("Signed out");
             }
-            Err(e) => self.message = format!("Sign out failed: {e:#}"),
+            Err(e) => self.toast_error(format!("Sign out failed: {e:#}")),
         }
+    }
+    /// Shows a short result as a toast, as egui-notify draws it: green, blue, yellow or red.
+    fn toast_success(&mut self, text: impl Into<egui::WidgetText>) {
+        self.toasts.success(text).width(TOAST_WIDTH);
+    }
+    fn toast_info(&mut self, text: impl Into<egui::WidgetText>) {
+        self.toasts.info(text).width(TOAST_WIDTH);
+    }
+    fn toast_warning(&mut self, text: impl Into<egui::WidgetText>) {
+        self.toasts.warning(text).width(TOAST_WIDTH);
+    }
+    fn toast_error(&mut self, text: impl Into<egui::WidgetText>) {
+        self.toasts.error(text).width(TOAST_WIDTH);
     }
     /// The account's picture in the top bar, which opens a menu of the account, its channels,
     /// the settings and the sign-in (Meiro `accountButton`).
@@ -3375,17 +3409,10 @@ impl YTDugem {
                     muted(ui, "YTDugem opens a separate browser window where you sign in to your Google account. YTDugem never sees your password. It keeps the session of that window, which gives it the same account access as a browser, and closes the window. Your own browser is not used.");
                     ui.add_space(12.0);
                     if ui
-                        .add_enabled(
-                            !busy,
-                            egui::Button::new(
-                                RichText::new("Sign in with a browser window")
-                                    .size(15.0)
-                                    .color(Color32::from_rgb(20, 21, 19)),
-                            )
-                            .fill(Color32::from_gray(236))
-                            .corner_radius(20.0)
-                            .min_size(Vec2::new(ui.available_width(), 44.0)),
-                        )
+                        .add_enabled_ui(!busy, |ui| {
+                            widgets::action(ui, widgets::Action::Primary, "Sign in with a browser window")
+                        })
+                        .inner
                         .clicked()
                     {
                         self.window_sign_in();
@@ -3426,15 +3453,16 @@ impl YTDugem {
                         // import start as soon as they are picked.
                         if self.sign_in.advanced
                             && ui
-                                .add_enabled(
+                                .add_enabled_ui(
                                     !busy && !self.sign_in.cookie.trim().is_empty(),
-                                    egui::Button::new("Sign in"),
+                                    |ui| widgets::action(ui, widgets::Action::Primary, "Sign in"),
                                 )
+                                .inner
                                 .clicked()
                         {
                             self.submit_sign_in();
                         }
-                        if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                        if widgets::action(ui, widgets::Action::Ghost, "Cancel").clicked() {
                             close = true;
                         }
                         if busy {
@@ -3676,7 +3704,7 @@ impl YTDugem {
                     if let Some((_, info)) = self.song_info.as_mut().filter(|(k, _)| *k == key) {
                         info.like = Some(previous);
                     }
-                    self.message = format!("Could not save the rating: {e}");
+                    self.toast_error(format!("Could not save the rating: {e}"));
                 }
                 Event::Prepared(key, stream) => {
                     if self.preparing.as_deref() == Some(key.as_str()) {
@@ -3768,11 +3796,11 @@ impl YTDugem {
                         Ok(ts) => {
                             let n = ts.len();
                             merge_local(&mut self.library.local, ts);
-                            self.message = format!("Imported {n} audio files");
+                            self.toast_success(format!("Imported {n} audio files"));
                             self.navigate(Page::Local);
                             self.save();
                         }
-                        Err(e) => self.message = e,
+                        Err(e) => self.toast_error(e),
                     }
                 }
                 Event::DownloadProgress(key, f) => {
@@ -3789,7 +3817,7 @@ impl YTDugem {
                         (None, _) => {}
                         (Some(i), Ok(tracks)) => {
                             let d = self.downloads.remove(i);
-                            self.message = format!("Downloaded {}", d.track.title);
+                            self.toast_success(format!("Downloaded {}", d.track.title));
                             merge_local(&mut self.library.local, tracks);
                             self.save();
                         }
@@ -3924,7 +3952,7 @@ impl YTDugem {
             if let Some(s) = self.player.poll() {
                 self.status = s;
                 if let Some(error) = self.player.take_error() {
-                    self.message = error;
+                    self.toast_error(error);
                 }
                 if s.errored {
                     // A cached stream URL that failed must not be reused on the next try.
@@ -3932,7 +3960,7 @@ impl YTDugem {
                         crate::player::forget_stream(&t.source);
                     }
                     self.stop();
-                    self.message="Audio could not be opened. Check your connection or sign-in, then try again.".into();
+                    self.toast_error("Audio could not be opened. Check your connection or sign-in, then try again.");
                 } else if s.ended {
                     self.next(true);
                 }
@@ -4596,6 +4624,7 @@ impl YTDugem {
         egui::Window::new("Delete download")
             .collapsible(false)
             .resizable(false)
+            .frame(widgets::dialog_card())
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_width(340.0);
@@ -4605,10 +4634,10 @@ impl YTDugem {
                 ));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Delete").clicked() {
+                    if widgets::action(ui, widgets::Action::Danger, "Delete").clicked() {
                         confirmed = true;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if widgets::action(ui, widgets::Action::Ghost, "Cancel").clicked() {
                         close = true;
                     }
                 });
@@ -4624,7 +4653,7 @@ impl YTDugem {
         let path = match services::delete_download(&track.source, &self.library.download_dir) {
             Ok(path) => path,
             Err(e) => {
-                self.message = format!("Could not delete {}: {e}", track.title);
+                self.toast_error(format!("Could not delete {}: {e}", track.title));
                 return;
             }
         };
@@ -4635,7 +4664,7 @@ impl YTDugem {
         for p in &mut self.library.playlists {
             p.tracks.retain(|t| !gone(t));
         }
-        self.message = format!("Deleted {}", track.title);
+        self.toast_success(format!("Deleted {}", track.title));
         self.save();
     }
     fn song_row(
@@ -4684,7 +4713,8 @@ impl YTDugem {
             WHITE,
             max,
         );
-        let credit = ui.scope_id().with(("credit", track.key()));
+        // The row's own id: a track listed twice (queue, history) shares its key.
+        let credit = response.id.with("credit");
         if let Some(link) = artist::credit_text(
             ui,
             credit,
@@ -5415,13 +5445,11 @@ enum AccountAction {
 
 /// The body of a sign-in dialog, as wide as Meiro's.
 fn dialog_frame(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(14, 12))
-        .show(ui, |ui| {
-            ui.set_width(520.0);
-            ui.spacing_mut().item_spacing.y = 4.0;
-            add(ui);
-        });
+    widgets::dialog_card().show(ui, |ui| {
+        ui.set_width(520.0);
+        ui.spacing_mut().item_spacing.y = 4.0;
+        add(ui);
+    });
 }
 
 /// A round picture, or the first letter of `name` on a disc when there is none.
@@ -5479,7 +5507,7 @@ impl eframe::App for YTDugem {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.events(ctx);
         if services::take_sign_in_rejected() {
-            self.message = "Your YouTube sign-in has expired, so public music is shown. Open your account to sign in again.".into();
+            self.toast_warning("Your YouTube sign-in has expired, so public music is shown. Open your account to sign in again.");
         }
         self.tray_step(ctx);
         ctx.request_repaint_after(Duration::from_millis(100));
@@ -5631,6 +5659,7 @@ impl eframe::App for YTDugem {
         self.download_delete_dialog(ctx);
         self.update_dialog(ctx);
         self.screenshot_step(ctx);
+        self.toasts.show(ctx);
     }
 }
 

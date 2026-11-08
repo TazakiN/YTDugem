@@ -117,6 +117,80 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, selected: bool, label: &
     response.on_hover_text(label)
 }
 
+/// How a dialog button reads: one filled call to action, quiet alternatives, or a destructive one.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Action {
+    /// The call to action: a filled, light pill.
+    Primary,
+    /// Other choices in a dialog: a soft tinted pill.
+    Secondary,
+    /// Removes something: red text on a soft red pill.
+    Danger,
+    /// Cancel or close: text only, tinted on hover.
+    Ghost,
+}
+
+const ACTION_HEIGHT: f32 = 38.0;
+const ACTION_RADIUS: f32 = 10.0;
+
+/// A dialog button with a modern look: a fixed height, rounded corners and hover feedback. It
+/// is disabled with `ui.add_enabled_ui`, like any egui button.
+pub fn action(ui: &mut egui::Ui, kind: Action, label: &str) -> Response {
+    let font = egui::FontId::new(15.0, egui::FontFamily::Name("bold".into()));
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE);
+    let size = Vec2::new((galley.size().x + 36.0).max(96.0), ACTION_HEIGHT);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
+    let enabled = ui.is_enabled();
+    let hovered = enabled && response.hovered();
+    let (fill, text) = if !enabled {
+        (white_alpha(10), Color32::from_gray(96))
+    } else {
+        match (kind, hovered) {
+            (Action::Primary, false) => (
+                Color32::from_rgb(178, 208, 158),
+                Color32::from_rgb(20, 21, 19),
+            ),
+            (Action::Primary, true) => (
+                Color32::from_rgb(198, 226, 178),
+                Color32::from_rgb(20, 21, 19),
+            ),
+            (Action::Secondary, false) => (white_alpha(20), Color32::from_gray(232)),
+            (Action::Secondary, true) => (white_alpha(34), Color32::WHITE),
+            (Action::Danger, false) => (
+                Color32::from_rgba_unmultiplied(232, 120, 110, 40),
+                Color32::from_rgb(240, 150, 140),
+            ),
+            (Action::Danger, true) => (
+                Color32::from_rgba_unmultiplied(232, 120, 110, 70),
+                Color32::from_rgb(250, 170, 160),
+            ),
+            (Action::Ghost, false) => (Color32::TRANSPARENT, Color32::from_gray(200)),
+            (Action::Ghost, true) => (white_alpha(14), Color32::WHITE),
+        }
+    };
+    ui.painter().rect_filled(rect, ACTION_RADIUS, fill);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font,
+        text,
+    );
+    response
+}
+
+/// The card a dialog sits on: a slightly raised surface with a hairline border.
+pub fn dialog_card() -> egui::Frame {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(38, 40, 36))
+        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(58, 61, 55)))
+        .corner_radius(18.0)
+        .inner_margin(egui::Margin::same(22))
+}
+
 /// Registers the Phosphor icon fonts (MIT, https://phosphoricons.com) with egui 0.37 types.
 /// Only the font bytes of the `egui-phosphor` crate are used; its egui 0.36 API is never called.
 /// The regular font is also a `Proportional` fallback so glyph constants work inside text.
