@@ -4322,16 +4322,8 @@ impl YTDugem {
         }
     }
     fn settings_button(&mut self, ui: &mut egui::Ui) {
-        if widgets::button(
-            ui,
-            Icon::Headphones,
-            30.0,
-            false,
-            "Audio output and playback settings",
-        )
-        .clicked()
-        {
-            self.navigate(Page::Settings);
+        if widgets::button(ui, Icon::Headphones, 30.0, self.output_open, "Audio output").clicked() {
+            self.open_output();
         }
     }
     fn topbar(&mut self, ui: &mut egui::Ui, rect: Rect) {
@@ -5653,6 +5645,7 @@ impl eframe::App for YTDugem {
         if shown > 0.0 {
             self.expanded_view(ctx, shown);
         }
+        self.output_overlay(ctx);
         self.palette(ctx);
         self.sign_in_dialog(ctx);
         self.playlist_dialog(ctx);

@@ -168,12 +168,15 @@ impl YTDugem {
     /// Escape walks back one step: the output dialog, an open menu, the lyrics or queue pane,
     /// and only then the sheet itself (upstream `PlayerBackHandler` order).
     pub(super) fn sheet_back(&mut self, ctx: &egui::Context) {
+        // The output dialog also opens over the page from the top bar, so it closes either way.
+        if self.output_open {
+            self.output_open = false;
+            return;
+        }
         if !self.expanded {
             return;
         }
-        if self.output_open {
-            self.output_open = false;
-        } else if egui::Popup::is_any_open(ctx) {
+        if egui::Popup::is_any_open(ctx) {
             egui::Popup::close_all(ctx);
         } else if self.tab != PlayerPane::Main {
             self.tab = PlayerPane::Main;
@@ -290,7 +293,8 @@ impl YTDugem {
         }
 
         self.sheet_handle(ui, rect);
-        if self.output_open {
+        // While the sheet is down, `output_overlay` draws the dialog over the page instead.
+        if self.output_open && self.expanded {
             self.output_dialog(ui, rect);
         }
         // The page's status line is hidden behind the sheet; failures must still be seen.
@@ -541,7 +545,7 @@ impl YTDugem {
         }
     }
 
-    fn open_output(&mut self) {
+    pub(super) fn open_output(&mut self) {
         self.output_open = true;
         self.load_audio_devices();
     }
