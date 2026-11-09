@@ -27,7 +27,25 @@ fn disc(ui: &egui::Ui, center: Pos2, icon: Icon, bright: bool) {
 }
 
 impl YTDugem {
-    /// Drawn over the whole sheet while `output_open`.
+    /// The same dialog over the whole window while the sheet is down (opened from the top bar);
+    /// with the sheet up, `player_sheet` draws it instead, so it is never drawn twice.
+    pub(super) fn output_overlay(&mut self, ctx: &egui::Context) {
+        if !self.output_open || self.expanded {
+            return;
+        }
+        let screen = ctx.content_rect();
+        egui::Area::new(egui::Id::unique("output-overlay"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .movable(false)
+            .constrain(false)
+            .show(ctx, |ui| {
+                ui.allocate_rect(screen, egui::Sense::hover());
+                self.output_dialog(ui, screen);
+            });
+    }
+
+    /// Drawn over the whole sheet (or window) while `output_open`.
     pub(super) fn output_dialog(&mut self, ui: &mut egui::Ui, sheet: Rect) {
         let ctx = ui.ctx().clone();
         // The slide starts afresh each time the dialog opens: it was not drawn last pass.

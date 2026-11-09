@@ -259,7 +259,8 @@ pub(super) fn card(ui: &mut egui::Ui, item: &ShelfItem) -> Option<CardAction> {
             }
         });
         if !item.subtitle.is_empty() {
-            let (line, _) = ui.allocate_exact_size(Vec2::new(width, 18.0), egui::Sense::hover());
+            let (line, line_response) =
+                ui.allocate_exact_size(Vec2::new(width, 18.0), egui::Sense::hover());
             let segments = credit_segments(&item.subtitle, &item.artists, false);
             let start = if round {
                 let w = ui
@@ -271,7 +272,9 @@ pub(super) fn card(ui: &mut egui::Ui, item: &ShelfItem) -> Option<CardAction> {
             } else {
                 line.left()
             };
-            let id = ui.scope_id().with("credit");
+            // The line's own id is unique per card. The scope id was shared by the cards of a
+            // shelf, so egui flagged "First use of widget ID" over the artist names.
+            let id = line_response.id.with("credit");
             if let Some(link) = credit_text(
                 ui,
                 id,

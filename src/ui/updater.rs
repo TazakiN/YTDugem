@@ -183,6 +183,7 @@ impl YTDugem {
         egui::Window::new("Update available")
             .collapsible(false)
             .resizable(false)
+            .frame(widgets::dialog_card())
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_width(380.0);
@@ -210,8 +211,9 @@ impl YTDugem {
                         "Ready. YTDugem will close and open again; playback stops.",
                     );
                     ui.horizontal(|ui| {
-                        restart = ui.button("Restart now").clicked();
-                        later = ui.button("Later").clicked();
+                        restart =
+                            widgets::action(ui, widgets::Action::Primary, "Restart now").clicked();
+                        later = widgets::action(ui, widgets::Action::Ghost, "Later").clicked();
                     });
                 } else if let Some(f) = self.updates.downloading {
                     ui.add(
@@ -219,16 +221,19 @@ impl YTDugem {
                             .desired_width(360.0)
                             .text(format!("Downloading… {:.0}%", f * 100.0)),
                     );
-                    later = ui.button("Hide").clicked();
+                    later = widgets::action(ui, widgets::Action::Ghost, "Hide").clicked();
                 } else {
                     ui.horizontal(|ui| {
                         if installable {
-                            install = ui.button("Update now").clicked();
-                            page = ui.button("Release notes").clicked();
+                            install = widgets::action(ui, widgets::Action::Primary, "Update now")
+                                .clicked();
+                            page = widgets::action(ui, widgets::Action::Secondary, "Release notes")
+                                .clicked();
                         } else {
-                            page = ui.button("Download").clicked();
+                            page =
+                                widgets::action(ui, widgets::Action::Primary, "Download").clicked();
                         }
-                        later = ui.button("Later").clicked();
+                        later = widgets::action(ui, widgets::Action::Ghost, "Later").clicked();
                     });
                 }
             });

@@ -888,6 +888,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-notify"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f022e19ac3be5e1798892426d9aa2ab55fe5acf346c476589601a0df46bf89dc"
+dependencies = [
+ "egui 0.37.0",
+]
+
+[[package]]
 name = "egui-phosphor"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4772,6 +4781,7 @@ dependencies = [
  "base64 0.23.1",
  "directories",
  "eframe",
+ "egui-notify",
  "egui-phosphor",
  "egui_extras",
  "embed-resource",
