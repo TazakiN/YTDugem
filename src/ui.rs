@@ -2539,7 +2539,13 @@ impl YTDugem {
         }
 
         // Equalizer
-        let rows = ["Equalizer", "Preset", "Stereo balance"];
+        let rows = [
+            "Equalizer",
+            "Preset",
+            "Stereo balance",
+            "Loudness normalization",
+            "Skip silence",
+        ];
         if let Some(q) = group_query(&query, "Equalizer", &rows) {
             shown = true;
             settings_group(ui, "Equalizer", |ui| {
@@ -2614,6 +2620,27 @@ impl YTDugem {
                             self.apply_audio_settings();
                         }
                     });
+                }
+                if hit(&q, rows[3]) {
+                    let mut on = self.library.audio.loudness_normalization;
+                    if toggle_row(ui, rows[3], "Even out the volume between songs", &mut on) {
+                        self.library.audio.loudness_normalization = on;
+                        self.save();
+                        self.apply_audio_settings();
+                    }
+                }
+                if hit(&q, rows[4]) {
+                    let mut on = self.library.audio.skip_silence;
+                    if toggle_row(
+                        ui,
+                        rows[4],
+                        "Trim silence at the start and gaps longer than 2 seconds",
+                        &mut on,
+                    ) {
+                        self.library.audio.skip_silence = on;
+                        self.save();
+                        self.apply_audio_settings();
+                    }
                 }
             });
         }
