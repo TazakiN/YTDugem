@@ -226,7 +226,9 @@ pub fn restore() -> Result<Option<Account>> {
 /// recognises it and it came from a browser, the session is read from that browser again —
 /// the one place that still holds a session YouTube accepts — and kept instead. Fails with
 /// [`SessionGone`] when there is nothing left to sign in with; the session is then forgotten.
-pub fn renew() -> Result<Account> {
+/// Also says whether the session now in use replaced the restored one, so work already done
+/// with the restored session can be repeated.
+pub fn renew() -> Result<(Account, bool)> {
     let generation = generation();
     let current = snapshot().ok_or_else(|| anyhow!("Not signed in"))?;
     let opened = match open_session(&current.cookie, &current.source) {
@@ -238,7 +240,10 @@ pub fn renew() -> Result<Account> {
         other => other,
     };
     match opened {
-        Ok(session) => commit(session, generation),
+        Ok(session) => {
+            let replaced = session.cookie != current.cookie || session.source != current.source;
+            commit(session, generation).map(|account| (account, replaced))
+        }
         Err(e) => {
             if e.is::<SessionGone>() && self::generation() == generation {
                 let _ = logout();
