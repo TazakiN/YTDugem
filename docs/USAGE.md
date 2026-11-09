@@ -55,6 +55,7 @@ YTDugem automatically uses X11 and Mesa's software renderer to work around EGL/Z
 - **Skip non-music sections:** **Settings → Playback → Skip non-music sections (SponsorBlock)** (off by default) skips the intros, outros and talking parts of music videos that SponsorBlock users marked as `music_offtopic`. A section is skipped once, when playback reaches it. Seeking back into it plays it, and a section that runs to the end moves on to the next track. A failed or slow lookup just means nothing is skipped. See [Configuration and data](#configuration-and-data) for what is sent. This is a YTDugem addition, not an upstream BitChord feature.
 - **Queue:** an editable queue with play-next, remove, reorder, clear and play-all.
 - **Library:** persistent liked songs, recently played tracks, local playlists and settings, with atomic saves and a backup. A corrupt library is preserved and saving is disabled rather than silently overwriting it.
+- **YouTube Music account playlists and ratings** (signed in only): the Library lists your account playlists next to your local ones. "Add to playlist…" offers both, and it can create a new account playlist seeded with the song. Owned account playlists support removing and reordering songs, renaming, editing the description and privacy, and deleting, and you can save or remove other playlists in your library. Like and Dislike are in the player menu, the full player's heart and every YouTube song row's menu. Row menus read the rating from your Liked Music playlist (up to its first 10 pages) and the playing song's rating from YouTube. Signed out, or for local files, only the local playlists are used, and local playlists are never changed by account edits. The request building and response parsing are unit tested against made-up fixtures; **real Google-account verification of these edits is still pending.**
 - **Local import:** recursive import with metadata, plus file and folder drag-and-drop. Nothing is uploaded.
 - **Downloads:** audio downloads with embedded metadata through yt-dlp/FFmpeg. Downloaded files become available in the local library.
 - **Lyrics:** fifteen upstream lyrics-provider handlers, with ordered enable/disable/reset settings, manual provider selection and retry, source attribution, line and word timing, and a plain-text fallback. Embedded local lyrics are supported. Availability and catalogue coverage depend on external providers; parser tests are not proof that each live service works.
@@ -65,7 +66,7 @@ YTDugem automatically uses X11 and Mesa's software renderer to work around EGL/Z
 
 This is a working desktop rewrite, **not yet feature parity with every upstream desktop integration or a pixel-identical UI**. The following have not been ported:
 
-- remote playlist editing and account synchronization
+- syncing local playlists or local liked songs to the account (account and local playlists are kept separate)
 - brand-channel discovery
 - Spotify and other music source modules
 - Last.fm and ListenBrainz
