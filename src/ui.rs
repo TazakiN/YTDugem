@@ -111,7 +111,7 @@ enum Event {
         Result<(String, Vec<auth::Channel>), String>,
     ),
     /// The saved session was checked at start-up; `true` with the error when YouTube retired it.
-    Renewed(Result<Account, (bool, String)>),
+    Renewed(Result<(Account, bool), (bool, String)>),
     LyricsKeys(u64, Result<Vec<(String, bool)>, String>),
     LyricsKeySaved(u64, String, Result<bool, String>),
     AudioDevices(Result<Vec<(String, String)>, String>),
@@ -3892,11 +3892,20 @@ impl YTDugem {
                     }
                 }
                 Event::Renewed(r) => match r {
-                    // The same account: only its channels were not known yet.
-                    Ok(a) if self.account.as_ref() == Some(&a) => {
+                    // The same account and session: only its channels were not known yet.
+                    Ok((a, false)) if self.account.as_ref() == Some(&a) => {
                         (self.channels, self.source) = auth::current_channels();
                     }
-                    Ok(_) => self.sync_account(),
+                    // Another account, or the restored session was replaced (read again from
+                    // its browser): playlists and Home fetched with the old one look signed out.
+                    Ok(_) => {
+                        // A refusal of the old session no longer applies.
+                        services::take_sign_in_rejected();
+                        if self.message.starts_with("Your YouTube sign-in has expired") {
+                            self.message.clear();
+                        }
+                        self.sync_account();
+                    }
                     // YouTube retired the session and no browser could replace it.
                     Err((true, e)) => {
                         self.sync_account();
