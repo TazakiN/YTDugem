@@ -188,6 +188,10 @@ pub struct YTDugem {
     active_lyric: Option<usize>,
     cover: Option<egui::TextureHandle>,
     backdrop: Option<egui::TextureHandle>,
+    /// The previous track's backdrop, kept on screen until the new one has faded in over it.
+    backdrop_prev: Option<egui::TextureHandle>,
+    /// When the backdrop crossfade started; `None` while the next artwork is still loading.
+    backdrop_fade: Option<Instant>,
     import_path: String,
     download_path: String,
     sleep_until: Option<Instant>,
@@ -433,6 +437,8 @@ impl YTDugem {
             active_lyric: None,
             cover: None,
             backdrop: None,
+            backdrop_prev: None,
+            backdrop_fade: None,
             import_path: String::new(),
             download_path,
             sleep_until: None,
@@ -691,7 +697,12 @@ impl YTDugem {
         // so the player, rows and artwork react to the click instead of to mpv seconds later.
         if self.current.as_ref().map(Track::key) != Some(t.key()) {
             self.cover = None;
-            self.backdrop = None;
+            // Keep what is on screen: the old backdrop stays until the new one fades in over it.
+            if let Some(back) = self.backdrop.take() {
+                self.backdrop_prev = Some(back);
+            }
+            // No artwork to wait for: fade the old backdrop straight out.
+            self.backdrop_fade = (!t.thumbnail.starts_with("https://")).then(Instant::now);
             self.lyrics.clear();
             self.active_lyric = None;
             self.lyrics_override = None;
@@ -3875,6 +3886,13 @@ impl YTDugem {
                         back,
                         egui::TextureOptions::LINEAR,
                     ));
+                    self.backdrop_fade = Some(Instant::now());
+                }
+                // No artwork for this track: fade the previous backdrop out instead of keeping it.
+                Event::Artwork(key, Err(_))
+                    if self.current.as_ref().is_some_and(|t| t.key() == key) =>
+                {
+                    self.backdrop_fade = Some(Instant::now());
                 }
                 Event::SignedIn(id, r) => self.signed_in(id, r),
                 Event::BrowserImported(id, browser, r) if id == self.account_request => {
