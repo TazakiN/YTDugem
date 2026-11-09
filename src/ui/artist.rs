@@ -299,7 +299,7 @@ fn round_image(ui: &mut egui::Ui, url: &str, name: &str, rect: Rect) {
     let circle = Rect::from_center_size(rect.center(), Vec2::splat(side));
     let px = (side * ui.ctx().pixels_per_point()).ceil() as u32;
     if url.starts_with("https://") {
-        egui::Image::new(artwork_at(url, if px <= 240 { 240 } else { 544 }))
+        web_image(artwork_at(url, if px <= 240 { 240 } else { 544 }))
             .fit_to_exact_size(circle.size())
             .corner_radius(side / 2.0)
             .paint_at(ui, circle);
@@ -369,7 +369,7 @@ fn cover_image(ui: &mut egui::Ui, url: &str, rect: Rect) {
             Pos2::new(1.0, 0.1 * (1.0 - h) + h),
         )
     };
-    egui::Image::new(url)
+    web_image(url.to_owned())
         .uv(uv)
         .fit_to_exact_size(rect.size())
         .corner_radius(14.0)

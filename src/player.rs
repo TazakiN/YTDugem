@@ -410,12 +410,28 @@ impl Player {
             "--really-quiet",
         ])
         .arg("--network-timeout=20")
+        // mpv buffers up to 150 MiB ahead and keeps 50 MiB behind by default, which holds a
+        // whole long stream in memory; half an hour ahead and several minutes back is plenty.
+        .args(["--demuxer-max-bytes=32MiB", "--demuxer-max-back-bytes=8MiB"])
         .arg(format!("--input-ipc-server={ipc_arg}"))
         .arg(format!("--volume={volume}"))
         .arg(format!("--speed={speed}"));
         if !force_null_output && !audio.output_device.is_empty() {
             cmd.arg(format!("--audio-device={}", audio.output_device));
         }
+        // Each built-in Lua script runs its own interpreter, about 11 MiB together, and none of
+        // them is used without a window. These options need a recent mpv, which only the
+        // bundled Windows build guarantees; `ytdl_hook` stays for the yt-dlp fallback.
+        #[cfg(windows)]
+        cmd.args([
+            "--osc=no",
+            "--load-stats-overlay=no",
+            "--load-console=no",
+            "--load-auto-profiles=no",
+            "--load-select=no",
+            "--load-positioning=no",
+            "--load-commands=no",
+        ]);
         #[cfg(windows)]
         if !force_null_output && audio.wasapi_exclusive {
             cmd.arg("--audio-exclusive=yes");
