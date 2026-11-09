@@ -136,6 +136,8 @@ enum Event {
     /// Artists matching a search, tagged with the song search's request.
     ArtistResults(u64, Result<Vec<ShelfItem>, String>),
     Update(updater::UpdateEvent),
+    /// SponsorBlock non-music segments of (track key); an error means none are skipped.
+    Segments(String, Result<Vec<services::sponsorblock::Segment>, String>),
 }
 
 pub struct YTDugem {
@@ -213,6 +215,8 @@ pub struct YTDugem {
     audio_devices_loaded: bool,
     lyric_keys_request: u64,
     last_poll: Instant,
+    /// SponsorBlock non-music segments of the playing track.
+    skipper: services::sponsorblock::Skipper,
     now_origin: String,
     radio_pending: bool,
     discord: Presence,
@@ -458,6 +462,7 @@ impl YTDugem {
             audio_devices_loaded: false,
             lyric_keys_request: 0,
             last_poll: Instant::now(),
+            skipper: Default::default(),
             now_origin: "Home".into(),
             radio_pending: false,
             discord: Presence::new(),
@@ -725,6 +730,7 @@ impl YTDugem {
                 self.lyrics_message = "Lyrics are disabled in Settings".into();
             }
         }
+        self.request_segments(&t);
         self.discord.clear();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
@@ -735,6 +741,44 @@ impl YTDugem {
                 .map_err(err);
             let _ = tx.send(Event::Playing(id, t, r));
         });
+    }
+    /// Look up the non-music segments of a YouTube track when skipping them is enabled; a
+    /// replay of the same track reuses them. Local files are never looked up.
+    fn request_segments(&mut self, t: &Track) {
+        if self.skipper.is_for(t.key()) {
+            self.skipper.rearm();
+            return;
+        }
+        self.skipper.clear();
+        if !self.library.skip_non_music || !is_youtube_track(t) {
+            return;
+        }
+        self.skipper.expect(t.key());
+        let (key, video_id, tx) = (t.key().to_owned(), t.id.clone(), self.tx.clone());
+        std::thread::spawn(move || {
+            let result = services::sponsorblock::fetch(&video_id).map_err(err);
+            let _ = tx.send(Event::Segments(key, result));
+        });
+    }
+    /// Seek past a non-music segment that playback just entered, or end the track when the
+    /// segment runs to its end.
+    fn skip_non_music(&mut self) {
+        let s = self.status;
+        if !self.library.skip_non_music || self.loading || s.paused || s.ended {
+            return;
+        }
+        let Some(key) = self.current.as_ref().map(|t| t.key().to_owned()) else {
+            return;
+        };
+        let Some(target) = self.skipper.check(&key, s.position) else {
+            return;
+        };
+        if s.duration > 0.0 && target >= s.duration - 1.0 {
+            self.next(true);
+        } else if self.player.seek(target).is_err() {
+            return;
+        }
+        self.toast_info("Skipped non-music section");
     }
     fn request_lyrics(&mut self, only: Option<String>) {
         if !self.library.lyrics_enabled {
@@ -2322,6 +2366,7 @@ impl YTDugem {
             "Crossfade",
             "Playback speed",
             "Keep playing in the tray",
+            "Skip non-music sections (SponsorBlock)",
         ];
         if let Some(q) = group_query(&query, "Playback", &rows) {
             shown = true;
@@ -2335,6 +2380,22 @@ impl YTDugem {
                         &mut on,
                     ) {
                         self.library.autoplay = on;
+                        self.save();
+                    }
+                }
+                if hit(&q, rows[4]) {
+                    let mut on = self.library.skip_non_music;
+                    if toggle_row(
+                        ui,
+                        rows[4],
+                        "Skip intros, outros and talking in music videos, as marked by SponsorBlock users. Sends a short hash of each YouTube video id to sponsor.ajay.app; local files are never looked up.",
+                        &mut on,
+                    ) {
+                        self.library.skip_non_music = on;
+                        self.skipper.clear();
+                        if let Some(t) = self.current.clone() {
+                            self.request_segments(&t);
+                        }
                         self.save();
                     }
                 }
@@ -3982,6 +4043,8 @@ impl YTDugem {
                     }
                 }
                 Event::Update(e) => self.update_event(ctx, e),
+                // A failed lookup just means nothing is skipped.
+                Event::Segments(key, Ok(segments)) => self.skipper.set(&key, segments),
                 _ => {}
             }
         }
@@ -4001,6 +4064,8 @@ impl YTDugem {
                     self.toast_error("Audio could not be opened. Check your connection or sign-in, then try again.");
                 } else if s.ended {
                     self.next(true);
+                } else {
+                    self.skip_non_music();
                 }
             }
             self.step_fade();
