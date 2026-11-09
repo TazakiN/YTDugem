@@ -34,6 +34,7 @@ mod sheet_lyrics;
 mod sheet_menu;
 mod sheet_output;
 mod sheet_queue;
+mod stats_page;
 mod updater;
 
 const BG: Color32 = Color32::from_rgb(29, 31, 27);
@@ -64,6 +65,8 @@ enum Page {
     /// A "See all" grid of an artist shelf.
     ArtistGrid(services::artist::BrowseTarget),
     Settings,
+    /// Listening stats and the yearly Wrapped card.
+    Stats,
 }
 #[derive(Clone, Copy, PartialEq)]
 enum PlayerPane {
@@ -87,6 +90,8 @@ enum Event {
     Prepared(String, Option<Stream>),
     AccountPlaylists(u64, Result<Vec<ShelfItem>, String>),
     Suggestions(u64, String, Result<Vec<String>, String>),
+    /// Writing `stats.json` failed in the background.
+    StatsSaveFailed(String),
     Translated(u64, Result<Translation, String>),
     Romanized(u64, String, Result<Romanization, String>),
     SongInfo(u64, String, Result<services::SongInfo, String>),
@@ -314,6 +319,7 @@ pub struct YTDugem {
     /// The mini player minimized the main window, so closing it restores the main window.
     mini_minimized: bool,
     updates: updater::Updates,
+    stats: stats_page::Stats,
 }
 
 const SCREENSHOT_FRAMES: u32 = 120;
@@ -392,6 +398,14 @@ impl YTDugem {
                 true,
             ),
         };
+        let stats = stats_page::Stats::load(&path);
+        if let Some(e) = stats.error() {
+            message = if message.is_empty() {
+                e.to_owned()
+            } else {
+                format!("{message} {e}")
+            };
+        }
         let account = match auth::restore() {
             Ok(a) => a,
             Err(_) => {
@@ -544,6 +558,7 @@ impl YTDugem {
             mini_player: false,
             mini_minimized: false,
             updates: Default::default(),
+            stats,
         };
         if app.account.is_some() {
             // The saved session is shown at once and checked with YouTube in the background;
@@ -2978,6 +2993,7 @@ impl YTDugem {
             });
         }
 
+        shown |= self.privacy_settings(ui, &query);
         shown |= self.about_settings(ui, &query);
 
         if !shown {
@@ -3860,6 +3876,9 @@ impl YTDugem {
                         }
                     }
                 }
+                Event::StatsSaveFailed(e) => {
+                    self.toast_error(format!("Could not save listening stats: {e}"))
+                }
                 Event::Suggestions(id, query, r)
                     if id == self.palette_request && query == self.palette_query.trim() =>
                 {
@@ -4197,6 +4216,8 @@ impl YTDugem {
             self.last_poll = Instant::now();
             if let Some(s) = self.player.poll() {
                 self.status = s;
+                // Before a finished track moves on, so its last moments count.
+                self.track_listen();
                 if let Some(error) = self.player.take_error() {
                     self.toast_error(error);
                 }
@@ -4213,6 +4234,7 @@ impl YTDugem {
                     self.skip_non_music();
                 }
             }
+            self.track_listen();
             self.step_fade();
             self.maybe_crossfade();
             self.prepare_next();
@@ -5250,7 +5272,14 @@ impl YTDugem {
                 self.track_list(ui, self.results.clone(), "Search");
             }
             Page::Library => {
-                ui.label(heading("Your library", 26.0));
+                ui.horizontal(|ui| {
+                    ui.label(heading("Your library", 26.0));
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Listening stats").clicked() {
+                            self.navigate(Page::Stats);
+                        }
+                    });
+                });
                 ui.add_space(14.0);
                 self.account_playlists_view(ui);
                 ui.add_space(24.0);
@@ -5356,6 +5385,7 @@ impl YTDugem {
                 self.filtered_track_list(ui, &p.tracks, &p.name, false, false);
             }
             Page::Settings => self.settings_view(ui),
+            Page::Stats => self.stats_view(ui),
         }
     }
 }
@@ -5817,7 +5847,12 @@ impl eframe::App for YTDugem {
             self.toast_warning("Your YouTube sign-in has expired, so public music is shown. Open your account to sign in again.");
         }
         self.tray_step(ctx);
+        self.stats_save_step();
         ctx.request_repaint_after(Duration::from_millis(100));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.stats_on_exit();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -5969,6 +6004,7 @@ impl eframe::App for YTDugem {
         self.sign_in_dialog(ctx);
         self.playlist_dialog(ctx);
         self.download_delete_dialog(ctx);
+        self.stats_clear_dialog(ctx);
         self.playlist_files_step(ctx);
         self.mini_player_step(ctx);
         self.update_dialog(ctx);
