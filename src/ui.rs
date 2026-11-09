@@ -28,6 +28,7 @@ mod explore;
 mod floating_bar;
 mod library_view;
 mod playlist_files;
+mod search_box;
 mod sheet;
 mod sheet_lyrics;
 mod sheet_menu;
@@ -89,6 +90,8 @@ enum Event {
     Prepared(String, Option<Stream>),
     AccountPlaylists(u64, Result<Vec<ShelfItem>, String>),
     Suggestions(u64, String, Result<Vec<String>, String>),
+    /// Typeahead suggestions for the sidebar search box: (request, query, suggestions).
+    SearchSuggestions(u64, String, Result<Vec<String>, String>),
     /// Writing `stats.json` failed in the background.
     StatsSaveFailed(String),
     Translated(u64, Result<Translation, String>),
@@ -315,6 +318,7 @@ pub struct YTDugem {
     playlist_files: playlist_files::PlaylistFiles,
     updates: updater::Updates,
     stats: stats_page::Stats,
+    search_box: search_box::SearchBox,
 }
 
 const SCREENSHOT_FRAMES: u32 = 120;
@@ -552,6 +556,7 @@ impl YTDugem {
             playlist_files: Default::default(),
             updates: Default::default(),
             stats,
+            search_box: Default::default(),
         };
         if app.account.is_some() {
             // The saved session is shown at once and checked with YouTube in the background;
@@ -647,6 +652,8 @@ impl YTDugem {
         self.busy = true;
         self.results.clear();
         self.submitted_query = self.query.trim().into();
+        store::remember_search(&mut self.library.recent_searches, &self.submitted_query);
+        self.save();
         self.navigate(Page::Search);
         let q = self.submitted_query.clone();
         self.search_artists(id, q.clone());
@@ -3869,6 +3876,9 @@ impl YTDugem {
                         }
                     }
                 }
+                Event::SearchSuggestions(id, query, r) => {
+                    self.search_suggestions_arrived(id, query, r)
+                }
                 Event::StatsSaveFailed(e) => {
                     self.toast_error(format!("Could not save listening stats: {e}"))
                 }
@@ -4317,14 +4327,16 @@ impl YTDugem {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
         }
-        region(
+        let chosen = self.search_box_keys(ui.ctx());
+        let (field, focused) = region(
             ui,
             Rect::from_min_size(
                 rect.min + Vec2::new(14.0, 44.0),
                 Vec2::new(rect.width() - 28.0, 42.0),
             ),
             |ui| {
-                egui::Frame::new()
+                let mut focused = false;
+                let frame = egui::Frame::new()
                     .fill(Color32::from_rgb(36, 37, 34))
                     .stroke(Stroke::new(1.0_f32, Color32::from_gray(63)))
                     .corner_radius(7.0)
@@ -4350,7 +4362,7 @@ impl YTDugem {
                             );
                             let response = ui.add(
                                 egui::TextEdit::singleline(&mut self.query)
-                                    .id(egui::Id::unique("search_input"))
+                                    .id(search_box::input_id())
                                     .desired_width(rect.width() - 78.0)
                                     .hint_text("Search")
                                     .font(FontId::proportional(15.0))
@@ -4362,15 +4374,26 @@ impl YTDugem {
                                     })
                                     .frame(bare_text_frame()),
                             );
+                            if response.changed() {
+                                self.search_box_edited();
+                            }
+                            focused = response.has_focus();
                             if response.lost_focus()
                                 && ui.input(|s| s.key_pressed(egui::Key::Enter))
                             {
+                                // The entry picked with Up/Down, else what was typed.
+                                if let Some(text) = chosen.clone() {
+                                    self.query = text;
+                                }
+                                self.search_box_done(ui.ctx());
                                 self.search();
                             }
                         });
                     });
+                (frame.response.rect, focused)
             },
         );
+        self.search_dropdown(ui.ctx(), field, focused);
         let rows = [
             (Page::Home, Icon::Home, "Home"),
             (Page::Explore, Icon::Compass, "Explore"),
@@ -4408,7 +4431,7 @@ impl YTDugem {
                 self.navigate(page);
                 if self.page == Page::Search {
                     ui.ctx()
-                        .memory_mut(|m| m.request_focus(egui::Id::unique("search_input")));
+                        .memory_mut(|m| m.request_focus(search_box::input_id()));
                 }
             }
             y += 40.0;
@@ -5851,14 +5874,15 @@ impl eframe::App for YTDugem {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         let typing = ctx.egui_wants_keyboard_input();
-        // While the palette is open it owns Escape (its modal closes on it).
-        let palette_open = self.palette_open;
+        // While the palette is open it owns Escape (its modal closes on it), and so does the
+        // focused search box (it closes its list, then leaves the box).
+        let escape_taken = self.palette_open || ctx.memory(|m| m.has_focus(search_box::input_id()));
         let (search, local, quit, escape, palette) = ctx.input_mut(|i| {
             (
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::F),
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::L),
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::Q),
-                !palette_open && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                !escape_taken && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::K),
             )
         });
@@ -5866,7 +5890,7 @@ impl eframe::App for YTDugem {
             self.toggle_palette();
         }
         if search {
-            ctx.memory_mut(|m| m.request_focus(egui::Id::unique("search_input")));
+            ctx.memory_mut(|m| m.request_focus(search_box::input_id()));
         }
         if local {
             self.page = Page::Local;
