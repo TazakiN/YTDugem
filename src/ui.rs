@@ -387,7 +387,6 @@ impl YTDugem {
         }
     }
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        configure_style(&cc.egui_ctx);
         let path = store::data_path();
         let (library, mut message, read_only) = match Library::load(&path) {
             Ok(l) => (l, String::new(), false),
@@ -397,6 +396,7 @@ impl YTDugem {
                 true,
             ),
         };
+        configure_style(&cc.egui_ctx, library.theme);
         let stats = stats_page::Stats::load(&path);
         if let Some(e) = stats.error() {
             message = if message.is_empty() {
@@ -2444,7 +2444,7 @@ impl YTDugem {
         let mut shown = false;
 
         // Appearance
-        let rows = ["Playback controls"];
+        let rows = ["Theme", "Playback controls"];
         if let Some(q) = group_query(&query, "Appearance", &rows) {
             shown = true;
             settings_group(ui, "Appearance", |ui| {
@@ -2452,6 +2452,34 @@ impl YTDugem {
                     setting_row(
                         ui,
                         rows[0],
+                        "Classic flat surfaces, or Liquid Glass: translucent, rounded panels over the artwork",
+                        |ui| {
+                            use store::Theme;
+                            let label = |theme| match theme {
+                                Theme::Classic => "Classic",
+                                Theme::LiquidGlass => "Liquid Glass",
+                            };
+                            let mut chosen = self.library.theme;
+                            egui::ComboBox::from_id_salt("theme")
+                                .width(280.0)
+                                .selected_text(label(chosen))
+                                .show_ui(ui, |ui| {
+                                    for theme in [Theme::Classic, Theme::LiquidGlass] {
+                                        ui.selectable_value(&mut chosen, theme, label(theme));
+                                    }
+                                });
+                            if chosen != self.library.theme {
+                                self.library.theme = chosen;
+                                apply_theme(ui.ctx(), chosen);
+                                self.save();
+                            }
+                        },
+                    );
+                }
+                if hit(&q, rows[1]) {
+                    setting_row(
+                        ui,
+                        rows[1],
                         "Show the controls in the top bar or in a floating bar at the bottom of the window",
                         |ui| {
                             use store::PlayerBarStyle;
@@ -4306,12 +4334,38 @@ fn err(e: anyhow::Error) -> String {
 }
 
 impl YTDugem {
+    /// Liquid Glass only: what the glass surfaces sit on. The playing track's blurred artwork,
+    /// or a cool gradient when nothing with artwork has played.
+    fn ambient_backdrop(&self, ui: &egui::Ui) {
+        if !glass(ui) {
+            return;
+        }
+        let rect = ui.max_rect();
+        let painter = ui.painter();
+        if let Some(back) = self.backdrop.as_ref().or(self.backdrop_prev.as_ref()) {
+            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+            painter.image(back.id(), rect, uv, Color32::WHITE);
+            painter.rect_filled(rect, 0.0, Color32::from_black_alpha(110));
+        } else {
+            let mut mesh = egui::Mesh::default();
+            for (corner, color) in [
+                (rect.left_top(), Color32::from_rgb(34, 44, 72)),
+                (rect.right_top(), Color32::from_rgb(58, 36, 70)),
+                (rect.right_bottom(), Color32::from_rgb(22, 52, 58)),
+                (rect.left_bottom(), Color32::from_rgb(26, 28, 40)),
+            ] {
+                mesh.colored_vertex(corner, color);
+            }
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(0, 2, 3);
+            painter.add(mesh);
+        }
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        ui.painter().rect_filled(rect, 0.0, SIDE);
-        ui.painter().line_segment(
-            [rect.right_top(), rect.right_bottom()],
-            Stroke::new(1.0_f32, Color32::from_gray(43)),
-        );
+        ui.painter().rect_filled(rect, 0.0, surface(ui, SIDE, 150));
+        ui.painter()
+            .line_segment([rect.right_top(), rect.right_bottom()], divider(ui, 43));
         // The strip above the search box moves the window, like the top bar (the macOS-style
         // traffic lights that used to sit here duplicated the real window controls).
         let drag = ui.interact(
@@ -4336,10 +4390,19 @@ impl YTDugem {
             ),
             |ui| {
                 let mut focused = false;
+                let (fill, rim, radius) = if glass(ui) {
+                    (
+                        Color32::from_black_alpha(60),
+                        widgets::white_alpha(40),
+                        21.0,
+                    )
+                } else {
+                    (Color32::from_rgb(36, 37, 34), Color32::from_gray(63), 7.0)
+                };
                 let frame = egui::Frame::new()
-                    .fill(Color32::from_rgb(36, 37, 34))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(63)))
-                    .corner_radius(7.0)
+                    .fill(fill)
+                    .stroke(Stroke::new(1.0_f32, rim))
+                    .corner_radius(radius)
                     // The left padding puts the icon in the same column as the nav icons (11px
                     // in from the sidebar's inset), and the text starts where the nav labels do.
                     .inner_margin(egui::Margin {
@@ -4614,11 +4677,9 @@ impl YTDugem {
     }
     fn topbar(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let floating = self.library.player_bar == store::PlayerBarStyle::Floating;
-        ui.painter().rect_filled(rect, 0.0, SIDE);
-        ui.painter().line_segment(
-            [rect.left_bottom(), rect.right_bottom()],
-            Stroke::new(1.0_f32, Color32::from_gray(42)),
-        );
+        ui.painter().rect_filled(rect, 0.0, surface(ui, SIDE, 150));
+        ui.painter()
+            .line_segment([rect.left_bottom(), rect.right_bottom()], divider(ui, 42));
         let drag = ui.interact(
             Rect::from_min_max(
                 rect.min,
@@ -4700,14 +4761,18 @@ impl YTDugem {
             Pos2::new((card_left + card_right) / 2.0, rect.top() + 40.0),
             Vec2::new(card_width, 52.0),
         );
-        ui.painter()
-            .rect_filled(card, 5.0, Color32::from_rgb(47, 49, 51));
-        ui.painter().rect_stroke(
-            card,
-            5.0,
-            Stroke::new(1.0_f32, Color32::from_gray(66)),
-            egui::StrokeKind::Inside,
-        );
+        if glass(ui) {
+            glass_slab(ui.painter(), card, 14.0, 150);
+        } else {
+            ui.painter()
+                .rect_filled(card, 5.0, Color32::from_rgb(47, 49, 51));
+            ui.painter().rect_stroke(
+                card,
+                5.0,
+                Stroke::new(1.0_f32, Color32::from_gray(66)),
+                egui::StrokeKind::Inside,
+            );
+        }
         let response = ui.interact(
             card,
             ui.make_persistent_id("open-player"),
@@ -5965,25 +6030,34 @@ impl eframe::App for YTDugem {
         );
         // The page stays drawn while the sheet is dragged down, so it shows behind it.
         if shown < 1.0 || self.sheet_drag > 0.0 {
+            self.ambient_backdrop(ui);
             if self.sidebar_open {
                 egui::Panel::left("sidebar")
                     .exact_size(258.0)
                     .resizable(false)
-                    .frame(egui::Frame::new().fill(SIDE).inner_margin(0.0))
+                    .frame(
+                        egui::Frame::new()
+                            .fill(surface(ui, SIDE, 0))
+                            .inner_margin(0.0),
+                    )
                     .show(ui, |ui| {
                         self.sidebar(ui, ui.max_rect());
                     });
             }
             egui::Panel::top("topbar")
                 .exact_size(78.0)
-                .frame(egui::Frame::new().fill(SIDE).inner_margin(0.0))
+                .frame(
+                    egui::Frame::new()
+                        .fill(surface(ui, SIDE, 0))
+                        .inner_margin(0.0),
+                )
                 .show(ui, |ui| {
                     self.topbar(ui, ui.max_rect());
                 });
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::new()
-                        .fill(BG)
+                        .fill(surface(ui, BG, 70))
                         .inner_margin(egui::Margin::same(28)),
                 )
                 .show(ui, |ui| {
@@ -6051,15 +6125,24 @@ fn settings_group(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui
             .strong(),
     );
     ui.add_space(4.0);
+    let (fill, rim, radius) = if glass(ui) {
+        (widgets::white_alpha(10), widgets::white_alpha(34), 18.0)
+    } else {
+        (
+            Color32::from_rgb(35, 37, 33),
+            Color32::from_rgb(45, 47, 43),
+            12.0,
+        )
+    };
     egui::Frame::new()
-        .fill(Color32::from_rgb(35, 37, 33))
+        .fill(fill)
         // Clear of the page scrollbar, which sits on the content's right edge.
         .outer_margin(egui::Margin {
             right: 14,
             ..Default::default()
         })
-        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 47, 43)))
-        .corner_radius(12.0)
+        .stroke(Stroke::new(1.0_f32, rim))
+        .corner_radius(radius)
         .inner_margin(egui::Margin::symmetric(18, 4))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -6696,13 +6779,32 @@ fn font_definitions() -> egui::FontDefinitions {
     fonts
 }
 
-fn configure_style(ctx: &egui::Context) {
+fn configure_style(ctx: &egui::Context, theme: store::Theme) {
     egui_extras::install_image_loaders(ctx);
     // Once a picture is on the GPU, drop its downloaded bytes and decoded pixels.
     ctx.options_mut(|o| o.reduce_texture_memory = true);
     ctx.set_fonts(font_definitions());
-    let mut style = (*ctx.global_style()).clone();
-    style.visuals = egui::Visuals::dark();
+    apply_theme(ctx, theme);
+}
+
+fn theme_id() -> egui::Id {
+    egui::Id::unique("ytdugem-theme")
+}
+
+/// Whether the Liquid Glass theme is on; free drawing helpers read it from the context.
+fn glass(ui: &egui::Ui) -> bool {
+    ui.ctx()
+        .data(|d| d.get_temp::<store::Theme>(theme_id()))
+        .is_some_and(|t| t == store::Theme::LiquidGlass)
+}
+
+/// Rebuilds the global style for `theme` from scratch, so switching back leaves nothing behind.
+fn apply_theme(ctx: &egui::Context, theme: store::Theme) {
+    ctx.data_mut(|d| d.insert_temp(theme_id(), theme));
+    let mut style = egui::Style {
+        visuals: egui::Visuals::dark(),
+        ..Default::default()
+    };
     legacy_look(&mut style);
     style.visuals.panel_fill = BG;
     style.visuals.window_fill = Color32::from_rgb(35, 36, 33);
@@ -6722,7 +6824,110 @@ fn configure_style(ctx: &egui::Context) {
     style
         .text_styles
         .insert(egui::TextStyle::Button, FontId::proportional(15.0));
+    if theme == store::Theme::LiquidGlass {
+        liquid_glass_look(&mut style);
+    }
     ctx.set_global_style(style);
+}
+
+/// Liquid Glass: translucent fills that let the ambient backdrop through, a bright hairline rim
+/// on every control, and the larger, continuous corners of Apple's design language.
+fn liquid_glass_look(style: &mut egui::Style) {
+    let v = &mut style.visuals;
+    v.panel_fill = Color32::TRANSPARENT;
+    v.window_fill = Color32::from_rgba_unmultiplied(38, 42, 50, 222);
+    v.window_stroke = Stroke::new(1.0_f32, widgets::white_alpha(46));
+    v.window_corner_radius = egui::CornerRadius::same(20);
+    v.menu_corner_radius = egui::CornerRadius::same(14);
+    v.window_shadow = egui::epaint::Shadow {
+        offset: [0, 14],
+        blur: 40,
+        spread: 0,
+        color: Color32::from_black_alpha(120),
+    };
+    v.popup_shadow = egui::epaint::Shadow {
+        offset: [0, 8],
+        blur: 24,
+        spread: 0,
+        color: Color32::from_black_alpha(100),
+    };
+    v.faint_bg_color = widgets::white_alpha(6);
+    v.extreme_bg_color = Color32::from_black_alpha(70);
+    v.selection.bg_fill = Color32::from_rgba_unmultiplied(150, 190, 255, 70);
+    v.selection.stroke.color = WHITE;
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, widgets::white_alpha(26));
+    v.widgets.noninteractive.corner_radius = egui::CornerRadius::same(12);
+    for (state, fill, rim) in [
+        (&mut v.widgets.inactive, 16, 30),
+        (&mut v.widgets.hovered, 28, 70),
+        (&mut v.widgets.active, 40, 110),
+        (&mut v.widgets.open, 24, 60),
+    ] {
+        state.weak_bg_fill = widgets::white_alpha(fill);
+        state.bg_fill = widgets::white_alpha(fill);
+        state.bg_stroke = Stroke::new(1.0_f32, widgets::white_alpha(rim));
+        state.corner_radius = egui::CornerRadius::same(12);
+    }
+}
+
+/// The page, sidebar and top bar surfaces: opaque in Classic, tinted glass in Liquid Glass.
+fn surface(ui: &egui::Ui, classic: Color32, alpha: u8) -> Color32 {
+    if glass(ui) {
+        Color32::from_rgba_unmultiplied(16, 18, 24, alpha)
+    } else {
+        classic
+    }
+}
+
+/// The hairline between surfaces.
+fn divider(ui: &egui::Ui, classic: u8) -> Stroke {
+    if glass(ui) {
+        Stroke::new(1.0_f32, widgets::white_alpha(22))
+    } else {
+        Stroke::new(1.0_f32, Color32::from_gray(classic))
+    }
+}
+
+/// A floating glass slab: soft shadow, translucent body, a lighter upper half catching the light
+/// and a bright rim.
+fn glass_slab(painter: &egui::Painter, rect: Rect, radius: f32, alpha: u8) {
+    painter.add(
+        egui::epaint::Shadow {
+            offset: [0, 10],
+            blur: 32,
+            spread: 0,
+            color: Color32::from_black_alpha(100),
+        }
+        .as_shape(rect, radius),
+    );
+    painter.rect_filled(
+        rect,
+        radius,
+        Color32::from_rgba_unmultiplied(34, 38, 46, alpha),
+    );
+    // The sheen fades from the top edge to nothing at the middle, inside the rounded outline.
+    let mut outline = vec![];
+    egui::epaint::tessellator::path::rounded_rectangle(
+        &mut outline,
+        egui::epaint::RoundedRect::new(rect, radius),
+    );
+    let mut sheen = egui::Mesh::default();
+    sheen.colored_vertex(rect.center(), Color32::TRANSPARENT);
+    for p in &outline {
+        let t = ((rect.center().y - p.y) / (rect.height() / 2.0)).clamp(0.0, 1.0);
+        sheen.colored_vertex(*p, widgets::white_alpha((t * 26.0) as u8));
+    }
+    let n = outline.len() as u32;
+    for i in 0..n {
+        sheen.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+    }
+    painter.add(sheen);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0_f32, widgets::white_alpha(64)),
+        egui::StrokeKind::Inside,
+    );
 }
 
 fn heading(text: impl Into<String>, size: f32) -> RichText {
