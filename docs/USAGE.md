@@ -57,7 +57,7 @@ YTDugem automatically uses X11 and Mesa's software renderer to work around EGL/Z
 - **Local import:** recursive import with metadata, plus file and folder drag-and-drop. Nothing is uploaded.
 - **Downloads:** audio downloads with embedded metadata through yt-dlp/FFmpeg. Downloaded files become available in the local library.
 - **Lyrics:** fifteen upstream lyrics-provider handlers, with ordered enable/disable/reset settings, manual provider selection and retry, source attribution, line and word timing, and a plain-text fallback. Embedded local lyrics are supported. Availability and catalogue coverage depend on external providers; parser tests are not proof that each live service works.
-- **Audio:** a persisted seven-band manual equalizer, upstream presets and stereo balance through mpv/FFmpeg filters. You can select an audio device reported by mpv and set a Windows exclusive-output preference. This is not upstream's custom DSP or dynamic tone-pad EQ, and it does not guarantee bit-perfect output.
+- **Audio:** a persisted seven-band manual equalizer, upstream presets and stereo balance through mpv/FFmpeg filters. Two optional toggles, both off by default, use the same filter chain and apply to the song that is playing: **Loudness normalization** (FFmpeg `dynaudnorm`, a single-pass gain rider over a ~15 s window, peak target 0.9, at most 10x gain; it evens out volume between songs but is not ReplayGain or EBU R128 two-pass normalization) and **Skip silence** (FFmpeg `silenceremove`: leading silence below -60 dB is dropped, and any silent stretch below -60 dB longer than 2 s, including trailing silence, is shortened to about 2.5 s; shorter or louder musical pauses are kept). With Skip silence on, the elapsed time runs behind the track length by the amount trimmed, so a song ends that much before its displayed duration; a crossfade is shortened by the same amount, or replaced by a normal track change when more than the crossfade length was trimmed. You can select an audio device reported by mpv and set a Windows exclusive-output preference. This is not upstream's custom DSP or dynamic tone-pad EQ, and it does not guarantee bit-perfect output.
 - **Timers:** sleep timer, stop-after-track, and keyboard shortcuts.
 - **System media controls:** Linux MPRIS and Windows system media-control integration, when available in the desktop session.
 - **Discord Rich Presence:** coming soon. Settings shows it as "Coming soon" and nothing is sent to Discord until YTDugem has its own Discord application.
@@ -70,7 +70,7 @@ This is a working desktop rewrite, **not yet feature parity with every upstream 
 - Last.fm and ListenBrainz
 - listen-together
 - canvas video
-- Automix and crossfade
+- Automix
 - dynamic equalizer
 - MSI package (the release has an Inno Setup `setup.exe` instead)
 

@@ -125,6 +125,10 @@ pub struct AudioSettings {
     pub stereo_balance: f64,
     pub output_device: String,
     pub wasapi_exclusive: bool,
+    /// Even out loudness between tracks (FFmpeg `dynaudnorm`); see `player::audio_filter`.
+    pub loudness_normalization: bool,
+    /// Trim leading silence and long silent gaps (FFmpeg `silenceremove`).
+    pub skip_silence: bool,
 }
 
 fn audio_number(value: &serde_json::Value) -> f64 {
@@ -157,6 +161,8 @@ impl Default for AudioSettings {
             stereo_balance: 0.0,
             output_device: String::new(),
             wasapi_exclusive: false,
+            loudness_normalization: false,
+            skip_silence: false,
         }
     }
 }
@@ -598,7 +604,10 @@ mod tests {
     fn audio_settings_are_backward_compatible_sanitized_and_persistent() {
         let mut old: Library = serde_json::from_str(r#"{"volume":70.0}"#).unwrap();
         assert_eq!(old.audio.equalizer_bands, vec![0.0; 7]);
+        assert!(!old.audio.loudness_normalization && !old.audio.skip_silence);
         old.audio.equalizer_enabled = true;
+        old.audio.loudness_normalization = true;
+        old.audio.skip_silence = true;
         old.audio.equalizer_bands = vec![14.0, f64::NAN, -20.0];
         old.audio.stereo_balance = f64::INFINITY;
         old.audio.output_device = "wasapi/{device}".into();
@@ -610,6 +619,7 @@ mod tests {
         assert_eq!(old.audio.stereo_balance, 0.0);
         let restored: Library = serde_json::from_slice(&serde_json::to_vec(&old).unwrap()).unwrap();
         assert!(restored.audio.equalizer_enabled);
+        assert!(restored.audio.loudness_normalization && restored.audio.skip_silence);
         assert_eq!(restored.audio.output_device, "wasapi/{device}");
         assert_eq!(restored.audio.equalizer_bands, old.audio.equalizer_bands);
         assert_eq!(audio_presets().len(), 16);
