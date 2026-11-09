@@ -345,6 +345,7 @@ impl YTDugem {
             let mut active_idx = None;
             let mut active_gap = None;
             let mut animating = false;
+            let mut backing_moving = false;
             let mut seek_to = None;
             // Lines with timings follow the song: the sung one sharp, the rest falling away
             // either side. Plain lyrics have no "now" to fall away from and stay sharp.
@@ -435,12 +436,12 @@ impl YTDugem {
                                 u.spacing_mut().item_spacing.y = 2.0;
                                 let total = line_text(line).chars().count() as f32;
                                 let chars = sweep.chars();
-                                let galley = lyric_galley(u, line, chars >= total);
+                                let galley = lyric_galley(u, line, LYRIC_SIZE, chars >= total);
                                 let (rect, _) =
                                     u.allocate_exact_size(galley.size(), egui::Sense::hover());
                                 if chars > 0.0 && chars < total {
                                     animating = true;
-                                    let lit = lyric_galley(u, line, true);
+                                    let lit = lyric_galley(u, line, LYRIC_SIZE, true);
                                     paint_sweep(
                                         u.painter(),
                                         rect.min,
@@ -463,6 +464,27 @@ impl YTDugem {
                                     let alpha = if lit { alpha } else { alpha * UNSUNG_ALPHA };
                                     sub_lyric(u, sub, alpha, blur, &reveal, near, i);
                                 }
+                                if let Some(backing) = line.background.as_deref() {
+                                    let wanted = backing_wanted(synced, active, backing, position);
+                                    let open = ctx.animate_value_with_time(
+                                        egui::Id::unique(("lyric-backing", i)),
+                                        if wanted { 1.0 } else { 0.0 },
+                                        if wanted { BACKING_OPEN } else { BACKING_CLOSE },
+                                    );
+                                    if open > 0.0 && open < 1.0 {
+                                        animating = true;
+                                        backing_moving |= focus.is_some_and(|f| ri < f);
+                                    }
+                                    let swept = backing_vocal(
+                                        u,
+                                        backing,
+                                        synced.then_some(position),
+                                        alpha,
+                                        blur,
+                                        open * open * (3.0 - 2.0 * open),
+                                    );
+                                    animating |= swept;
+                                }
                             });
                         let block = framed.response.rect;
                         let hit = u.interact(
@@ -480,7 +502,12 @@ impl YTDugem {
                         if hit.clicked() {
                             seek_to = Some(line.time);
                         }
-                        if active && self.follow_lyrics && self.active_lyric != Some(i) {
+                        // A backing line folding away above the sung line pulls it up with it,
+                        // so keep centring while one moves (upstream waits for the scroll instead).
+                        if active
+                            && self.follow_lyrics
+                            && (self.active_lyric != Some(i) || backing_moving)
+                        {
                             hit.scroll_to_me(Some(Align::Center));
                         }
                         u.add_space(8.0);
@@ -707,6 +734,18 @@ const LYRIC_SETTLE: f32 = 0.4;
 pub(super) const UNSUNG_ALPHA: f32 = 0.45;
 /// Upstream `WIPE_FEATHER` (30 dp), scaled for our slightly smaller 30 pt font.
 const WIPE_FEATHER: f32 = 26.0;
+/// The lyric line's font size (upstream 34 sp).
+const LYRIC_SIZE: f32 = 30.0;
+/// The answering vocal: upstream `BACKING_FONT_SIZE` (23 sp under a 34 sp lead) scaled to our
+/// lead, `BACKING_ALPHA`, `BACKING_OPEN_MS` / `BACKING_CLOSE_MS`, `BACKING_LEAD_MS`,
+/// `BACKING_RISE` and `BACKING_FADE_LEAD`.
+const BACKING_SIZE: f32 = 21.0;
+const BACKING_ALPHA: f32 = 0.72;
+const BACKING_OPEN: f32 = 0.4;
+const BACKING_CLOSE: f32 = 0.45;
+const BACKING_LEAD: f64 = 0.25;
+const BACKING_RISE: f32 = 6.0;
+const BACKING_FADE_LEAD: f32 = 1.6;
 /// Slices the feathered edge of the sweep is cut into.
 const FEATHER_STEPS: usize = 10;
 /// Upstream `MIN_GAP_MS`: shorter silences are not worth a gap row.
@@ -744,17 +783,98 @@ fn lyric_rows(lines: &[LyricLine]) -> Vec<Row> {
     }
     for (i, line) in lines.iter().enumerate() {
         rows.push(Row::Line(i));
-        let (Some(next), Some(last)) = (lines.get(i + 1), line.words.last()) else {
+        let (Some(next), Some(end)) = (lines.get(i + 1), sung_until(line)) else {
             continue;
         };
-        if last.end > line.time && next.time - last.end >= MIN_GAP {
+        if end > line.time && next.time - end >= MIN_GAP {
             rows.push(Row::Gap {
-                start: last.end,
+                start: end,
                 end: next.time,
             });
         }
     }
     rows
+}
+
+/// When a word-timed line's singing stops: its last word, or its answering vocal's when that
+/// holds on past it (upstream `LyricLine.endMs`). `None` without word timings.
+fn sung_until(line: &LyricLine) -> Option<f64> {
+    let lead = line.words.last()?.end;
+    let backing = line
+        .background
+        .as_deref()
+        .and_then(|b| b.words.last())
+        .map_or(lead, |w| w.end);
+    Some(lead.max(backing))
+}
+
+/// Whether a line's answering vocal is on screen. As upstream, only while it is being sung:
+/// it opens just ahead of its first word and folds away after its last, on its own clock, not
+/// the lead's. One without word timings borrows its line's; plain lyrics always show it.
+fn backing_wanted(synced: bool, active: bool, backing: &LyricLine, position: f64) -> bool {
+    if !synced {
+        return true;
+    }
+    match (backing.words.first(), backing.words.last()) {
+        (Some(first), Some(last)) => position >= first.start - BACKING_LEAD && position < last.end,
+        _ => active,
+    }
+}
+
+/// The answering vocal without the brackets text sources wrap it in (upstream
+/// `withoutBracketPunctuation`), trimmed from the words too so the sweep measures what is drawn.
+fn without_brackets(line: &LyricLine) -> LyricLine {
+    let strip = |s: &str| s.replace(['(', ')'], "").trim().to_owned();
+    LyricLine {
+        time: line.time,
+        text: strip(&line.text),
+        words: line
+            .words
+            .iter()
+            .filter_map(|w| {
+                let text = strip(&w.text);
+                (!text.is_empty()).then(|| crate::model::TimedWord { text, ..w.clone() })
+            })
+            .collect(),
+        background: None,
+    }
+}
+
+/// The answering vocal under its lead, `open` (0..1) of the way in: the room it takes opens
+/// with it, the words fade up a little ahead and rise the last few points into place (upstream
+/// `revealBacking`). Smaller and a shade behind the lead, with its own sweep. Returns whether
+/// the sweep is mid-line, so the caller keeps repainting.
+fn backing_vocal(
+    ui: &mut egui::Ui,
+    backing: &LyricLine,
+    position: Option<f64>,
+    alpha: f32,
+    blur: f32,
+    open: f32,
+) -> bool {
+    if open <= 0.001 {
+        return false;
+    }
+    let shown = without_brackets(backing);
+    let sweep = position.map_or(Sweep::DONE, |p| line_sweep(&shown, p));
+    let total = line_text(&shown).chars().count() as f32;
+    let chars = sweep.chars();
+    let galley = lyric_galley(ui, &shown, BACKING_SIZE, chars >= total);
+    let size = galley.size();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(size.x, size.y * open), egui::Sense::hover());
+    let clip = rect.expand2(Vec2::new(blur * 2.0 + 12.0, 0.0));
+    let painter = ui.painter().with_clip_rect(clip.intersect(ui.clip_rect()));
+    let origin = Pos2::new(rect.left(), rect.top() + BACKING_RISE * (1.0 - open));
+    let alpha = alpha * BACKING_ALPHA * (open * BACKING_FADE_LEAD).min(1.0);
+    if chars > 0.0 && chars < total {
+        let lit = lyric_galley(ui, &shown, BACKING_SIZE, true);
+        let feather = WIPE_FEATHER * BACKING_SIZE / LYRIC_SIZE;
+        paint_sweep(&painter, origin, &galley, &lit, sweep, alpha, feather);
+        true
+    } else {
+        paint_blurred(&painter, origin, &galley, alpha, blur);
+        false
+    }
 }
 
 /// The row the song has reached: the latest whose start has passed. Before anything is
@@ -1008,8 +1128,8 @@ pub(super) fn paint_sweep(
 }
 
 /// A lyric line laid out in one piece, either fully lit or unlit (the sweep draws both).
-fn lyric_galley(ui: &egui::Ui, line: &LyricLine, lit: bool) -> Arc<egui::Galley> {
-    let font = FontId::new(30.0, egui::FontFamily::Name("bold".into()));
+fn lyric_galley(ui: &egui::Ui, line: &LyricLine, size: f32, lit: bool) -> Arc<egui::Galley> {
+    let font = FontId::new(size, egui::FontFamily::Name("bold".into()));
     let color = if lit {
         Color32::WHITE
     } else {
@@ -1239,7 +1359,12 @@ mod tests {
             .map(|w| w.text.as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        LyricLine { time, text, words }
+        LyricLine {
+            time,
+            text,
+            words,
+            background: None,
+        }
     }
 
     #[test]
@@ -1255,6 +1380,7 @@ mod tests {
                 time: 40.0,
                 text: "e".into(),
                 words: vec![],
+                background: None,
             },
             line(60.0, vec![word(60.0, 61.0, "f")]),
         ];
@@ -1292,6 +1418,7 @@ mod tests {
                 time: 20.0,
                 text: "b".into(),
                 words: vec![],
+                background: None,
             },
         ];
         let rows = lyric_rows(&lines);
@@ -1355,6 +1482,7 @@ mod tests {
             time: 5.0,
             text: "plain".into(),
             words: vec![],
+            background: None,
         };
         assert_eq!(line_sweep(&plain, 4.9).chars(), 0.0);
         assert_eq!(line_sweep(&plain, 5.0).chars(), 5.0);
@@ -1375,5 +1503,50 @@ mod tests {
         assert_eq!(extrapolate(10.0, 0.1, true), 10.1);
         assert_eq!(extrapolate(10.0, 5.0, true), 10.0 + PLAYHEAD_LEAD);
         assert_eq!(extrapolate(10.0, 0.1, false), 10.0);
+    }
+    #[test]
+    fn background_vocal_shows_only_while_it_is_sung() {
+        let mut lead = line(10.0, vec![word(10.0, 11.0, "lead")]);
+        let backing = line(
+            10.8,
+            vec![word(10.8, 11.5, "(echo"), word(11.5, 13.0, "back)")],
+        );
+        assert!(!backing_wanted(true, true, &backing, 10.0));
+        assert!(backing_wanted(true, false, &backing, 10.6));
+        assert!(backing_wanted(true, false, &backing, 12.9));
+        assert!(!backing_wanted(true, true, &backing, 13.0));
+        // Plain lyrics always show it; a line-synced one follows its lead.
+        assert!(backing_wanted(false, false, &backing, 0.0));
+        let untimed = LyricLine {
+            time: 10.0,
+            text: "(echo)".into(),
+            words: vec![],
+            background: None,
+        };
+        assert!(backing_wanted(true, true, &untimed, 10.0));
+        assert!(!backing_wanted(true, false, &untimed, 10.0));
+
+        let shown = without_brackets(&backing);
+        assert_eq!(line_text(&shown), "echo back");
+        assert_eq!(shown.text, "echo back");
+
+        // The break after the line starts when the echo stops, not when the lead does.
+        lead.background = Some(Box::new(backing));
+        let next = line(17.5, vec![word(17.5, 18.0, "next")]);
+        assert_eq!(
+            lyric_rows(&[lead, next]),
+            vec![
+                Row::Gap {
+                    start: 0.0,
+                    end: 10.0
+                },
+                Row::Line(0),
+                Row::Gap {
+                    start: 13.0,
+                    end: 17.5
+                },
+                Row::Line(1),
+            ]
+        );
     }
 }

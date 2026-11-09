@@ -295,6 +295,7 @@ mod tests {
             time,
             text: text.into(),
             words: vec![],
+            background: None,
         }
     }
 

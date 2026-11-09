@@ -20,6 +20,10 @@ pub struct LyricLine {
     pub time: f64,
     pub text: String,
     pub words: Vec<crate::model::TimedWord>,
+    /// The answering (background) vocal sung over this line, drawn smaller underneath it
+    /// (upstream `LyricLine.background`): TTML marks it `ttm:role="x-bg"`; other sources write
+    /// it as a trailing bracket, split off by `lyrics::with_background_vocals`.
+    pub background: Option<Box<LyricLine>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1712,6 +1716,7 @@ fn parse_lyrics(text: &str) -> Vec<LyricLine> {
                 time,
                 text: rest.trim().to_owned(),
                 words: vec![],
+                background: None,
             });
         }
     }
@@ -1724,6 +1729,7 @@ fn parse_lyrics(text: &str) -> Vec<LyricLine> {
                 time: 0.0,
                 text: l.to_owned(),
                 words: vec![],
+                background: None,
             })
             .collect();
     }
@@ -2205,11 +2211,13 @@ mod tests {
                     time: 1.2,
                     text: "hello".into(),
                     words: vec![],
+                    background: None,
                 },
                 LyricLine {
                     time: 2.3,
                     text: "hello".into(),
                     words: vec![],
+                    background: None,
                 }
             ]
         );
