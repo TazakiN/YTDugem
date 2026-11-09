@@ -11,8 +11,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod account;
 pub mod artist;
 pub mod lyrics;
+pub mod sponsorblock;
 pub mod translate;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1172,20 +1174,6 @@ pub enum LikeStatus {
     Indifferent,
 }
 
-/// Like, dislike or clear the rating of a song on the signed-in account.
-#[allow(dead_code)] // used by the player sheet (in progress)
-pub fn rate_song(video_id: &str, status: LikeStatus) -> Result<()> {
-    if !valid_video_id(video_id) {
-        bail!("Not a YouTube video ID: {video_id}");
-    }
-    let endpoint = match status {
-        LikeStatus::Like => "like/like",
-        LikeStatus::Dislike => "like/dislike",
-        LikeStatus::Indifferent => "like/removelike",
-    };
-    account_call(endpoint, json!({"target": {"videoId": video_id}})).map(|_| ())
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SongInfo {
     pub like: Option<LikeStatus>,
@@ -1194,7 +1182,6 @@ pub struct SongInfo {
 }
 
 /// The rating (when signed in) and the album and artist pages of a song.
-#[allow(dead_code)] // used by the player sheet (in progress)
 pub fn song_info(video_id: &str) -> Result<SongInfo> {
     if !valid_video_id(video_id) {
         bail!("Not a YouTube video ID: {video_id}");

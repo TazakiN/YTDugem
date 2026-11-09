@@ -174,10 +174,26 @@ fn parse_stream(info: &Value) -> Option<(Stream, Option<u64>)> {
     ))
 }
 
+/// Skip silence: drop leading silence (below -60 dB) and shorten any silent stretch longer than
+/// 2 s, including trailing silence, to about 2.5 s (`stop_duration` + `stop_silence`, measured
+/// with the bundled mpv). Musical pauses are shorter or louder, so they are left alone.
+const SKIP_SILENCE_FILTER: &str = "silenceremove=start_periods=1:start_threshold=-60dB:\
+stop_periods=-1:stop_duration=2:stop_threshold=-60dB:stop_silence=0.5";
+
+/// Loudness normalization in one streaming pass. `loudnorm` needs two passes for its linear
+/// mode (and resamples to 192 kHz), so this uses `dynaudnorm` with a long window instead:
+/// 500 ms frames smoothed over 31 frames (~15 s) act as a slow gain rider that evens out
+/// tracks without pumping inside them. Peaks stay below 0.9 and gain is capped at 10x.
+const NORMALIZE_FILTER: &str = "dynaudnorm=f=500:g=31:p=0.9:m=10";
+
 pub fn audio_filter(settings: &crate::store::AudioSettings) -> Option<String> {
     let mut settings = settings.clone();
     settings.sanitize();
     let mut filters = Vec::new();
+    // Before normalization, so silence is judged at the original level.
+    if settings.skip_silence {
+        filters.push(SKIP_SILENCE_FILTER.to_owned());
+    }
     if settings.equalizer_enabled {
         for (hz, gain) in EQ_HZ.into_iter().zip(settings.equalizer_bands) {
             if gain == 0.0 {
@@ -191,6 +207,9 @@ pub fn audio_filter(settings: &crate::store::AudioSettings) -> Option<String> {
             };
             filters.push(filter);
         }
+    }
+    if settings.loudness_normalization {
+        filters.push(NORMALIZE_FILTER.to_owned());
     }
     if settings.stereo_balance != 0.0 {
         filters.push(format!(
@@ -1055,6 +1074,42 @@ mod tests {
     }
 
     #[test]
+    fn filter_composition_covers_every_combination() {
+        for mask in 0..16u8 {
+            let mut settings = crate::store::AudioSettings::default();
+            settings.equalizer_enabled = mask & 1 != 0;
+            settings.equalizer_bands[3] = 3.0;
+            settings.stereo_balance = if mask & 2 != 0 { -0.5 } else { 0.0 };
+            settings.loudness_normalization = mask & 4 != 0;
+            settings.skip_silence = mask & 8 != 0;
+            let mut expected = Vec::new();
+            if settings.skip_silence {
+                expected.push(SKIP_SILENCE_FILTER);
+            }
+            if settings.equalizer_enabled {
+                expected.push("equalizer=f=1000:t=q:w=1:g=3");
+            }
+            if settings.loudness_normalization {
+                expected.push(NORMALIZE_FILTER);
+            }
+            if mask & 2 != 0 {
+                expected.push("stereotools=balance_out=-0.5");
+            }
+            let expected =
+                (!expected.is_empty()).then(|| format!("lavfi=[{}]", expected.join(",")));
+            assert_eq!(audio_filter(&settings), expected, "mask {mask:04b}");
+        }
+        // The lavfi graph is bracketed inside an mpv option, so filter options must not
+        // contain characters that end or split it.
+        for filter in [SKIP_SILENCE_FILTER, NORMALIZE_FILTER] {
+            assert!(
+                !filter.contains(['[', ']', ' ', '\'', '"', '\\']),
+                "{filter}"
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "requires mpv; run with BITCHORD_AUDIO_OUTPUT=null"]
     fn plays_local_audio() {
         use std::{fs::File, io::Write};
@@ -1107,6 +1162,8 @@ mod tests {
         eq.equalizer_enabled = true;
         eq.equalizer_bands[0] = 4.0;
         eq.stereo_balance = 0.25;
+        eq.loudness_normalization = true;
+        eq.skip_silence = true;
         p.set_audio_filter(&eq).unwrap();
         assert!(wait_for(&mut p, |s| s.audio_filter_count > 0).audio_filter_count > 0);
         p.set_audio_filter(&crate::store::AudioSettings::default())
@@ -1126,7 +1183,7 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
-        println!("EQ/balance apply, bypass/reset and real command rejection passed");
+        println!("EQ/balance/normalize/skip-silence apply, bypass/reset and real command rejection passed");
         p.toggle().unwrap();
         assert!(wait_for(&mut p, |s| s.paused).paused);
         p.seek(1.5).unwrap();
