@@ -12,7 +12,7 @@ use crate::{
 use eframe::egui::{self, Align, Color32, FontId, Pos2, Rect, RichText, Stroke, Vec2};
 use rand::seq::SliceRandom;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -87,8 +87,17 @@ enum Event {
     Translated(u64, Result<Translation, String>),
     Romanized(u64, String, Result<Romanization, String>),
     SongInfo(u64, String, Result<services::SongInfo, String>),
-    /// A rating sent for (track key); carries the rating it replaced, to restore on failure.
-    Rated(String, LikeStatus, Result<(), String>),
+    /// A rating sent for a track under (account epoch); carries the rating it replaced, to
+    /// restore on failure.
+    Rated(
+        u64,
+        Track,
+        LikeStatus,
+        Option<LikeStatus>,
+        Result<(), String>,
+    ),
+    /// The account's liked songs, fetched under (account epoch).
+    LikedSongs(u64, Result<HashSet<String>, String>),
     PlaylistEdited(Result<PlaylistEdit, String>),
     /// Every track of a playlist, fetched for a bulk action.
     BulkTracks(PlaylistBulk, String, Result<Vec<Track>, String>),
@@ -279,6 +288,14 @@ pub struct YTDugem {
     /// Rating and album/artist pages of (track key), for the sheet's like button and menu.
     song_info: Option<(String, services::SongInfo)>,
     song_info_request: u64,
+    /// Bumped whenever the account changes, so ratings and liked songs of another account are
+    /// dropped when they arrive.
+    account_epoch: u64,
+    /// Video ids the account liked (its Liked Music playlist), once fetched; for song-row menus.
+    liked_songs: Option<HashSet<String>>,
+    liked_songs_loading: bool,
+    /// Ratings set in this session (video id), newer than any reading from YouTube.
+    rated: HashMap<String, LikeStatus>,
     /// How far the player sheet is dragged down from fully open, in points.
     sheet_drag: f32,
     translating: bool,
@@ -502,6 +519,10 @@ impl YTDugem {
             output_open: false,
             song_info: None,
             song_info_request: 0,
+            account_epoch: 0,
+            liked_songs: None,
+            liked_songs_loading: false,
+            rated: HashMap::new(),
             sheet_drag: 0.0,
             translating: false,
             translation_request: 0,
@@ -786,42 +807,83 @@ impl YTDugem {
     }
     /// The current song's rating on the account, once known.
     fn like_status(&self) -> Option<LikeStatus> {
-        let key = self.current.as_ref()?.key();
-        self.song_info
-            .as_ref()
-            .filter(|(k, _)| k == key)
-            .and_then(|(_, info)| info.like)
+        self.rating_of(self.current.as_ref()?)
     }
-    /// Rate the current song; shown at once, and put back if YouTube refuses it.
-    fn rate(&mut self, status: LikeStatus) {
-        let Some(t) = self.current.clone().filter(is_youtube_track) else {
+    /// A song's rating on the account, once known: one set in this session, else YouTube's
+    /// reading for the playing song, else whether it is among the fetched liked songs.
+    fn rating_of(&self, track: &Track) -> Option<LikeStatus> {
+        known_rating(
+            self.rated.get(&track.id).copied(),
+            self.song_info
+                .as_ref()
+                .filter(|(k, _)| k == track.key())
+                .and_then(|(_, info)| info.like),
+            self.liked_songs.as_ref().map(|l| l.contains(&track.id)),
+        )
+    }
+    /// Fetch the account's liked songs once, so song-row menus can show their rating.
+    fn ensure_liked_songs(&mut self) {
+        if self.account.is_none() || self.liked_songs.is_some() || self.liked_songs_loading {
             return;
-        };
+        }
+        self.liked_songs_loading = true;
+        let (epoch, tx) = (self.account_epoch, self.tx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Event::LikedSongs(
+                epoch,
+                services::account::liked_song_ids().map_err(err),
+            ));
+        });
+    }
+    /// Rate the current song.
+    fn rate(&mut self, status: LikeStatus) {
+        if let Some(t) = self.current.clone() {
+            self.rate_track(t, status);
+        }
+    }
+    /// Rate a song on the account; shown at once, and put back if YouTube refuses it.
+    fn rate_track(&mut self, t: Track, status: LikeStatus) {
+        if !is_youtube_track(&t) {
+            return;
+        }
         if self.account.is_none() {
             self.message = "Sign in to YouTube Music to rate songs".into();
             return;
         }
-        let key = t.key().to_owned();
-        let previous = self.like_status().unwrap_or_default();
-        match self.song_info.as_mut().filter(|(k, _)| *k == key) {
-            Some((_, info)) => info.like = Some(status),
-            None => {
-                self.song_info = Some((
-                    key.clone(),
-                    services::SongInfo {
-                        like: Some(status),
-                        ..Default::default()
-                    },
-                ))
+        let previous = self.rating_of(&t);
+        self.rated.insert(t.id.clone(), status);
+        let (epoch, tx) = (self.account_epoch, self.tx.clone());
+        std::thread::spawn(move || {
+            let result = services::account::rate_song(&t.id, status).map_err(err);
+            let _ = tx.send(Event::Rated(epoch, t, status, previous, result));
+        });
+    }
+    /// A rating YouTube accepted: keep the liked songs and an open Liked Music page in step.
+    fn rated(&mut self, track: Track, status: LikeStatus) {
+        let liked = status == LikeStatus::Like;
+        if let Some(set) = &mut self.liked_songs {
+            if liked {
+                set.insert(track.id.clone());
+            } else {
+                set.remove(&track.id);
             }
         }
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(Event::Rated(
-                key,
-                previous,
-                services::rate_song(&t.id, status).map_err(err),
-            ));
+        if let Some(c) = self
+            .collection
+            .as_mut()
+            .filter(|c| c.playlist_id.as_deref() == Some("LM"))
+        {
+            let present = c.tracks.iter().any(|t| t.id == track.id);
+            if liked && !present {
+                c.tracks.insert(0, track.clone());
+            } else if !liked && present {
+                c.tracks.retain(|t| t.id != track.id);
+            }
+        }
+        self.toast_success(match status {
+            LikeStatus::Like => format!("Liked “{}”", track.title),
+            LikeStatus::Dislike => format!("Disliked “{}”", track.title),
+            LikeStatus::Indifferent => format!("Cleared the rating of “{}”", track.title),
         });
     }
     fn lyrics_settings_changed(&mut self, reload: bool) {
@@ -935,6 +997,13 @@ impl YTDugem {
         }
     }
     fn invalidate_account_results(&mut self) {
+        self.account_epoch += 1;
+        self.liked_songs = None;
+        self.liked_songs_loading = false;
+        self.rated.clear();
+        if let Some((_, info)) = &mut self.song_info {
+            info.like = None;
+        }
         self.account_playlists = None;
         self.account_playlists_request += 1;
         self.account_playlists_loading = false;
@@ -1608,6 +1677,30 @@ impl YTDugem {
         self.nav.retain(|p| !matches!(p, Page::Playlist(_)));
         if matches!(self.page, Page::Playlist(_)) {
             self.page = Page::Library;
+        }
+    }
+    /// Like and Dislike for a signed-in account's YouTube song (upstream `DesktopSongMenu`).
+    fn rating_menu(&mut self, ui: &mut egui::Ui, track: &Track) {
+        if self.account.is_none() || !is_youtube_track(track) {
+            return;
+        }
+        self.ensure_liked_songs();
+        let rating = self.rating_of(track).unwrap_or_default();
+        let like = if rating == LikeStatus::Like {
+            "Remove from liked"
+        } else {
+            "Like"
+        };
+        let dislike = if rating == LikeStatus::Dislike {
+            "Remove dislike"
+        } else {
+            "Dislike"
+        };
+        for (label, target) in [(like, LikeStatus::Like), (dislike, LikeStatus::Dislike)] {
+            if ui.button(label).clicked() {
+                self.rate_track(track.clone(), toggled_rating(rating, target));
+                ui.close();
+            }
         }
     }
     /// "Add to playlist…", which opens the dialog that holds the choices.
@@ -3702,21 +3795,35 @@ impl YTDugem {
                     }
                 }
                 // Quiet on failure: the like button and the album/artist entries just stay off.
+                // A rating sent before the details arrived wins: `rated` is read first.
                 Event::SongInfo(id, key, Ok(info)) if id == self.song_info_request => {
-                    // A rating sent before the details arrived wins over the older reading.
-                    let like = self
-                        .song_info
-                        .as_ref()
-                        .filter(|(k, _)| *k == key)
-                        .and_then(|(_, i)| i.like)
-                        .or(info.like);
-                    self.song_info = Some((key, services::SongInfo { like, ..info }));
+                    self.song_info = Some((key, info));
                 }
-                Event::Rated(key, previous, Err(e)) => {
-                    if let Some((_, info)) = self.song_info.as_mut().filter(|(k, _)| *k == key) {
-                        info.like = Some(previous);
+                Event::LikedSongs(epoch, r) if epoch == self.account_epoch => {
+                    match r {
+                        Ok(ids) => {
+                            self.liked_songs_loading = false;
+                            self.liked_songs = Some(ids);
+                        }
+                        // Left loading, so it is not retried until the account changes; the row
+                        // menus still offer Like and Dislike, just without the known state.
+                        Err(e) => self.message = format!("Could not load your liked songs: {e}"),
                     }
-                    self.toast_error(format!("Could not save the rating: {e}"));
+                }
+                Event::Rated(epoch, track, status, previous, r) if epoch == self.account_epoch => {
+                    match r {
+                        Ok(()) => self.rated(track, status),
+                        Err(e) => {
+                            // Only undo when no newer rating of the song replaced this one.
+                            if self.rated.get(&track.id) == Some(&status) {
+                                match previous {
+                                    Some(p) => self.rated.insert(track.id.clone(), p),
+                                    None => self.rated.remove(&track.id),
+                                };
+                            }
+                            self.toast_error(format!("Could not save the rating: {e}"));
+                        }
+                    }
                 }
                 Event::Prepared(key, stream) => {
                     if self.preparing.as_deref() == Some(key.as_str()) {
@@ -4622,6 +4729,7 @@ impl YTDugem {
         }
     }
     fn track_menu(&mut self, ui: &mut egui::Ui, track: &Track) {
+        self.rating_menu(ui, track);
         if ui.button("Play next").clicked() {
             self.library.queue.insert(0, track.clone());
             self.save();
@@ -5303,6 +5411,31 @@ fn is_youtube_track(track: &Track) -> bool {
     !track.id.is_empty() && track.source.starts_with("https://")
 }
 
+/// A song's rating from what is known, newest first: set in this session, YouTube's reading of
+/// the playing song, then membership of the fetched liked songs (None until they arrive).
+fn known_rating(
+    session: Option<LikeStatus>,
+    song_info: Option<LikeStatus>,
+    in_liked: Option<bool>,
+) -> Option<LikeStatus> {
+    session.or(song_info).or(in_liked.map(|liked| {
+        if liked {
+            LikeStatus::Like
+        } else {
+            LikeStatus::Indifferent
+        }
+    }))
+}
+
+/// Pressing Like or Dislike: sets that rating, or clears it when it is already set.
+fn toggled_rating(current: LikeStatus, pressed: LikeStatus) -> LikeStatus {
+    if current == pressed {
+        LikeStatus::Indifferent
+    } else {
+        pressed
+    }
+}
+
 /// A new playlist goes to the account when signed in and the seed (if any) is a YouTube track.
 fn create_target(signed_in: bool, seed: Option<&Track>) -> CreateTarget {
     if signed_in && seed.is_none_or(is_youtube_track) {
@@ -5397,6 +5530,29 @@ mod playlist_tests {
         assert_eq!(create_target(true, Some(&file)), CreateTarget::Local);
         assert_eq!(create_target(false, None), CreateTarget::Local);
         assert_eq!(create_target(false, Some(&web)), CreateTarget::Local);
+    }
+
+    #[test]
+    fn ratings_prefer_the_newest_reading_and_toggle_off() {
+        use LikeStatus::*;
+        assert_eq!(known_rating(None, None, None), None);
+        assert_eq!(known_rating(None, None, Some(false)), Some(Indifferent));
+        assert_eq!(known_rating(None, None, Some(true)), Some(Like));
+        // YouTube's reading of the playing song beats the (possibly partial) liked list.
+        assert_eq!(
+            known_rating(None, Some(Dislike), Some(false)),
+            Some(Dislike)
+        );
+        // A rating set in this session beats both.
+        assert_eq!(
+            known_rating(Some(Indifferent), Some(Like), Some(true)),
+            Some(Indifferent)
+        );
+
+        assert_eq!(toggled_rating(Indifferent, Like), Like);
+        assert_eq!(toggled_rating(Like, Like), Indifferent);
+        assert_eq!(toggled_rating(Like, Dislike), Dislike);
+        assert_eq!(toggled_rating(Dislike, Dislike), Indifferent);
     }
 
     #[test]
