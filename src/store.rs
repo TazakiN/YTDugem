@@ -100,6 +100,10 @@ pub struct Library {
     /// Submitted searches, most recent first; see `remember_search`.
     #[serde(default)]
     pub recent_searches: Vec<String>,
+    /// Last.fm and ListenBrainz options (upstream `DesktopScrobbleSettings`). The session key
+    /// and token are not here: they live in the protected `auth/scrobble-keys.json`.
+    #[serde(default)]
+    pub scrobble: crate::scrobble::ScrobbleSettings,
 }
 
 fn record_stats_default() -> bool {
@@ -274,8 +278,14 @@ fn lyrics_enabled_default() -> bool {
 }
 
 const LYRIC_KEY_IDS: &[&str] = &["paxsenix", "musixmatch"];
+/// The Last.fm session key and the ListenBrainz user token (see `crate::scrobble`).
+const SCROBBLE_KEY_IDS: &[&str] = &["lastfm_session", "listenbrainz"];
 
 fn lyric_keys_path() -> Result<PathBuf> {
+    keys_path("lyrics-keys.json")
+}
+
+fn keys_path(file: &str) -> Result<PathBuf> {
     let dir = data_path()
         .parent()
         .context("Library data directory unavailable")?
@@ -286,26 +296,39 @@ fn lyric_keys_path() -> Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    Ok(dir.join("lyrics-keys.json"))
+    Ok(dir.join(file))
 }
 
 /// Read whether a protected lyrics-service key is configured without exposing it to the UI.
 pub fn key_configured(key_id: &str) -> Result<bool> {
-    let id = valid_key_id(key_id)?;
+    let id = valid_key_id(LYRIC_KEY_IDS, key_id)?;
     Ok(read_lyric_keys()?.get(id).is_some_and(|v| !v.is_empty()))
 }
 
 /// Save or remove a provider key. Windows uses DPAPI; Unix stores it in an owner-only file.
 pub fn save_key(key_id: &str, value: &str) -> Result<()> {
-    save_key_at(&lyric_keys_path()?, key_id, value)
+    save_key_at(&lyric_keys_path()?, LYRIC_KEY_IDS, key_id, value)
 }
 
-fn save_key_at(path: &Path, key_id: &str, value: &str) -> Result<()> {
-    let id = valid_key_id(key_id)?;
+/// A scrobbling secret (`lastfm_session` or `listenbrainz`), protected like the lyrics keys
+/// but in its own `auth/scrobble-keys.json`, never in `library.json`.
+pub(crate) fn scrobble_secret(key_id: &str) -> Result<Option<String>> {
+    let id = valid_key_id(SCROBBLE_KEY_IDS, key_id)?;
+    Ok(read_keys_at(&keys_path("scrobble-keys.json")?, SCROBBLE_KEY_IDS)?.remove(id))
+}
+
+/// Save, or with a blank value remove, a scrobbling secret.
+pub(crate) fn save_scrobble_secret(key_id: &str, value: &str) -> Result<()> {
+    let path = keys_path("scrobble-keys.json")?;
+    save_key_at(&path, SCROBBLE_KEY_IDS, key_id, value)
+}
+
+fn save_key_at(path: &Path, allowed: &[&'static str], key_id: &str, value: &str) -> Result<()> {
+    let id = valid_key_id(allowed, key_id)?;
     if value.len() > 16 * 1024 || value.contains(['\r', '\n', '\0']) {
         anyhow::bail!("Invalid provider key");
     }
-    let mut keys = read_lyric_keys_at(path)?;
+    let mut keys = read_keys_at(path, allowed)?;
     if value.trim().is_empty() {
         keys.remove(id);
     } else {
@@ -330,22 +353,25 @@ fn save_key_at(path: &Path, key_id: &str, value: &str) -> Result<()> {
 }
 
 pub(crate) fn lyric_key(key_id: &str) -> Result<Option<String>> {
-    Ok(read_lyric_keys()?.remove(valid_key_id(key_id)?))
+    Ok(read_lyric_keys()?.remove(valid_key_id(LYRIC_KEY_IDS, key_id)?))
 }
 
-fn valid_key_id(key_id: &str) -> Result<&'static str> {
-    LYRIC_KEY_IDS
+fn valid_key_id(allowed: &[&'static str], key_id: &str) -> Result<&'static str> {
+    allowed
         .iter()
         .copied()
         .find(|id| *id == key_id)
-        .context("Unknown lyrics provider key")
+        .context("Unknown provider key")
 }
 
 fn read_lyric_keys() -> Result<std::collections::HashMap<String, String>> {
-    read_lyric_keys_at(&lyric_keys_path()?)
+    read_keys_at(&lyric_keys_path()?, LYRIC_KEY_IDS)
 }
 
-fn read_lyric_keys_at(path: &Path) -> Result<std::collections::HashMap<String, String>> {
+fn read_keys_at(
+    path: &Path,
+    allowed: &[&str],
+) -> Result<std::collections::HashMap<String, String>> {
     if !path.exists() {
         return Ok(Default::default());
     }
@@ -357,7 +383,7 @@ fn read_lyric_keys_at(path: &Path) -> Result<std::collections::HashMap<String, S
     let bytes = crate::auth::dpapi(false, &bytes).context("Cannot decrypt provider key storage")?;
     let keys: std::collections::HashMap<String, String> = serde_json::from_slice(&bytes)
         .context("Invalid provider key storage; original file preserved")?;
-    if keys.keys().any(|id| !LYRIC_KEY_IDS.contains(&id.as_str())) {
+    if keys.keys().any(|id| !allowed.contains(&id.as_str())) {
         anyhow::bail!("Invalid provider key storage; original file preserved");
     }
     Ok(keys)
@@ -390,6 +416,7 @@ impl Default for Library {
             skip_non_music: false,
             record_stats: true,
             recent_searches: vec![],
+            scrobble: Default::default(),
             download_dir: directories::UserDirs::new()
                 .and_then(|d| d.audio_dir().map(Path::to_path_buf))
                 .unwrap_or_else(|| PathBuf::from("."))
@@ -453,6 +480,7 @@ impl Library {
             1.0
         };
         value.audio.sanitize();
+        value.scrobble.sanitize();
         // Hand-edited or older files: trimmed, deduplicated and bounded like new entries.
         let searches = std::mem::take(&mut value.recent_searches);
         for query in searches.iter().rev().filter(|q| q.len() <= 500) {
@@ -831,9 +859,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bitchord-keys-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("lyrics-keys.json");
-        save_key_at(&path, "paxsenix", "secret-key-123").unwrap();
+        save_key_at(&path, LYRIC_KEY_IDS, "paxsenix", "secret-key-123").unwrap();
         assert_eq!(
-            read_lyric_keys_at(&path).unwrap()["paxsenix"],
+            read_keys_at(&path, LYRIC_KEY_IDS).unwrap()["paxsenix"],
             "secret-key-123"
         );
         #[cfg(windows)]
@@ -845,12 +873,12 @@ mod tests {
             let mut permissions = std::fs::metadata(&path).unwrap().permissions();
             permissions.set_readonly(true);
             std::fs::set_permissions(&path, permissions.clone()).unwrap();
-            let failed_commit = save_key_at(&path, "paxsenix", "replacement");
+            let failed_commit = save_key_at(&path, LYRIC_KEY_IDS, "paxsenix", "replacement");
             permissions.set_readonly(false);
             std::fs::set_permissions(&path, permissions).unwrap();
             assert!(failed_commit.is_err());
             assert_eq!(
-                read_lyric_keys_at(&path).unwrap()["paxsenix"],
+                read_keys_at(&path, LYRIC_KEY_IDS).unwrap()["paxsenix"],
                 "secret-key-123"
             );
         }
@@ -862,11 +890,31 @@ mod tests {
                 0o600
             );
         }
-        save_key_at(&path, "paxsenix", "").unwrap();
-        assert!(!read_lyric_keys_at(&path).unwrap().contains_key("paxsenix"));
+        save_key_at(&path, LYRIC_KEY_IDS, "paxsenix", "").unwrap();
+        assert!(!read_keys_at(&path, LYRIC_KEY_IDS)
+            .unwrap()
+            .contains_key("paxsenix"));
         std::fs::write(&path, b"corrupt").unwrap();
-        assert!(save_key_at(&path, "paxsenix", "replacement").is_err());
+        assert!(save_key_at(&path, LYRIC_KEY_IDS, "paxsenix", "replacement").is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"corrupt");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn scrobble_secrets_live_apart_from_lyrics_keys() {
+        let dir =
+            std::env::temp_dir().join(format!("bitchord-scrobble-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scrobble-keys.json");
+        save_key_at(&path, SCROBBLE_KEY_IDS, "listenbrainz", "token-123").unwrap();
+        assert_eq!(
+            read_keys_at(&path, SCROBBLE_KEY_IDS).unwrap()["listenbrainz"],
+            "token-123"
+        );
+        assert!(save_key_at(&path, SCROBBLE_KEY_IDS, "paxsenix", "x").is_err());
+        assert!(
+            save_key_at(&path, LYRIC_KEY_IDS, "paxsenix", "x").is_err(),
+            "a scrobble file is not a lyrics file"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

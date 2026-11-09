@@ -28,6 +28,7 @@ mod explore;
 mod floating_bar;
 mod library_view;
 mod playlist_files;
+mod scrobbling;
 mod search_box;
 mod sheet;
 mod sheet_lyrics;
@@ -94,6 +95,8 @@ enum Event {
     SearchSuggestions(u64, String, Result<Vec<String>, String>),
     /// Writing `stats.json` failed in the background.
     StatsSaveFailed(String),
+    /// Last.fm / ListenBrainz sign-in, credential and queue results.
+    Scrobble(scrobbling::ScrobbleEvent),
     Translated(u64, Result<Translation, String>),
     Romanized(u64, String, Result<Romanization, String>),
     SongInfo(u64, String, Result<services::SongInfo, String>),
@@ -319,6 +322,7 @@ pub struct YTDugem {
     updates: updater::Updates,
     stats: stats_page::Stats,
     search_box: search_box::SearchBox,
+    scrobbling: scrobbling::Scrobbling,
 }
 
 const SCREENSHOT_FRAMES: u32 = 120;
@@ -428,6 +432,7 @@ impl YTDugem {
         let integrations = Integrations::new();
         let download_path = library.download_dir.to_string_lossy().into_owned();
         let (tx, rx) = mpsc::channel();
+        let scrobbling = scrobbling::Scrobbling::start(&path, &tx);
         let mut app = Self {
             library,
             path,
@@ -557,6 +562,7 @@ impl YTDugem {
             updates: Default::default(),
             stats,
             search_box: Default::default(),
+            scrobbling,
         };
         if app.account.is_some() {
             // The saved session is shown at once and checked with YouTube in the background;
@@ -2993,6 +2999,7 @@ impl YTDugem {
             });
         }
 
+        shown |= self.scrobble_settings(ui, &query);
         shown |= self.privacy_settings(ui, &query);
         shown |= self.about_settings(ui, &query);
 
@@ -3879,6 +3886,7 @@ impl YTDugem {
                 Event::SearchSuggestions(id, query, r) => {
                     self.search_suggestions_arrived(id, query, r)
                 }
+                Event::Scrobble(e) => self.scrobble_event(e),
                 Event::StatsSaveFailed(e) => {
                     self.toast_error(format!("Could not save listening stats: {e}"))
                 }
@@ -4238,6 +4246,7 @@ impl YTDugem {
                 }
             }
             self.track_listen();
+            self.scrobble_tick();
             self.step_fade();
             self.maybe_crossfade();
             self.prepare_next();

@@ -356,6 +356,14 @@ pub fn open_page(url: &str) -> Result<()> {
     if !url.starts_with("https://github.com/") {
         bail!("Refusing to open {url}");
     }
+    open_browser(url)
+}
+
+/// Opens an already validated `https://` URL in the default browser, as one argument.
+pub(crate) fn open_browser(url: &str) -> Result<()> {
+    if !url.starts_with("https://") || url.contains(char::is_whitespace) {
+        bail!("Refusing to open {url}");
+    }
     #[cfg(windows)]
     let mut command = {
         let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());

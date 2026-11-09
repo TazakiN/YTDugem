@@ -30,7 +30,13 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - run: cargo build --release --locked
+      # Last.fm API account for scrobbling, baked in at build time. Missing secrets expand to
+      # empty strings, and the build then simply has no Last.fm (ListenBrainz still works).
+      - name: Release build
+        env:
+          BITCHORD_LASTFM_API_KEY: ${{ secrets.BITCHORD_LASTFM_API_KEY }}
+          BITCHORD_LASTFM_API_SECRET: ${{ secrets.BITCHORD_LASTFM_API_SECRET }}
+        run: cargo build --release --locked
       - name: Check Windows packaging selection and extraction commands
         run: python scripts/test-package-windows.py
       - name: Package Windows audio tools

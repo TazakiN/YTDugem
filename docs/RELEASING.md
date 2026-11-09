@@ -51,6 +51,20 @@ long-lived `stable` or `nightly` branches:
 If the workflow fails, fix the problem on `main`, delete the tag (`git push origin :v0.2.0`,
 `git tag -d v0.2.0`), and tag again. Do not reuse a version that has already been published.
 
+## Last.fm API key
+
+Last.fm scrobbling needs a Last.fm API account (key and shared secret, from
+https://www.last.fm/api/account/create). They are **never committed**. The app reads them at build
+time with `option_env!("BITCHORD_LASTFM_API_KEY")` and `option_env!("BITCHORD_LASTFM_API_SECRET")`,
+and falls back to the same environment variables at run time.
+
+Release builds need them as repository secrets `BITCHORD_LASTFM_API_KEY` and
+`BITCHORD_LASTFM_API_SECRET` (Settings → Secrets and variables → Actions). The release build step in
+`release.yml` and `check.yml` passes them to `cargo build --release`. When they are missing (forks,
+pull requests from forks) the build still succeeds; that build shows "This build has no Last.fm API
+key" and only ListenBrainz works. A key compiled into a distributed `.exe` can be extracted from it,
+as with upstream's Android builds, so use a key dedicated to YTDugem.
+
 ## The installer
 
 `packaging/windows/ytdugem.iss` (Inno Setup 6 or later) is built by

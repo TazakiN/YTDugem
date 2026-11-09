@@ -8,6 +8,7 @@ mod playback_check;
 mod player;
 mod playlist_io;
 mod runtime;
+mod scrobble;
 mod services;
 mod stats;
 mod store;
