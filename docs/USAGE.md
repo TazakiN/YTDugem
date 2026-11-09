@@ -52,27 +52,29 @@ YTDugem automatically uses X11 and Mesa's software renderer to work around EGL/Z
   - Real-account sign-in and personalized results still require user verification. Brand-channel discovery is not yet ported.
 - **Playback:** real local and online playback through mpv, with play/pause, seeking, previous/next, volume, speed (0.5–2×), shuffle and repeat.
 - **Playback controls:** **Settings → Appearance → Playback controls** chooses where the controls live: the **Top bar** (default) or a **Floating bar**, a pill over the bottom of the page with the transport, what is playing with a seekable progress line, the track menu, lyrics, queue and a volume popup. The floating bar is a YTDugem addition, not an upstream BitChord layout.
+- **Skip non-music sections:** **Settings → Playback → Skip non-music sections (SponsorBlock)** (off by default) skips the intros, outros and talking parts of music videos that SponsorBlock users marked as `music_offtopic`. A section is skipped once, when playback reaches it. Seeking back into it plays it, and a section that runs to the end moves on to the next track. A failed or slow lookup just means nothing is skipped. See [Configuration and data](#configuration-and-data) for what is sent. This is a YTDugem addition, not an upstream BitChord feature.
 - **Queue:** an editable queue with play-next, remove, reorder, clear and play-all.
 - **Library:** persistent liked songs, recently played tracks, local playlists and settings, with atomic saves and a backup. A corrupt library is preserved and saving is disabled rather than silently overwriting it.
+- **YouTube Music account playlists and ratings** (signed in only): the Library lists your account playlists next to your local ones. "Add to playlist…" offers both, and it can create a new account playlist seeded with the song. Owned account playlists support removing and reordering songs, renaming, editing the description and privacy, and deleting, and you can save or remove other playlists in your library. Like and Dislike are in the player menu, the full player's heart and every YouTube song row's menu. Row menus read the rating from your Liked Music playlist (up to its first 10 pages) and the playing song's rating from YouTube. Signed out, or for local files, only the local playlists are used, and local playlists are never changed by account edits. The request building and response parsing are unit tested against made-up fixtures; **real Google-account verification of these edits is still pending.**
 - **Local import:** recursive import with metadata, plus file and folder drag-and-drop. Nothing is uploaded.
 - **Filter and sort:** Local music, History and local playlists have a filter box (case-insensitive over title, artist and album) and a sort menu: the list's own order, recently added (Local music and playlists), title, artist or duration (unknown durations last). Play all and the queue use the filtered, sorted list. A YTDugem addition.
 - **Playlist files:** a local playlist page has **Export playlist** and Local music has **Export library**: type the path of a new file and choose **M3U8** (extended M3U with `#EXTINF`; local songs as file paths, online songs as `https://music.youtube.com/watch?v=` links) or **CSV** (`title,artist,album,duration,url`). An existing file is never replaced. **Library → On this computer → Import playlist file** reads an `.m3u` or `.m3u8` file into a new local playlist named after the file: paths (relative ones from the playlist's folder) become local tracks when a supported audio file exists there, YouTube and YouTube Music video links become online tracks, and missing files, other links and duplicates are skipped and counted. There is no file picker: paste a path (Explorer's "Copy as path" quotes are accepted). A YTDugem addition.
 - **Downloads:** audio downloads with embedded metadata through yt-dlp/FFmpeg. Downloaded files become available in the local library.
 - **Lyrics:** fifteen upstream lyrics-provider handlers, with ordered enable/disable/reset settings, manual provider selection and retry, source attribution, line and word timing, and a plain-text fallback. Embedded local lyrics are supported. Availability and catalogue coverage depend on external providers; parser tests are not proof that each live service works.
-- **Audio:** a persisted seven-band manual equalizer, upstream presets and stereo balance through mpv/FFmpeg filters. You can select an audio device reported by mpv and set a Windows exclusive-output preference. This is not upstream's custom DSP or dynamic tone-pad EQ, and it does not guarantee bit-perfect output.
+- **Audio:** a persisted seven-band manual equalizer, upstream presets and stereo balance through mpv/FFmpeg filters. Two optional toggles, both off by default, use the same filter chain and apply to the song that is playing: **Loudness normalization** (FFmpeg `dynaudnorm`, a single-pass gain rider over a ~15 s window, peak target 0.9, at most 10x gain; it evens out volume between songs but is not ReplayGain or EBU R128 two-pass normalization) and **Skip silence** (FFmpeg `silenceremove`: leading silence below -60 dB is dropped, and any silent stretch below -60 dB longer than 2 s, including trailing silence, is shortened to about 2.5 s; shorter or louder musical pauses are kept). With Skip silence on, the elapsed time runs behind the track length by the amount trimmed, so a song ends that much before its displayed duration; a crossfade is shortened by the same amount, or replaced by a normal track change when more than the crossfade length was trimmed. You can select an audio device reported by mpv and set a Windows exclusive-output preference. This is not upstream's custom DSP or dynamic tone-pad EQ, and it does not guarantee bit-perfect output.
 - **Timers:** sleep timer, stop-after-track, and keyboard shortcuts.
 - **System media controls:** Linux MPRIS and Windows system media-control integration, when available in the desktop session.
 - **Discord Rich Presence:** coming soon. Settings shows it as "Coming soon" and nothing is sent to Discord until YTDugem has its own Discord application.
 
 This is a working desktop rewrite, **not yet feature parity with every upstream desktop integration or a pixel-identical UI**. The following have not been ported:
 
-- remote playlist editing and account synchronization
+- syncing local playlists or local liked songs to the account (account and local playlists are kept separate)
 - brand-channel discovery
 - Spotify and other music source modules
 - Last.fm and ListenBrainz
 - listen-together
 - canvas video
-- Automix and crossfade
+- Automix
 - dynamic equalizer
 - MSI package (the release has an Inno Setup `setup.exe` instead)
 
@@ -119,6 +121,8 @@ HTTP errors, geoblocks and rate limits can stop any individual source from worki
 ## Configuration and data
 
 Public search needs no account credentials or API keys. Online playback depends on YouTube availability, authentication restrictions, network policy, and yt-dlp support. Failures are displayed rather than treated as successful playback. Only download media you are authorized to save.
+
+**Skip non-music sections** is off by default because it contacts a third-party service, [SponsorBlock](https://sponsor.ajay.app). When it is on, YTDugem sends only the first four hex digits of the SHA-256 hash of each YouTube video ID it plays. The response covers many videos, and YTDugem picks out the one it is playing locally. No account or other data is sent, and local files are never looked up.
 
 | Variable | Purpose |
 |---|---|
