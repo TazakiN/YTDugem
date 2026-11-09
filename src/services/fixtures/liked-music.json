@@ -1,0 +1,11 @@
+{
+  "header": {"musicResponsiveHeaderRenderer": {"title": {"runs": [{"text": "Liked Music"}]}}},
+  "contents": {"twoColumnBrowseResultsRenderer": {"secondaryContents": {"sectionListRenderer": {"contents": [
+    {"musicPlaylistShelfRenderer": {"playlistId": "LM", "contents": [
+      {"musicResponsiveListItemRenderer":{"playlistItemData":{"videoId":"aaaaaaaaaaa","playlistSetVideoId":"SET_aaaaaaaaaaa"},"flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"First liked song"}]}}},{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Example Artist"}]}}}],"fixedColumns":[{"musicResponsiveListItemFixedColumnRenderer":{"text":{"runs":[{"text":"3:21"}]}}}]}},
+      {"musicResponsiveListItemRenderer":{"playlistItemData":{"videoId":"bbbbbbbbbbb","playlistSetVideoId":"SET_bbbbbbbbbbb"},"flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Second liked song"}]}}},{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Example Artist"}]}}}],"fixedColumns":[{"musicResponsiveListItemFixedColumnRenderer":{"text":{"runs":[{"text":"3:21"}]}}}]}},
+      {"musicResponsiveListItemRenderer": {"flexColumns": [{"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Unavailable row without a video"}]}}}]}},
+      {"continuationItemRenderer": {"continuationEndpoint": {"continuationCommand": {"token": "NEXT_PAGE_TOKEN"}}}}
+    ]}}
+  ]}}}}
+}
