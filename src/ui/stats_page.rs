@@ -421,7 +421,9 @@ impl YTDugem {
                     .color(WHITE),
                 );
                 ui.add_space(12.0);
-                ui.horizontal_wrapped(|ui| {
+                // Top-aligned, wrapping cells: a centred row stepped each cell down.
+                let cells = egui::Layout::left_to_right(Align::Min).with_main_wrap(true);
+                ui.with_layout(cells, |ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(28.0, 12.0);
                     for (label, row) in [
                         ("Top song", &track),
@@ -429,7 +431,7 @@ impl YTDugem {
                         ("Top album", &album),
                     ] {
                         if let Some(row) = row {
-                            ui.horizontal(|ui| {
+                            ui.horizontal_top(|ui| {
                                 let (r, _) =
                                     ui.allocate_exact_size(Vec2::splat(56.0), egui::Sense::hover());
                                 draw_image(ui, &row.thumbnail, r, None);
