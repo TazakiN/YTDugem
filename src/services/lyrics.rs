@@ -166,7 +166,7 @@ pub fn lookup(
         if let Some(lines) = embedded(track) {
             return Ok(Lyrics {
                 provider: "Downloaded",
-                lines,
+                lines: with_background_vocals(lines),
             });
         }
     }
@@ -200,7 +200,7 @@ pub fn lookup(
             Ok(Some(lines)) if lines.iter().any(|line| !line.text.trim().is_empty()) => {
                 return Ok(Lyrics {
                     provider: provider.label,
-                    lines,
+                    lines: with_background_vocals(lines),
                 });
             }
             Ok(_) => (),
@@ -218,6 +218,96 @@ pub fn lookup(
     } else {
         Err(anyhow!("No lyrics found from enabled providers"))
     }
+}
+/// Hangs the answering vocal under its line, as upstream `withBackgroundVocals`. Only TTML says
+/// outright which spans are the backing voice; every other source writes it into the line as a
+/// closing bracket ("I'm foolishly patient (Foolishly patient)"). Split out, the bracket keeps
+/// its own word timings and is drawn under the lead instead of being swept through it. The
+/// parentheses stay on the text (they are what the provider published); the UI trims them.
+pub fn with_background_vocals(lines: Vec<LyricLine>) -> Vec<LyricLine> {
+    lines.into_iter().map(split_trailing_bracket).collect()
+}
+
+fn split_trailing_bracket(line: LyricLine) -> LyricLine {
+    if line.background.is_some() {
+        return line;
+    }
+    if line.words.is_empty() {
+        let Some(open) = bracket_start(&line.text) else {
+            return line;
+        };
+        let (lead, backing) = (line.text[..open].trim_end(), line.text[open..].trim());
+        if lead.is_empty() || !backing.chars().any(char::is_alphanumeric) {
+            return line;
+        }
+        // Line-synced: no timing to divide, so the two halves share the line's stamp and stack.
+        return LyricLine {
+            time: line.time,
+            text: lead.to_owned(),
+            words: vec![],
+            background: Some(Box::new(LyricLine {
+                time: line.time,
+                text: backing.to_owned(),
+                words: vec![],
+                background: None,
+            })),
+        };
+    }
+    // Word-synced: the bracket must open on a word boundary of the words joined by spaces, so
+    // the words after it can go with it ("wait(ing)" opens mid-word and is left alone).
+    let joined = line
+        .words
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let Some(open) = bracket_start(&joined) else {
+        return line;
+    };
+    if !joined[open..].chars().any(char::is_alphanumeric) {
+        return line;
+    }
+    let mut at = 0;
+    let Some(split) = line.words.iter().position(|w| {
+        let here = at == open;
+        at += w.text.len() + 1;
+        here
+    }) else {
+        return line;
+    };
+    if split == 0 {
+        return line;
+    }
+    let mut words = line.words;
+    let backing = words.split_off(split);
+    LyricLine {
+        time: line.time,
+        text: joined[..open].trim_end().to_owned(),
+        words,
+        background: backing_line(backing),
+    }
+}
+
+/// Where the bracket that closes the line opens, walked back from the end counting depth so a
+/// nested pair does not split it early. A line that is wholly bracketed has no lead: `None`.
+fn bracket_start(text: &str) -> Option<usize> {
+    if !text.ends_with(')') {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (index, c) in text.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (index > 0).then_some(index);
+                }
+            }
+            _ => (),
+        }
+    }
+    None
 }
 
 fn embedded(track: &Track) -> Option<Vec<LyricLine>> {
@@ -1092,6 +1182,7 @@ fn parse_mxm_richsync(raw: &str) -> Vec<LyricLine> {
                 time: start,
                 text,
                 words,
+                background: None,
             })
         })
         .collect()
@@ -1108,6 +1199,7 @@ fn parse_mxm_subtitles(raw: &str) -> Vec<LyricLine> {
                 time,
                 text: text.to_owned(),
                 words: vec![],
+                background: None,
             })
         })
         .collect()
@@ -1236,6 +1328,7 @@ fn youtube_captions(track: &Track) -> Result<Option<Vec<LyricLine>>> {
                     time: ms as f64 / 1000.0,
                     text: text.into(),
                     words: vec![],
+                    background: None,
                 });
             }
         }
@@ -1461,6 +1554,7 @@ fn genius_html_lines(html: &str) -> Vec<LyricLine> {
             time: 0.0,
             text: text.to_owned(),
             words: vec![],
+            background: None,
         })
         .collect()
 }
@@ -1597,6 +1691,7 @@ fn parse_youtube_description(page: &Value) -> Option<Vec<LyricLine>> {
             time: 0.0,
             text: s.to_owned(),
             words: vec![],
+            background: None,
         })
         .collect::<Vec<_>>();
     usable(&lines).then_some(lines)
@@ -1669,6 +1764,7 @@ fn parse_lrc(text: &str) -> Vec<LyricLine> {
                     time,
                     text,
                     words: vec![],
+                    background: None,
                 });
             }
         }
@@ -1684,6 +1780,7 @@ fn parse_lrc(text: &str) -> Vec<LyricLine> {
                 time: 0.0,
                 text: s.to_owned(),
                 words: vec![],
+                background: None,
             })
             .collect();
     }
@@ -1896,6 +1993,7 @@ fn parse_structured_timed(root: &Value) -> Option<Vec<LyricLine>> {
                 time: start as f64 / 1000.0,
                 text: text.trim().to_owned(),
                 words,
+                background: None,
             })
         })
         .collect::<Vec<_>>();
@@ -1959,6 +2057,7 @@ fn parse_enhanced_lrc(raw: &str) -> Vec<LyricLine> {
                 },
                 text: text.trim().to_owned(),
                 words,
+                background: None,
             });
         }
     }
@@ -1997,7 +2096,13 @@ fn parse_ttml(raw: &str) -> Option<Vec<LyricLine>> {
         let line_start = attribute(attrs, "begin")
             .and_then(parse_clock)
             .unwrap_or(0.0);
-        let words = ttml_words(body);
+        let (words, backing) = ttml_words(body);
+        // A line sung wholly by the answering voice has no lead to hang under: it is the line.
+        let (words, backing) = if words.is_empty() {
+            (backing, vec![])
+        } else {
+            (words, backing)
+        };
         let text = if words.is_empty() {
             decode_xml(strip_tags(body).trim())
         } else {
@@ -2018,6 +2123,7 @@ fn parse_ttml(raw: &str) -> Option<Vec<LyricLine>> {
                 },
                 text,
                 words,
+                background: backing_line(backing),
             });
         }
         rest = &rest[end + 4..];
@@ -2026,10 +2132,30 @@ fn parse_ttml(raw: &str) -> Option<Vec<LyricLine>> {
     usable(&out).then_some(out)
 }
 
-fn ttml_words(body: &str) -> Vec<TimedWord> {
+/// The answering vocal as a line of its own, opening on its first word.
+fn backing_line(words: Vec<TimedWord>) -> Option<Box<LyricLine>> {
+    let time = words.first()?.start;
+    Some(Box::new(LyricLine {
+        time,
+        text: words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        words,
+        background: None,
+    }))
+}
+
+type Runs = Vec<(String, f64, f64, bool)>;
+
+/// A paragraph's timed words: the lead's, and the answering vocal's (`ttm:role="x-bg"`) kept
+/// apart, as upstream `TtmlLyrics.collect`. Translations and romanizations carried inline
+/// (`x-translation` / `x-roman`) are the same words again and are skipped.
+fn ttml_words(body: &str) -> (Vec<TimedWord>, Vec<TimedWord>) {
     // `gap`: whitespace seen between spans since the last leaf. Apple-style TTML puts the space
     // between words outside the spans (`<span>Hello</span> <span>world</span>`).
-    fn leaves(raw: &str, out: &mut Vec<(String, f64, f64, bool)>, gap: &mut bool) {
+    fn leaves(raw: &str, lead: &mut Runs, backing: &mut Runs, gap: &mut bool, bg: bool) {
         let mut rest = raw;
         while let Some(open) = rest.find("<span") {
             *gap |= strip_tags(&rest[..open]).chars().any(char::is_whitespace);
@@ -2065,14 +2191,19 @@ fn ttml_words(body: &str) -> Vec<TimedWord> {
                 return;
             };
             let inner = &rest[inner_start..close];
-            if inner.contains("<span") {
-                leaves(inner, out, gap);
+            let role = attribute(attrs, "role").unwrap_or_default();
+            let bg = bg || role == "x-bg";
+            if matches!(role, "x-translation" | "x-roman") {
+                // Not sung: an alternate rendering of the line.
+            } else if inner.contains("<span") {
+                leaves(inner, lead, backing, gap, bg);
             } else if let Some(start) = attribute(attrs, "begin").and_then(parse_clock) {
                 let end_time = attribute(attrs, "end")
                     .and_then(parse_clock)
                     .unwrap_or(start);
                 let text = decode_xml(&strip_tags(inner));
                 if !text.trim().is_empty() {
+                    let out = if bg { &mut *backing } else { &mut *lead };
                     out.push((text, start, end_time.max(start), std::mem::take(gap)));
                 }
             }
@@ -2080,8 +2211,13 @@ fn ttml_words(body: &str) -> Vec<TimedWord> {
         }
     }
 
-    let mut runs = Vec::new();
-    leaves(body, &mut runs, &mut false);
+    let (mut lead, mut backing) = (Vec::new(), Vec::new());
+    leaves(body, &mut lead, &mut backing, &mut false, false);
+    (merge_runs(lead), merge_runs(backing))
+}
+
+/// Glues syllable runs back into words: a word ends at whitespace, inside a run or between two.
+fn merge_runs(runs: Runs) -> Vec<TimedWord> {
     let mut words: Vec<TimedWord> = Vec::new();
     let mut previous_space = false;
     for (text, start, end, gap) in runs {
@@ -2586,6 +2722,90 @@ mod tests {
             ids.iter().position(|id| *id == "kugou").unwrap()
                 > ids.iter().position(|id| *id == "youtube_music").unwrap()
         );
+    }
+
+    #[test]
+    fn ttml_background_vocal_hangs_under_its_lead() {
+        // lrc.red's "Tarot" line: the echo is a `ttm:role="x-bg"` span after the lead's words.
+        let lines = parse_ttml(r#"<tt><body><p begin="1:57.769" end="2:02.022"><span begin="1:57.769" end="1:58.094">Di</span> <span begin="1:58.094" end="1:58.374">ke</span><span begin="1:58.374" end="2:00.398">hidupan</span> <span ttm:role="x-bg"><span begin="1:59.903" end="2:00.231">(Di</span> <span begin="2:00.231" end="2:02.022">kehidupan)</span></span></p><p begin="2:00.820"><span begin="2:00.820" end="2:01.463">Semoga</span></p></body></tt>"#).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "Di kehidupan");
+        assert_eq!(lines[0].words.len(), 2);
+        let backing = lines[0].background.as_deref().unwrap();
+        assert_eq!(backing.text, "(Di kehidupan)");
+        assert!((backing.time - 119.903).abs() < 1e-9);
+        assert_eq!(backing.words.last().unwrap().end, 122.022);
+        assert!(lines[1].background.is_none());
+
+        // A backing vocal that is one timed span, and inline translations, which are not sung.
+        let lines = parse_ttml(r#"<tt><body><p begin="1"><span begin="1" end="1.5">hey</span> <span ttm:role="x-bg" begin="1.5" end="2">(ooh)</span><span ttm:role="x-translation">hei</span></p></body></tt>"#).unwrap();
+        assert_eq!(lines[0].text, "hey");
+        assert_eq!(lines[0].background.as_deref().unwrap().text, "(ooh)");
+
+        // Sung wholly by the second voice: there is no lead, so it is the line itself.
+        let lines = parse_ttml(r#"<tt><body><p begin="1"><span ttm:role="x-bg"><span begin="1" end="2">(ooh)</span></span></p></body></tt>"#).unwrap();
+        assert_eq!(lines[0].text, "(ooh)");
+        assert!(lines[0].background.is_none());
+    }
+
+    #[test]
+    fn trailing_bracket_splits_into_a_background_vocal() {
+        let word = |start: f64, text: &str| TimedWord {
+            start,
+            end: start + 0.5,
+            text: text.into(),
+        };
+        let plain = |text: &str| LyricLine {
+            time: 3.0,
+            text: text.into(),
+            words: vec![],
+            background: None,
+        };
+        let split = with_background_vocals(vec![plain("lead words (echoed words)")]);
+        assert_eq!(split[0].text, "lead words");
+        let backing = split[0].background.as_deref().unwrap();
+        assert_eq!(
+            (backing.time, backing.text.as_str()),
+            (3.0, "(echoed words)")
+        );
+
+        let timed = LyricLine {
+            time: 1.0,
+            text: "I'm patient (Patient)".into(),
+            words: vec![
+                word(1.0, "I'm"),
+                word(1.5, "patient"),
+                word(2.0, "(Patient)"),
+            ],
+            background: None,
+        };
+        let split = with_background_vocals(vec![timed]);
+        assert_eq!(split[0].text, "I'm patient");
+        assert_eq!(split[0].words.len(), 2);
+        let backing = split[0].background.as_deref().unwrap();
+        assert_eq!((backing.time, backing.text.as_str()), (2.0, "(Patient)"));
+
+        // Left alone: wholly bracketed, mid-sentence, nested (split at the outer pair only),
+        // punctuation only, and a bracket opening mid-word.
+        for text in ["(ooh ooh)", "a (parenthetical) aside", "lead words (!)"] {
+            assert!(with_background_vocals(vec![plain(text)])[0]
+                .background
+                .is_none());
+        }
+        let nested = with_background_vocals(vec![plain("lead (echo (twice))")]);
+        assert_eq!(
+            nested[0].background.as_deref().unwrap().text,
+            "(echo (twice))"
+        );
+        let mid_word = LyricLine {
+            time: 1.0,
+            text: "wait(ing)".into(),
+            words: vec![word(1.0, "wait(ing)")],
+            background: None,
+        };
+        assert!(with_background_vocals(vec![mid_word])[0]
+            .background
+            .is_none());
     }
 
     #[test]
