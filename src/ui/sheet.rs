@@ -21,6 +21,9 @@ const DISMISS_VELOCITY: f32 = 1600.0;
 /// The sleeve shrinks a little while paused (upstream `ARTWORK_PAUSE_SHRINK_SCALE`).
 const PAUSED_ART_SCALE: f32 = 0.88;
 
+/// How long the backdrop takes to crossfade from one track's artwork to the next.
+const BACKDROP_FADE: f32 = 0.6;
+
 /// Upstream's 340 ms lyric strip transition.
 const STRIP_TRANSITION: f32 = 0.34;
 
@@ -311,16 +314,39 @@ impl YTDugem {
         }
     }
 
-    fn sheet_background(&self, ui: &egui::Ui, rect: Rect) {
+    fn sheet_background(&mut self, ui: &egui::Ui, rect: Rect) {
+        // 0 → 1 over the crossfade; settled at 1 when no transition is running.
+        let t = match (self.backdrop_fade, &self.backdrop_prev) {
+            (_, None) => 1.0,
+            // The next artwork is still loading: hold the previous one.
+            (None, Some(_)) => 0.0,
+            (Some(start), Some(_)) => {
+                let t = start.elapsed().as_secs_f32() / BACKDROP_FADE;
+                if t >= 1.0 {
+                    self.backdrop_prev = None;
+                    self.backdrop_fade = None;
+                    1.0
+                } else {
+                    ui.ctx().request_repaint();
+                    t
+                }
+            }
+        };
+        let eased = t * t * (3.0 - 2.0 * t);
         let painter = ui.painter();
         painter.rect_filled(rect, 0.0, Color32::from_rgb(18, 19, 17));
+        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        if let Some(prev) = &self.backdrop_prev {
+            // Under a new backdrop the old one stays opaque, so the blend never dips to dark.
+            let alpha = if self.backdrop.is_some() {
+                1.0
+            } else {
+                1.0 - eased
+            };
+            painter.image(prev.id(), rect, uv, Color32::WHITE.gamma_multiply(alpha));
+        }
         if let Some(back) = &self.backdrop {
-            painter.image(
-                back.id(),
-                rect,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            painter.image(back.id(), rect, uv, Color32::WHITE.gamma_multiply(eased));
         }
         painter.rect_filled(rect, 0.0, Color32::from_black_alpha(120));
         // Darker towards the bottom, where the row and the lyric bar sit.
