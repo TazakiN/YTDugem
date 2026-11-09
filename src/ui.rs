@@ -26,6 +26,9 @@ mod album;
 mod artist;
 mod explore;
 mod floating_bar;
+mod library_view;
+mod mini_player;
+mod playlist_files;
 mod sheet;
 mod sheet_lyrics;
 mod sheet_menu;
@@ -305,6 +308,11 @@ pub struct YTDugem {
     translating: bool,
     translation_request: u64,
     settings_query: String,
+    playlist_files: playlist_files::PlaylistFiles,
+    /// The always-on-top mini player window is open (Ctrl+M).
+    mini_player: bool,
+    /// The mini player minimized the main window, so closing it restores the main window.
+    mini_minimized: bool,
     updates: updater::Updates,
 }
 
@@ -532,6 +540,9 @@ impl YTDugem {
             translating: false,
             translation_request: 0,
             settings_query: String::new(),
+            playlist_files: Default::default(),
+            mini_player: false,
+            mini_minimized: false,
             updates: Default::default(),
         };
         if app.account.is_some() {
@@ -5245,6 +5256,8 @@ impl YTDugem {
                 ui.add_space(24.0);
                 ui.label(heading("On this computer", 20.0));
                 ui.add_space(8.0);
+                self.playlist_import_row(ui);
+                ui.add_space(8.0);
                 let locals: Vec<(String, usize)> = self
                     .library
                     .playlists
@@ -5265,7 +5278,10 @@ impl YTDugem {
                     }
                 }
             }
-            Page::History => self.track_list(ui, self.library.history.clone(), "History"),
+            Page::History => {
+                let history = self.library.history.clone();
+                self.filtered_track_list(ui, &history, "History", true, true);
+            }
             Page::Downloads => {
                 self.download_manager(ui);
                 let tracks: Vec<_> = self
@@ -5298,9 +5314,14 @@ impl YTDugem {
                             self.import(p);
                         }
                     }
+                    let local = &self.library.local;
+                    if icon_action(ui, !local.is_empty(), Icon::Share, "Export library").clicked() {
+                        self.open_export("Local music", local.clone());
+                    }
                 });
                 ui.add_space(12.0);
-                self.track_list(ui, self.library.local.clone(), "Local music");
+                let local = self.library.local.clone();
+                self.filtered_track_list(ui, &local, "Local music", true, false);
             }
             Page::Playlist(i) => {
                 let Some(p) = self.library.playlists.get(i).cloned() else {
@@ -5326,9 +5347,13 @@ impl YTDugem {
                             title: p.name.clone(),
                         });
                     }
+                    let empty = p.tracks.is_empty();
+                    if icon_action(ui, !empty, Icon::Share, "Export playlist").clicked() {
+                        self.open_export(&p.name, p.tracks.clone());
+                    }
                 });
                 ui.add_space(14.0);
-                self.track_list_with(ui, p.tracks, &p.name, false);
+                self.filtered_track_list(ui, &p.tracks, &p.name, false, false);
             }
             Page::Settings => self.settings_view(ui),
         }
@@ -5800,15 +5825,19 @@ impl eframe::App for YTDugem {
         let typing = ctx.egui_wants_keyboard_input();
         // While the palette is open it owns Escape (its modal closes on it).
         let palette_open = self.palette_open;
-        let (search, local, quit, escape, palette) = ctx.input_mut(|i| {
+        let (search, local, quit, escape, palette, mini) = ctx.input_mut(|i| {
             (
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::F),
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::L),
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::Q),
                 !palette_open && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::K),
+                i.consume_key(egui::Modifiers::CTRL, egui::Key::M),
             )
         });
+        if mini {
+            self.toggle_mini_player(ctx);
+        }
         if palette {
             self.toggle_palette();
         }
@@ -5940,6 +5969,8 @@ impl eframe::App for YTDugem {
         self.sign_in_dialog(ctx);
         self.playlist_dialog(ctx);
         self.download_delete_dialog(ctx);
+        self.playlist_files_step(ctx);
+        self.mini_player_step(ctx);
         self.update_dialog(ctx);
         self.screenshot_step(ctx);
         self.toasts.show(ctx);

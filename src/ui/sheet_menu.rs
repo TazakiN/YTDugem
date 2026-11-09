@@ -19,6 +19,7 @@ enum MenuAction {
     SleepOff,
     Share,
     SleepMenu,
+    MiniPlayer,
 }
 
 /// "12 min left" for the Sleep timer row; whole minutes, rounded up.
@@ -215,6 +216,9 @@ impl YTDugem {
                 if menu_row(ui, Icon::Share, "Share", None, youtube) {
                     action = Some(MenuAction::Share);
                 }
+                if menu_row(ui, Icon::Collapse, "Mini player", Some("Ctrl+M"), true) {
+                    action = Some(MenuAction::MiniPlayer);
+                }
             });
         let Some(action) = action else {
             return;
@@ -226,6 +230,7 @@ impl YTDugem {
         egui::Popup::close_all(ui.ctx());
         match action {
             MenuAction::SleepMenu => {}
+            MenuAction::MiniPlayer => self.toggle_mini_player(ui.ctx()),
             MenuAction::Rate(status) => self.rate(status),
             MenuAction::AddToPlaylist => {
                 self.open_playlist_dialog(PlaylistDialog::AddTo { track });

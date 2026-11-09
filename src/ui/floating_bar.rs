@@ -246,6 +246,7 @@ impl YTDugem {
                 Pos2::new(block.left(), block.top() + 52.0),
                 Pos2::new(block.right(), block.top() + 62.0),
             ),
+            "floating-seek",
         );
     }
 
@@ -291,11 +292,11 @@ impl YTDugem {
     }
 
     /// A thin line across the now-playing block; click or drag it to seek.
-    fn floating_progress(&mut self, ui: &mut egui::Ui, hit: Rect) {
+    pub(super) fn floating_progress(&mut self, ui: &mut egui::Ui, hit: Rect, id: &str) {
         let duration = self.duration();
         let response = ui.interact(
             hit,
-            ui.make_persistent_id("floating-seek"),
+            ui.make_persistent_id(id),
             egui::Sense::click_and_drag(),
         );
         let response = response.on_hover_text("Seek playback position");

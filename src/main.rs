@@ -6,6 +6,7 @@ mod integrations;
 mod model;
 mod playback_check;
 mod player;
+mod playlist_io;
 mod runtime;
 mod services;
 mod store;
