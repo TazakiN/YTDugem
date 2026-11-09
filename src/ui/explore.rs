@@ -435,7 +435,7 @@ fn mood_tile(ui: &mut egui::Ui, item: &MoodGenre, size: Vec2) -> egui::Response 
             544
         };
         // egui has no duotone filter; multiplying by the highlight tints the cover the same way.
-        egui::Image::new(artwork_at(url, px))
+        web_image(artwork_at(url, px))
             .uv(cover_uv(art.size()))
             .tint(tone.highlight)
             .corner_radius(corners)

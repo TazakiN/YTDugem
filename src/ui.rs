@@ -5809,7 +5809,7 @@ fn dialog_frame(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 fn avatar(ui: &egui::Ui, url: &str, name: &str, rect: Rect) {
     let radius = rect.width() / 2.0;
     if url.starts_with("https://") {
-        egui::Image::new(url)
+        web_image(url.to_owned())
             .fit_to_exact_size(rect.size())
             .corner_radius(radius)
             .paint_at(ui, rect);
@@ -5864,6 +5864,7 @@ impl eframe::App for YTDugem {
         }
         self.tray_step(ctx);
         self.stats_save_step();
+        forget_idle_images(ctx);
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 
@@ -6428,7 +6429,7 @@ fn draw_image(ui: &mut egui::Ui, url: &str, r: Rect, texture: Option<&egui::Text
         } else {
             544
         };
-        egui::Image::new(artwork_at(url, px))
+        web_image(artwork_at(url, px))
             .fit_to_exact_size(r.size())
             .corner_radius(8.0)
             .paint_at(ui, r);
@@ -6437,6 +6438,56 @@ fn draw_image(ui: &mut egui::Ui, url: &str, r: Rect, texture: Option<&egui::Text
             .rect_filled(r, 8.0, Color32::from_rgb(51, 53, 48));
         widgets::paint(ui.painter(), Icon::Logo, r.shrink(r.width() * 0.3), MUTED);
     }
+}
+
+/// How long a web picture stays loaded after it was last drawn.
+const IMAGE_IDLE: Duration = Duration::from_secs(180);
+
+/// When each web picture was last drawn, and when idle ones were last forgotten.
+static DRAWN_IMAGES: Mutex<(BTreeMap<String, Instant>, Option<Instant>)> =
+    Mutex::new((BTreeMap::new(), None));
+
+/// A picture from the web. egui keeps every picture it loaded for the whole session, so this
+/// notes when it was drawn and `forget_idle_images` releases the ones no longer shown.
+fn web_image(uri: String) -> egui::Image<'static> {
+    if let Ok(mut drawn) = DRAWN_IMAGES.lock() {
+        match drawn.0.get_mut(&uri) {
+            Some(at) => *at = Instant::now(),
+            None => {
+                drawn.0.insert(uri.clone(), Instant::now());
+            }
+        }
+    }
+    egui::Image::new(uri)
+}
+
+/// Releases the download, pixels and texture of web pictures not drawn for `IMAGE_IDLE`,
+/// checking twice a minute. Pages left behind, and everything while the window sits in the
+/// tray, then stop holding memory; they load again when shown.
+fn forget_idle_images(ctx: &egui::Context) {
+    let now = Instant::now();
+    let stale = match DRAWN_IMAGES.lock() {
+        Ok(mut drawn) if drawn.1.is_none_or(|at| now - at >= Duration::from_secs(30)) => {
+            drawn.1 = Some(now);
+            take_idle(&mut drawn.0, now)
+        }
+        _ => return,
+    };
+    for uri in stale {
+        ctx.forget_image(&uri);
+    }
+}
+
+fn take_idle(drawn: &mut BTreeMap<String, Instant>, now: Instant) -> Vec<String> {
+    let mut idle = vec![];
+    drawn.retain(|uri, at| {
+        let keep = now.saturating_duration_since(*at) < IMAGE_IDLE;
+        if !keep {
+            idle.push(uri.clone());
+        }
+        keep
+    });
+    idle
 }
 
 /// Upstream `artworkAt`: ask YouTube's image hosts for the size actually drawn instead of the
@@ -6647,6 +6698,8 @@ fn font_definitions() -> egui::FontDefinitions {
 
 fn configure_style(ctx: &egui::Context) {
     egui_extras::install_image_loaders(ctx);
+    // Once a picture is on the GPU, drop its downloaded bytes and decoded pixels.
+    ctx.options_mut(|o| o.reduce_texture_memory = true);
     ctx.set_fonts(font_definitions());
     let mut style = (*ctx.global_style()).clone();
     style.visuals = egui::Visuals::dark();
@@ -6778,6 +6831,20 @@ fn load_artwork(url: &str) -> anyhow::Result<(egui::ColorImage, egui::ColorImage
 #[cfg(test)]
 mod artwork_tests {
     use super::artwork_at;
+
+    #[test]
+    fn idle_web_images_are_forgotten_and_recent_ones_kept() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let mut drawn = std::collections::BTreeMap::from([
+            ("old".to_owned(), start),
+            ("new".to_owned(), start + Duration::from_secs(100)),
+        ]);
+        let now = start + super::IMAGE_IDLE + Duration::from_secs(1);
+        assert_eq!(super::take_idle(&mut drawn, now), ["old"]);
+        assert_eq!(drawn.keys().collect::<Vec<_>>(), ["new"]);
+        assert!(super::take_idle(&mut drawn, now).is_empty());
+    }
 
     #[test]
     fn player_artwork_is_fetched_large_with_the_stored_url_as_fallback() {
