@@ -9,6 +9,7 @@ mod player;
 mod playlist_io;
 mod runtime;
 mod services;
+mod stats;
 mod store;
 #[cfg(windows)]
 mod tray;

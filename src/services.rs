@@ -2104,6 +2104,37 @@ mod tests {
         assert!(parse_suggestions(&json!({})).is_empty());
     }
 
+    /// The shape of a real unauthenticated `music/get_search_suggestions` answer (trimmed):
+    /// a section of query rows, then a section of entity rows that is skipped.
+    #[test]
+    fn parses_a_recorded_suggestions_response() {
+        let response: Value =
+            serde_json::from_str(include_str!("services/fixtures/search_suggestions.json"))
+                .unwrap();
+        assert_eq!(
+            parse_suggestions(&response),
+            [
+                "dewa 19",
+                "dewa 19 full album",
+                "dewa 19 aku milikmu",
+                "dewa 19 separuh nafas",
+                "dewa 19 roman picisan",
+                "dewa 19 kangen",
+            ]
+        );
+        assert!(parse_suggestions(&json!({"contents": "unexpected"})).is_empty());
+        assert!(parse_suggestions(&Value::Null).is_empty());
+    }
+
+    #[test]
+    #[ignore = "contacts YouTube Music"]
+    fn live_search_suggestions() {
+        let list = search_suggestions("dewa 19").unwrap();
+        assert!(!list.is_empty(), "no suggestions");
+        assert!(list.iter().all(|s| !s.trim().is_empty()));
+        assert!(search_suggestions("   ").unwrap().is_empty());
+    }
+
     #[test]
     fn picks_the_best_plain_audio_format_like_meiro() {
         let response = json!({
