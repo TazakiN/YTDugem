@@ -26,6 +26,7 @@ mod album;
 mod artist;
 mod explore;
 mod floating_bar;
+mod library_view;
 mod sheet;
 mod sheet_lyrics;
 mod sheet_menu;
@@ -5065,7 +5066,10 @@ impl YTDugem {
                     }
                 }
             }
-            Page::History => self.track_list(ui, self.library.history.clone(), "History"),
+            Page::History => {
+                let history = self.library.history.clone();
+                self.filtered_track_list(ui, &history, "History", true, true);
+            }
             Page::Downloads => {
                 self.download_manager(ui);
                 let tracks: Vec<_> = self
@@ -5100,7 +5104,8 @@ impl YTDugem {
                     }
                 });
                 ui.add_space(12.0);
-                self.track_list(ui, self.library.local.clone(), "Local music");
+                let local = self.library.local.clone();
+                self.filtered_track_list(ui, &local, "Local music", true, false);
             }
             Page::Playlist(i) => {
                 let Some(p) = self.library.playlists.get(i).cloned() else {
@@ -5128,7 +5133,7 @@ impl YTDugem {
                     }
                 });
                 ui.add_space(14.0);
-                self.track_list_with(ui, p.tracks, &p.name, false);
+                self.filtered_track_list(ui, &p.tracks, &p.name, false, false);
             }
             Page::Settings => self.settings_view(ui),
         }
