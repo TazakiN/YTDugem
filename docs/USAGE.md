@@ -52,6 +52,7 @@ YTDugem automatically uses X11 and Mesa's software renderer to work around EGL/Z
   - Real-account sign-in and personalized results still require user verification. Brand-channel discovery is not yet ported.
 - **Playback:** real local and online playback through mpv, with play/pause, seeking, previous/next, volume, speed (0.5–2×), shuffle and repeat.
 - **Playback controls:** **Settings → Appearance → Playback controls** chooses where the controls live: the **Top bar** (default) or a **Floating bar**, a pill over the bottom of the page with the transport, what is playing with a seekable progress line, the track menu, lyrics, queue and a volume popup. The floating bar is a YTDugem addition, not an upstream BitChord layout.
+- **Skip non-music sections:** **Settings → Playback → Skip non-music sections (SponsorBlock)** (off by default) skips the intros, outros and talking parts of music videos that SponsorBlock users marked as `music_offtopic`. A section is skipped once, when playback reaches it. Seeking back into it plays it, and a section that runs to the end moves on to the next track. A failed or slow lookup just means nothing is skipped. See [Configuration and data](#configuration-and-data) for what is sent. This is a YTDugem addition, not an upstream BitChord feature.
 - **Queue:** an editable queue with play-next, remove, reorder, clear and play-all.
 - **Library:** persistent liked songs, recently played tracks, local playlists and settings, with atomic saves and a backup. A corrupt library is preserved and saving is disabled rather than silently overwriting it.
 - **Local import:** recursive import with metadata, plus file and folder drag-and-drop. Nothing is uploaded.
@@ -117,6 +118,8 @@ HTTP errors, geoblocks and rate limits can stop any individual source from worki
 ## Configuration and data
 
 Public search needs no account credentials or API keys. Online playback depends on YouTube availability, authentication restrictions, network policy, and yt-dlp support. Failures are displayed rather than treated as successful playback. Only download media you are authorized to save.
+
+**Skip non-music sections** is off by default because it contacts a third-party service, [SponsorBlock](https://sponsor.ajay.app). When it is on, YTDugem sends only the first four hex digits of the SHA-256 hash of each YouTube video ID it plays. The response covers many videos, and YTDugem picks out the one it is playing locally. No account or other data is sent, and local files are never looked up.
 
 | Variable | Purpose |
 |---|---|

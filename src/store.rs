@@ -90,6 +90,10 @@ pub struct Library {
     /// Where the playback controls live: the original top bar, or a floating bar at the bottom.
     #[serde(default, deserialize_with = "deserialize_player_bar")]
     pub player_bar: PlayerBarStyle,
+    /// Skip SponsorBlock `music_offtopic` segments of YouTube tracks. Off by default: it
+    /// contacts a third-party service.
+    #[serde(default)]
+    pub skip_non_music: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,6 +351,7 @@ impl Default for Library {
             translation_language: String::new(),
             download_format: download_format_default(),
             player_bar: PlayerBarStyle::default(),
+            skip_non_music: false,
             download_dir: directories::UserDirs::new()
                 .and_then(|d| d.audio_dir().map(Path::to_path_buf))
                 .unwrap_or_else(|| PathBuf::from("."))

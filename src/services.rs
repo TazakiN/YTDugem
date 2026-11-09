@@ -13,6 +13,7 @@ use std::{
 
 pub mod artist;
 pub mod lyrics;
+pub mod sponsorblock;
 pub mod translate;
 
 #[derive(Clone, Debug, PartialEq)]
