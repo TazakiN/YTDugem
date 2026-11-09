@@ -94,6 +94,13 @@ pub struct Library {
     /// contacts a third-party service.
     #[serde(default)]
     pub skip_non_music: bool,
+    /// Record plays in `stats.json` for the Stats page (local only). On by default.
+    #[serde(default = "record_stats_default")]
+    pub record_stats: bool,
+}
+
+fn record_stats_default() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,6 +365,7 @@ impl Default for Library {
             download_format: download_format_default(),
             player_bar: PlayerBarStyle::default(),
             skip_non_music: false,
+            record_stats: true,
             download_dir: directories::UserDirs::new()
                 .and_then(|d| d.audio_dir().map(Path::to_path_buf))
                 .unwrap_or_else(|| PathBuf::from("."))
