@@ -27,6 +27,7 @@ mod artist;
 mod explore;
 mod floating_bar;
 mod library_view;
+mod mini_player;
 mod playlist_files;
 mod sheet;
 mod sheet_lyrics;
@@ -287,6 +288,10 @@ pub struct YTDugem {
     translation_request: u64,
     settings_query: String,
     playlist_files: playlist_files::PlaylistFiles,
+    /// The always-on-top mini player window is open (Ctrl+M).
+    mini_player: bool,
+    /// The mini player minimized the main window, so closing it restores the main window.
+    mini_minimized: bool,
     updates: updater::Updates,
 }
 
@@ -510,6 +515,8 @@ impl YTDugem {
             translation_request: 0,
             settings_query: String::new(),
             playlist_files: Default::default(),
+            mini_player: false,
+            mini_minimized: false,
             updates: Default::default(),
         };
         if app.account.is_some() {
@@ -5570,15 +5577,19 @@ impl eframe::App for YTDugem {
         let typing = ctx.egui_wants_keyboard_input();
         // While the palette is open it owns Escape (its modal closes on it).
         let palette_open = self.palette_open;
-        let (search, local, quit, escape, palette) = ctx.input_mut(|i| {
+        let (search, local, quit, escape, palette, mini) = ctx.input_mut(|i| {
             (
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::F),
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::L),
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::Q),
                 !palette_open && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
                 i.consume_key(egui::Modifiers::CTRL, egui::Key::K),
+                i.consume_key(egui::Modifiers::CTRL, egui::Key::M),
             )
         });
+        if mini {
+            self.toggle_mini_player(ctx);
+        }
         if palette {
             self.toggle_palette();
         }
@@ -5711,6 +5722,7 @@ impl eframe::App for YTDugem {
         self.playlist_dialog(ctx);
         self.download_delete_dialog(ctx);
         self.playlist_files_step(ctx);
+        self.mini_player_step(ctx);
         self.update_dialog(ctx);
         self.screenshot_step(ctx);
         self.toasts.show(ctx);

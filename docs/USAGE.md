@@ -52,6 +52,7 @@ YTDugem automatically uses X11 and Mesa's software renderer to work around EGL/Z
   - Real-account sign-in and personalized results still require user verification. Brand-channel discovery is not yet ported.
 - **Playback:** real local and online playback through mpv, with play/pause, seeking, previous/next, volume, speed (0.5–2×), shuffle and repeat.
 - **Playback controls:** **Settings → Appearance → Playback controls** chooses where the controls live: the **Top bar** (default) or a **Floating bar**, a pill over the bottom of the page with the transport, what is playing with a seekable progress line, the track menu, lyrics, queue and a volume popup. The floating bar is a YTDugem addition, not an upstream BitChord layout.
+- **Mini player:** Ctrl+M, or **Mini player** in the Now Playing "•••" menu, opens a small always-on-top window with the artwork, title and artist, previous/play-pause/next and a seekable progress line, and minimizes the main window. Closing it, its "back" button, Esc or Ctrl+M closes it and restores the main window. Space and Alt+Left/Right work in it too. A YTDugem addition.
 - **Queue:** an editable queue with play-next, remove, reorder, clear and play-all.
 - **Library:** persistent liked songs, recently played tracks, local playlists and settings, with atomic saves and a backup. A corrupt library is preserved and saving is disabled rather than silently overwriting it.
 - **Local import:** recursive import with metadata, plus file and folder drag-and-drop. Nothing is uploaded.
@@ -107,6 +108,7 @@ HTTP errors, geoblocks and rate limits can stop any individual source from worki
 |---|---|
 | Ctrl+F | Search |
 | Ctrl+L | Local import |
+| Ctrl+M | Open or close the mini player |
 | Enter | Submit |
 | Ctrl+Enter | Play the first local, search or collection result |
 | Space | Play/pause (outside text fields) |
