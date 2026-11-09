@@ -97,10 +97,33 @@ pub struct Library {
     /// Record plays in `stats.json` for the Stats page (local only). On by default.
     #[serde(default = "record_stats_default")]
     pub record_stats: bool,
+    /// Submitted searches, most recent first; see `remember_search`.
+    #[serde(default)]
+    pub recent_searches: Vec<String>,
 }
 
 fn record_stats_default() -> bool {
     true
+}
+
+/// How many submitted searches are remembered.
+pub const MAX_RECENT_SEARCHES: usize = 20;
+
+/// Put a submitted query first, trimmed, dropping an earlier copy that differs only in case.
+pub fn remember_search(list: &mut Vec<String>, query: &str) {
+    let query = query.trim();
+    if query.is_empty() {
+        return;
+    }
+    forget_search(list, query);
+    list.insert(0, query.to_owned());
+    list.truncate(MAX_RECENT_SEARCHES);
+}
+
+/// Remove a remembered query, ignoring case.
+pub fn forget_search(list: &mut Vec<String>, query: &str) {
+    let query = query.trim().to_lowercase();
+    list.retain(|q| q.to_lowercase() != query);
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -366,6 +389,7 @@ impl Default for Library {
             player_bar: PlayerBarStyle::default(),
             skip_non_music: false,
             record_stats: true,
+            recent_searches: vec![],
             download_dir: directories::UserDirs::new()
                 .and_then(|d| d.audio_dir().map(Path::to_path_buf))
                 .unwrap_or_else(|| PathBuf::from("."))
@@ -429,6 +453,11 @@ impl Library {
             1.0
         };
         value.audio.sanitize();
+        // Hand-edited or older files: trimmed, deduplicated and bounded like new entries.
+        let searches = std::mem::take(&mut value.recent_searches);
+        for query in searches.iter().rev().filter(|q| q.len() <= 500) {
+            remember_search(&mut value.recent_searches, query);
+        }
         assign_playlist_ids(&mut value.playlists);
         Ok(value)
     }
@@ -542,6 +571,45 @@ mod tests {
             assert_eq!(lib.player_bar, PlayerBarStyle::TopBar);
             assert_eq!(lib.volume, 55.0);
         }
+    }
+
+    #[test]
+    fn recent_searches_are_trimmed_deduplicated_and_bounded() {
+        let mut list = vec![];
+        remember_search(&mut list, "  ");
+        assert!(list.is_empty());
+        remember_search(&mut list, " Dewa 19 ");
+        remember_search(&mut list, "noah");
+        remember_search(&mut list, "dewa 19");
+        assert_eq!(
+            list,
+            ["dewa 19", "noah"],
+            "case-insensitive, most recent first"
+        );
+        for i in 0..30 {
+            remember_search(&mut list, &format!("q{i}"));
+        }
+        assert_eq!(list.len(), MAX_RECENT_SEARCHES);
+        assert_eq!(list[0], "q29");
+        forget_search(&mut list, "Q29");
+        assert_eq!(list[0], "q28");
+        assert_eq!(list.len(), MAX_RECENT_SEARCHES - 1);
+
+        let old: Library = serde_json::from_str(r#"{"volume":70.0}"#).unwrap();
+        assert!(old.record_stats && old.recent_searches.is_empty());
+        let path = std::env::temp_dir().join(format!(
+            "ytdugem-recent-searches-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"record_stats":false,"recent_searches":[" a ","A","","b"]}"#,
+        )
+        .unwrap();
+        let loaded = Library::load(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(!loaded.record_stats);
+        assert_eq!(loaded.recent_searches, ["a", "b"]);
     }
 
     #[test]

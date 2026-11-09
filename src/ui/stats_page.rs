@@ -487,7 +487,7 @@ impl YTDugem {
         }
     }
 
-    /// Settings › Privacy: recording listening stats.
+    /// Settings › Privacy: recording stats and the recent-search list.
     pub(super) fn privacy_settings(&mut self, ui: &mut egui::Ui, query: &str) -> bool {
         let rows = [
             "Record listening stats",
@@ -526,6 +526,22 @@ impl YTDugem {
                         self.navigate(Page::Stats);
                     }
                 });
+            }
+            if hit(&q, rows[2]) {
+                let count = self.library.recent_searches.len();
+                setting_row(
+                    ui,
+                    rows[2],
+                    "Shown under the search box; remove one with its ×",
+                    |ui| {
+                        if ui
+                            .add_enabled(count > 0, egui::Button::new("Clear"))
+                            .clicked()
+                        {
+                            self.clear_recent_searches();
+                        }
+                    },
+                );
             }
         });
         true

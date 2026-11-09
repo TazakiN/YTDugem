@@ -1,0 +1,54 @@
+{
+  "responseContext": {
+    "serviceTrackingParams": [
+      {"service": "GFEEDBACK", "params": [{"key": "logged_in", "value": "0"}]}
+    ]
+  },
+  "contents": [
+    {
+      "searchSuggestionsSectionRenderer": {
+        "contents": [
+          {"searchSuggestionRenderer": {
+            "suggestion": {"runs": [{"text": "dewa 19", "bold": true}]},
+            "navigationEndpoint": {"searchEndpoint": {"query": "dewa 19"}},
+            "icon": {"iconType": "SEARCH"}}},
+          {"searchSuggestionRenderer": {
+            "suggestion": {"runs": [{"text": "dewa 19", "bold": true}, {"text": " full album"}]},
+            "navigationEndpoint": {"searchEndpoint": {"query": "dewa 19 full album"}},
+            "icon": {"iconType": "SEARCH"}}},
+          {"searchSuggestionRenderer": {
+            "suggestion": {"runs": [{"text": "dewa 19", "bold": true}, {"text": " aku milikmu"}]},
+            "navigationEndpoint": {"searchEndpoint": {"query": "dewa 19 aku milikmu"}},
+            "icon": {"iconType": "SEARCH"}}},
+          {"searchSuggestionRenderer": {
+            "suggestion": {"runs": [{"text": "dewa 19", "bold": true}, {"text": " separuh nafas"}]},
+            "navigationEndpoint": {"searchEndpoint": {"query": "dewa 19 separuh nafas"}},
+            "icon": {"iconType": "SEARCH"}}},
+          {"searchSuggestionRenderer": {
+            "suggestion": {"runs": [{"text": "dewa 19", "bold": true}, {"text": " roman picisan"}]},
+            "navigationEndpoint": {"searchEndpoint": {"query": "dewa 19 roman picisan"}},
+            "icon": {"iconType": "SEARCH"}}},
+          {"searchSuggestionRenderer": {
+            "suggestion": {"runs": [{"text": "dewa 19", "bold": true}, {"text": " kangen"}]},
+            "icon": {"iconType": "SEARCH"}}}
+        ]
+      }
+    },
+    {
+      "searchSuggestionsSectionRenderer": {
+        "contents": [
+          {"musicResponsiveListItemRenderer": {
+            "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails": [
+              {"url": "https://yt3.googleusercontent.com/example=w60-h60-p-l90-rj", "width": 60, "height": 60}
+            ]}}},
+            "flexColumns": [
+              {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Dewa 19"}]}}},
+              {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Artist"}]}}}
+            ],
+            "navigationEndpoint": {"browseEndpoint": {"browseId": "UCexample"}}
+          }}
+        ]
+      }
+    }
+  ]
+}
