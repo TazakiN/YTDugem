@@ -1487,7 +1487,7 @@ pub fn search(query: &str) -> Result<Vec<Track>> {
 const AUDIO: &[&str] = &[
     "mp3", "m4a", "flac", "wav", "ogg", "opus", "aac", "wma", "aiff", "alac",
 ];
-fn is_audio(path: &Path) -> bool {
+pub fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
         .is_some_and(|s| AUDIO.iter().any(|ext| s.eq_ignore_ascii_case(ext)))
