@@ -154,6 +154,7 @@ enum Event {
     ArtistSubscribed(String, bool, Result<(), String>),
     /// Artists matching a search, tagged with the song search's request.
     ArtistResults(u64, Result<Vec<ShelfItem>, String>),
+    PlaylistResults(u64, Result<Vec<ShelfItem>, String>),
     Update(updater::UpdateEvent),
     /// SponsorBlock non-music segments of (track key); an error means none are skipped.
     Segments(String, Result<Vec<services::sponsorblock::Segment>, String>),
@@ -4014,6 +4015,9 @@ impl YTDugem {
                 Event::ArtistResults(id, r) if id == self.request => {
                     // A failed artist search leaves the songs alone; it is only a bonus row.
                     self.artists.results = r.unwrap_or_default();
+                }
+                Event::PlaylistResults(id, r) if id == self.request => {
+                    self.artists.playlists = r.unwrap_or_default();
                 }
                 Event::Collection(id, r) if id == self.collection_request => {
                     self.busy = false;

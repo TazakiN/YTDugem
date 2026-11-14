@@ -29,6 +29,8 @@ pub(super) struct Artists {
     lookup_request: u64,
     /// Artists matching the last search, shown above its songs.
     pub(super) results: Vec<ShelfItem>,
+    /// Playlists matching the last search, shown between its artists and songs.
+    pub(super) playlists: Vec<ShelfItem>,
     /// Shuffle or Mix of an artist is being fetched.
     queue_loading: bool,
     queue_request: u64,
@@ -504,13 +506,20 @@ impl YTDugem {
         }
     }
 
-    /// Searches artists alongside songs; `request` is the song search's.
+    /// Searches artists and playlists alongside songs; `request` is the song search's.
     pub(super) fn search_artists(&mut self, request: u64, query: String) {
         self.artists.results.clear();
+        self.artists.playlists.clear();
+        let tx = self.tx.clone();
+        let q = query.clone();
+        std::thread::spawn(move || {
+            let result = services::artist::search_artists(&q).map_err(err);
+            let _ = tx.send(Event::ArtistResults(request, result));
+        });
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result = services::artist::search_artists(&query).map_err(err);
-            let _ = tx.send(Event::ArtistResults(request, result));
+            let result = services::search_playlists(&query).map_err(err);
+            let _ = tx.send(Event::PlaylistResults(request, result));
         });
     }
 
@@ -888,19 +897,28 @@ impl YTDugem {
         }
     }
 
-    /// Search's Artists row, above the songs.
+    /// Search's Artists and Playlists rows, above the songs.
     pub(super) fn artist_results(&mut self, ui: &mut egui::Ui) {
-        if self.artists.results.is_empty() {
+        if self.artists.results.is_empty() && self.artists.playlists.is_empty() {
             return;
         }
-        let items = self.artists.results.clone();
-        ui.add_space(10.0);
-        ui.label(heading("Artists", 20.0));
-        ui.add_space(8.0);
-        if let Some(action) = card_row(ui, &items[..items.len().min(10)], "search-artists") {
-            self.card_clicked(action);
+        let rows = [
+            ("Artists", self.artists.results.clone()),
+            ("Playlists", self.artists.playlists.clone()),
+        ];
+        for (title, items) in rows {
+            if items.is_empty() {
+                continue;
+            }
+            ui.add_space(10.0);
+            ui.label(heading(title, 20.0));
+            ui.add_space(8.0);
+            if let Some(action) = card_row(ui, &items[..items.len().min(10)], ("search", title)) {
+                self.card_clicked(action);
+            }
+            ui.add_space(8.0);
         }
-        ui.add_space(18.0);
+        ui.add_space(10.0);
         ui.label(heading("Songs", 20.0));
         ui.add_space(4.0);
     }

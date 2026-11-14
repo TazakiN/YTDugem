@@ -1471,6 +1471,36 @@ pub fn search(query: &str) -> Result<Vec<Track>> {
     )
 }
 
+/// YouTube Music's "Playlists" search filter (upstream `SearchFilter.PLAYLISTS`).
+const PLAYLISTS_FILTER: &str = "EgWKAQIoAWoKEAkQChAFEAMQBA%3D%3D";
+
+/// Playlists matching a search, best match first.
+pub fn search_playlists(query: &str) -> Result<Vec<ShelfItem>> {
+    let query = query.trim();
+    if query.is_empty() || query.len() > 500 {
+        bail!("Enter a search between 1 and 500 characters");
+    }
+    let v = innertube_value(
+        "search",
+        json!({"query": query, "params": PLAYLISTS_FILTER}),
+    )?;
+    Ok(parse_playlist_results(&v))
+}
+
+/// The playlist rows of a search page: cards that browse to a `VL…` playlist, without repeats.
+fn parse_playlist_results(v: &Value) -> Vec<ShelfItem> {
+    let mut items = vec![];
+    collect_cards(v, &mut items);
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|i| {
+        i.video_id.is_none()
+            && i.browse_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("VL") && seen.insert(id.to_owned()))
+    });
+    items
+}
+
 const AUDIO: &[&str] = &[
     "mp3", "m4a", "flac", "wav", "ogg", "opus", "aac", "wma", "aiff", "alac",
 ];
@@ -2529,6 +2559,27 @@ mod tests {
         println!("LRCLIB: {} timed lyric lines", lines.len());
     }
     #[test]
+    fn playlist_search_keeps_only_playlist_rows() {
+        let row = |title: &str, browse: &str| {
+            json!({"musicResponsiveListItemRenderer":{
+                "flexColumns":[
+                    {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":title}]}}},
+                    {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Someone"},{"text":" • "},{"text":"1K views"}]}}}],
+                "navigationEndpoint":{"browseEndpoint":{"browseId":browse}}}})
+        };
+        let song = json!({"musicResponsiveListItemRenderer":{"playlistItemData":{"videoId":"abcdefghijk"},
+            "flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Song"}]}}}]}});
+        let v = json!({"contents":[row("Chill", "VLPL1"), song, row("Artist", "UC1"), row("Again", "VLPL1"), row("Focus", "VLPL2")]});
+        let found = parse_playlist_results(&v);
+        let ids: Vec<_> = found
+            .iter()
+            .map(|i| i.browse_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(ids, ["VLPL1", "VLPL2"]);
+        assert_eq!(found[0].title, "Chill");
+        assert_eq!(found[0].subtitle, "Someone • 1K views");
+    }
+    #[test]
     #[ignore = "requires internet access to YouTube Music and LRCLIB"]
     fn live_music_search_and_browse() {
         let tracks = search("Daft Punk Get Lucky").unwrap();
@@ -2540,6 +2591,20 @@ mod tests {
             tracks.len(),
             tracks[0].title,
             tracks[0].artist
+        );
+        let playlists = search_playlists("lofi hip hop").unwrap();
+        assert!(!playlists.is_empty(), "Playlist search found nothing");
+        for p in &playlists {
+            assert!(p.browse_id.as_deref().unwrap().starts_with("VL"));
+            assert!(!p.title.is_empty());
+        }
+        println!(
+            "playlists: {}; first: {} ({}) {:?} thumb={}",
+            playlists.len(),
+            playlists[0].title,
+            playlists[0].subtitle,
+            playlists[0].browse_id,
+            !playlists[0].thumbnail.is_empty()
         );
     }
     #[test]
