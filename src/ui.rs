@@ -4371,7 +4371,7 @@ impl YTDugem {
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        ui.painter().rect_filled(rect, 0.0, surface(ui, SIDE, 150));
+        ui.painter().rect_filled(rect, 0.0, surface(ui, SIDE, 120));
         ui.painter()
             .line_segment([rect.right_top(), rect.right_bottom()], divider(ui, 43));
         // The strip above the search box moves the window, like the top bar (the macOS-style
@@ -4401,7 +4401,7 @@ impl YTDugem {
                 let (fill, rim, radius) = if glass(ui) {
                     (
                         Color32::from_black_alpha(60),
-                        widgets::white_alpha(40),
+                        widgets::white_alpha(20),
                         21.0,
                     )
                 } else {
@@ -4685,7 +4685,7 @@ impl YTDugem {
     }
     fn topbar(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let floating = self.library.player_bar == store::PlayerBarStyle::Floating;
-        ui.painter().rect_filled(rect, 0.0, surface(ui, SIDE, 150));
+        ui.painter().rect_filled(rect, 0.0, surface(ui, SIDE, 120));
         ui.painter()
             .line_segment([rect.left_bottom(), rect.right_bottom()], divider(ui, 42));
         let drag = ui.interact(
@@ -5032,8 +5032,7 @@ impl YTDugem {
             .as_ref()
             .is_some_and(|t| t.key() == track.key());
         if response.hovered() || active {
-            ui.painter()
-                .rect_filled(rect, 5.0, widgets::white_alpha(if active { 15 } else { 8 }));
+            row_highlight(ui, rect, 5.0, active);
         }
         let offset = if let Some(i) = index {
             ui.painter().text(
@@ -6065,7 +6064,7 @@ impl eframe::App for YTDugem {
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::new()
-                        .fill(surface(ui, BG, 70))
+                        .fill(surface(ui, BG, 205))
                         .inner_margin(egui::Margin::same(28)),
                 )
                 .show(ui, |ui| {
@@ -6134,7 +6133,11 @@ fn settings_group(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui
     );
     ui.add_space(4.0);
     let (fill, rim, radius) = if glass(ui) {
-        (widgets::white_alpha(10), widgets::white_alpha(34), 18.0)
+        (
+            Color32::from_black_alpha(70),
+            widgets::white_alpha(10),
+            16.0,
+        )
     } else {
         (
             Color32::from_rgb(35, 37, 33),
@@ -6464,8 +6467,21 @@ fn nav_row_with(
     let response = ui.interact(r, ui.make_persistent_id(id), egui::Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     if selected || response.hovered() {
-        ui.painter()
-            .rect_filled(r, 6.0, widgets::white_alpha(if selected { 30 } else { 12 }));
+        let fill = widgets::white_alpha(if selected { 30 } else { 12 });
+        if glass(ui) {
+            let radius = r.height() / 2.0;
+            ui.painter().rect_filled(r, radius, fill);
+            if selected {
+                ui.painter().rect_stroke(
+                    r,
+                    radius,
+                    Stroke::new(1.0_f32, widgets::white_alpha(26)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        } else {
+            ui.painter().rect_filled(r, 6.0, fill);
+        }
     }
     let color = if selected { WHITE } else { MUTED };
     leading(ui, color);
@@ -6863,13 +6879,13 @@ fn liquid_glass_look(style: &mut egui::Style) {
     v.extreme_bg_color = Color32::from_black_alpha(70);
     v.selection.bg_fill = Color32::from_rgba_unmultiplied(150, 190, 255, 70);
     v.selection.stroke.color = WHITE;
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, widgets::white_alpha(26));
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, widgets::white_alpha(18));
     v.widgets.noninteractive.corner_radius = egui::CornerRadius::same(12);
     for (state, fill, rim) in [
-        (&mut v.widgets.inactive, 16, 30),
-        (&mut v.widgets.hovered, 28, 70),
-        (&mut v.widgets.active, 40, 110),
-        (&mut v.widgets.open, 24, 60),
+        (&mut v.widgets.inactive, 10, 0),
+        (&mut v.widgets.hovered, 20, 60),
+        (&mut v.widgets.active, 30, 100),
+        (&mut v.widgets.open, 18, 60),
     ] {
         state.weak_bg_fill = widgets::white_alpha(fill);
         state.bg_fill = widgets::white_alpha(fill);
@@ -6897,6 +6913,20 @@ fn cover_uv(image: Vec2, target: Vec2) -> Rect {
     Rect::from_center_size(Pos2::new(0.5, 0.5), size)
 }
 
+/// A list row's hover or now-playing tint. Liquid Glass rounds it concentric with the 8 px
+/// corners of the artwork inset in the row.
+fn row_highlight(ui: &egui::Ui, rect: Rect, classic_radius: f32, active: bool) {
+    // white_alpha is perceptual: over the darker glass page, Classic's tint reads as a grey slab.
+    let (radius, alpha) = match (glass(ui), active) {
+        (true, true) => (13.0, 9),
+        (true, false) => (13.0, 5),
+        (false, true) => (classic_radius, 15),
+        (false, false) => (classic_radius, 8),
+    };
+    ui.painter()
+        .rect_filled(rect, radius, widgets::white_alpha(alpha));
+}
+
 /// The page, sidebar and top bar surfaces: opaque in Classic, tinted glass in Liquid Glass.
 fn surface(ui: &egui::Ui, classic: Color32, alpha: u8) -> Color32 {
     if glass(ui) {
@@ -6909,7 +6939,7 @@ fn surface(ui: &egui::Ui, classic: Color32, alpha: u8) -> Color32 {
 /// The hairline between surfaces.
 fn divider(ui: &egui::Ui, classic: u8) -> Stroke {
     if glass(ui) {
-        Stroke::new(1.0_f32, widgets::white_alpha(22))
+        Stroke::new(1.0_f32, widgets::white_alpha(14))
     } else {
         Stroke::new(1.0_f32, Color32::from_gray(classic))
     }
