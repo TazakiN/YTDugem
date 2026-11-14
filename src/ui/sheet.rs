@@ -314,8 +314,10 @@ impl YTDugem {
         }
     }
 
-    fn sheet_background(&mut self, ui: &egui::Ui, rect: Rect) {
-        // 0 → 1 over the crossfade; settled at 1 when no transition is running.
+    /// Advances the backdrop crossfade and returns its eased progress, 0 → 1; settled at 1 when
+    /// no transition is running. Every surface that draws the backdrop calls it, so the previous
+    /// track's artwork is let go once the fade ends whether or not the sheet is open.
+    pub(super) fn backdrop_progress(&mut self, ctx: &egui::Context) -> f32 {
         let t = match (self.backdrop_fade, &self.backdrop_prev) {
             (_, None) => 1.0,
             // The next artwork is still loading: hold the previous one.
@@ -327,15 +329,24 @@ impl YTDugem {
                     self.backdrop_fade = None;
                     1.0
                 } else {
-                    ui.ctx().request_repaint();
+                    ctx.request_repaint();
                     t
                 }
             }
         };
-        let eased = t * t * (3.0 - 2.0 * t);
-        let painter = ui.painter();
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(18, 19, 17));
-        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Draws the cross-faded backdrop over `rect` from the texture region `uv`; returns how much
+    /// of `rect` the artwork covers, 0 → 1, so callers can fade what they lay over it.
+    pub(super) fn paint_backdrop(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        uv: Rect,
+        eased: f32,
+    ) -> f32 {
+        let mut coverage: f32 = 0.0;
         if let Some(prev) = &self.backdrop_prev {
             // Under a new backdrop the old one stays opaque, so the blend never dips to dark.
             let alpha = if self.backdrop.is_some() {
@@ -344,10 +355,21 @@ impl YTDugem {
                 1.0 - eased
             };
             painter.image(prev.id(), rect, uv, Color32::WHITE.gamma_multiply(alpha));
+            coverage = alpha;
         }
         if let Some(back) = &self.backdrop {
             painter.image(back.id(), rect, uv, Color32::WHITE.gamma_multiply(eased));
+            coverage = coverage.max(eased);
         }
+        coverage
+    }
+
+    fn sheet_background(&mut self, ui: &egui::Ui, rect: Rect) {
+        let eased = self.backdrop_progress(ui.ctx());
+        let painter = ui.painter();
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(18, 19, 17));
+        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        self.paint_backdrop(painter, rect, uv, eased);
         painter.rect_filled(rect, 0.0, Color32::from_black_alpha(120));
         // Darker towards the bottom, where the row and the lyric bar sit.
         let mut shade = egui::Mesh::default();

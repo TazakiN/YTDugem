@@ -4336,30 +4336,38 @@ fn err(e: anyhow::Error) -> String {
 impl YTDugem {
     /// Liquid Glass only: what the glass surfaces sit on. The playing track's blurred artwork,
     /// or a cool gradient when nothing with artwork has played.
-    fn ambient_backdrop(&self, ui: &egui::Ui) {
+    /// Track changes cross-fade like the Now Playing sheet's, and a track without artwork fades
+    /// back to the gradient instead of keeping the previous track's artwork.
+    fn ambient_backdrop(&mut self, ui: &egui::Ui) {
         if !glass(ui) {
             return;
         }
         let rect = ui.max_rect();
+        let eased = self.backdrop_progress(ui.ctx());
         let painter = ui.painter();
-        if let Some(back) = self.backdrop.as_ref().or(self.backdrop_prev.as_ref()) {
-            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-            painter.image(back.id(), rect, uv, Color32::WHITE);
-            painter.rect_filled(rect, 0.0, Color32::from_black_alpha(110));
-        } else {
-            let mut mesh = egui::Mesh::default();
-            for (corner, color) in [
-                (rect.left_top(), Color32::from_rgb(34, 44, 72)),
-                (rect.right_top(), Color32::from_rgb(58, 36, 70)),
-                (rect.right_bottom(), Color32::from_rgb(22, 52, 58)),
-                (rect.left_bottom(), Color32::from_rgb(26, 28, 40)),
-            ] {
-                mesh.colored_vertex(corner, color);
-            }
-            mesh.add_triangle(0, 1, 2);
-            mesh.add_triangle(0, 2, 3);
-            painter.add(mesh);
+        let mut mesh = egui::Mesh::default();
+        for (corner, color) in [
+            (rect.left_top(), Color32::from_rgb(34, 44, 72)),
+            (rect.right_top(), Color32::from_rgb(58, 36, 70)),
+            (rect.right_bottom(), Color32::from_rgb(22, 52, 58)),
+            (rect.left_bottom(), Color32::from_rgb(26, 28, 40)),
+        ] {
+            mesh.colored_vertex(corner, color);
         }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        painter.add(mesh);
+        let size = self
+            .backdrop
+            .as_ref()
+            .or(self.backdrop_prev.as_ref())
+            .map_or(Vec2::splat(1.0), |t| t.size_vec2());
+        let coverage = self.paint_backdrop(painter, rect, cover_uv(size, rect.size()), eased);
+        painter.rect_filled(
+            rect,
+            0.0,
+            Color32::from_black_alpha((110.0 * coverage).round() as u8),
+        );
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, rect: Rect) {
@@ -6870,6 +6878,25 @@ fn liquid_glass_look(style: &mut egui::Style) {
     }
 }
 
+/// The region of an `image`-sized texture that fills `target` without stretching: centered,
+/// cropping whichever side is too long.
+fn cover_uv(image: Vec2, target: Vec2) -> Rect {
+    let (image_aspect, target_aspect) = (image.x / image.y, target.x / target.y);
+    let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    if !(image_aspect.is_finite() && target_aspect.is_finite())
+        || image_aspect <= 0.0
+        || target_aspect <= 0.0
+    {
+        return full;
+    }
+    let size = if target_aspect > image_aspect {
+        Vec2::new(1.0, image_aspect / target_aspect)
+    } else {
+        Vec2::new(target_aspect / image_aspect, 1.0)
+    };
+    Rect::from_center_size(Pos2::new(0.5, 0.5), size)
+}
+
 /// The page, sidebar and top bar surfaces: opaque in Classic, tinted glass in Liquid Glass.
 fn surface(ui: &egui::Ui, classic: Color32, alpha: u8) -> Color32 {
     if glass(ui) {
@@ -7036,6 +7063,29 @@ fn load_artwork(url: &str) -> anyhow::Result<(egui::ColorImage, egui::ColorImage
 #[cfg(test)]
 mod artwork_tests {
     use super::artwork_at;
+
+    #[test]
+    fn cover_uv_crops_the_long_side_and_keeps_the_aspect() {
+        use super::cover_uv;
+        use super::{Pos2, Rect, Vec2};
+        let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        // A square image on a wide window: full width, the middle band of rows.
+        let wide = cover_uv(Vec2::splat(96.0), Vec2::new(1600.0, 900.0));
+        assert_eq!(wide.width(), 1.0);
+        assert!((wide.height() - 900.0 / 1600.0).abs() < 1e-6);
+        assert_eq!(wide.center(), Pos2::new(0.5, 0.5));
+        // A tall window: full height, the middle band of columns.
+        let tall = cover_uv(Vec2::splat(96.0), Vec2::new(400.0, 800.0));
+        assert_eq!(tall.height(), 1.0);
+        assert!((tall.width() - 0.5).abs() < 1e-6);
+        // Same aspect, and degenerate sizes, use the whole image.
+        assert_eq!(
+            cover_uv(Vec2::new(200.0, 100.0), Vec2::new(400.0, 200.0)),
+            full
+        );
+        assert_eq!(cover_uv(Vec2::ZERO, Vec2::new(400.0, 200.0)), full);
+        assert_eq!(cover_uv(Vec2::splat(96.0), Vec2::ZERO), full);
+    }
 
     #[test]
     fn idle_web_images_are_forgotten_and_recent_ones_kept() {
