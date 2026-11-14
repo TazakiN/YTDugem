@@ -108,22 +108,26 @@ impl YTDugem {
         ui.set_clip_rect(page);
         ui.set_opacity(visible);
         let radius = HEIGHT / 2.0;
-        ui.painter().add(
-            egui::epaint::Shadow {
-                offset: [0, 8],
-                blur: 28,
-                spread: 0,
-                color: Color32::from_black_alpha(110),
-            }
-            .as_shape(bar, radius),
-        );
-        ui.painter().rect(
-            bar,
-            radius,
-            Color32::from_rgba_unmultiplied(30, 31, 30, 240),
-            Stroke::new(1.0_f32, Color32::from_gray(70)),
-            egui::StrokeKind::Inside,
-        );
+        if glass(&ui) {
+            glass_slab(ui.painter(), bar, radius, 228);
+        } else {
+            ui.painter().add(
+                egui::epaint::Shadow {
+                    offset: [0, 8],
+                    blur: 28,
+                    spread: 0,
+                    color: Color32::from_black_alpha(110),
+                }
+                .as_shape(bar, radius),
+            );
+            ui.painter().rect(
+                bar,
+                radius,
+                Color32::from_rgba_unmultiplied(30, 31, 30, 240),
+                Stroke::new(1.0_f32, Color32::from_gray(70)),
+                egui::StrokeKind::Inside,
+            );
+        }
         // Claims the whole pill first, so clicks and hovers never reach the page underneath.
         ui.interact(
             bar,

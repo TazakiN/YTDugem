@@ -88,8 +88,11 @@ pub struct Library {
     #[serde(default = "download_format_default")]
     pub download_format: String,
     /// Where the playback controls live: the original top bar, or a floating bar at the bottom.
-    #[serde(default, deserialize_with = "deserialize_player_bar")]
+    #[serde(default, deserialize_with = "deserialize_lenient")]
     pub player_bar: PlayerBarStyle,
+    /// How surfaces and controls are drawn: the original flat look, or translucent glass.
+    #[serde(default, deserialize_with = "deserialize_lenient")]
+    pub theme: Theme,
     /// Skip SponsorBlock `music_offtopic` segments of YouTube tracks. Off by default: it
     /// contacts a third-party service.
     #[serde(default)]
@@ -134,10 +137,21 @@ pub enum PlayerBarStyle {
     Floating,
 }
 
-/// Unknown or malformed values fall back to the top bar instead of failing the whole library.
-fn deserialize_player_bar<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<PlayerBarStyle, D::Error> {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    Classic,
+    /// Translucent, rim-lit surfaces over a blurred artwork backdrop, after Apple's Liquid Glass.
+    LiquidGlass,
+}
+
+/// Unknown or malformed values fall back to the default instead of failing the whole library.
+fn deserialize_lenient<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
     serde_json::Value::deserialize(d).map(|value| serde_json::from_value(value).unwrap_or_default())
 }
 
@@ -387,6 +401,7 @@ impl Default for Library {
             translation_language: String::new(),
             download_format: download_format_default(),
             player_bar: PlayerBarStyle::default(),
+            theme: Theme::default(),
             skip_non_music: false,
             record_stats: true,
             recent_searches: vec![],
@@ -610,6 +625,25 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         assert!(!loaded.record_stats);
         assert_eq!(loaded.recent_searches, ["a", "b"]);
+    }
+
+    #[test]
+    fn theme_defaults_roundtrips_and_tolerates_unknown_values() {
+        assert_eq!(Library::default().theme, Theme::Classic);
+        let old: Library = serde_json::from_str(r#"{"volume":70.0}"#).unwrap();
+        assert_eq!(old.theme, Theme::Classic);
+        let mut library = Library::default();
+        library.theme = Theme::LiquidGlass;
+        let json = serde_json::to_string(&library).unwrap();
+        assert!(json.contains(r#""theme":"liquid_glass""#));
+        let read: Library = serde_json::from_str(&json).unwrap();
+        assert_eq!(read.theme, Theme::LiquidGlass);
+        for bad in [r#""neon""#, "7", "null", "[]"] {
+            let lib: Library =
+                serde_json::from_str(&format!(r#"{{"volume":55.0,"theme":{bad}}}"#)).unwrap();
+            assert_eq!(lib.theme, Theme::Classic);
+            assert_eq!(lib.volume, 55.0);
+        }
     }
 
     #[test]

@@ -177,10 +177,10 @@ impl YTDugem {
             .current
             .as_ref()
             .is_some_and(|t| t.key() == track.key());
-        let p = ui.painter();
         if response.hovered() || active {
-            p.rect_filled(rect, 6.0, widgets::white_alpha(if active { 15 } else { 8 }));
+            row_highlight(ui, rect, 6.0, active);
         }
+        let p = ui.painter();
         p.hline(
             rect.x_range().shrink(8.0),
             rect.bottom(),
