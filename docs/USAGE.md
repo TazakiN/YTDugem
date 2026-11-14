@@ -42,7 +42,7 @@ YTDugem automatically uses X11 and Mesa's software renderer to work around EGL/Z
 
 ## Features
 
-- **Home and search:** Desktop Home with real YouTube Music shelves, browsable albums and collections, live search and Explore, artwork, and a local audio library. Selecting a Home song starts playback.
+- **Home and search:** Desktop Home with real YouTube Music shelves, browsable albums and collections, live search (Artists and Playlists rows above the matching songs; a playlist card opens the playlist) and Explore, artwork, and a local audio library. Selecting a Home song starts playback.
 - **Explore:** New releases, Charts and Moods & genres buttons, YouTube Music's Explore shelves, and mood and genre tiles that open their playlists. Each sub-page has Back to Explore; the refresh button reloads everything.
 - **Artist pages:** artist banner, top songs, releases and related artists, opened from a song's artist name, an artist card or search results. See [Artist pages](#artist-pages).
 - **Expanded player:** artwork view with a blurred background, controls, synchronized lyrics and queue views.
