@@ -1164,6 +1164,9 @@ impl YTDugem {
             let r = self.player.seek(0.0);
             self.report(r);
         } else if let Some(t) = self.previous.pop() {
+            if self.repeat == 1 {
+                drop_repeat_copy(&mut self.library.queue, t.key());
+            }
             if let Some(old) = self.current.clone() {
                 self.library.queue.insert(0, old);
             }
@@ -1344,6 +1347,9 @@ impl YTDugem {
                 let key = track.key().to_owned();
                 let mut last = -1.0_f32;
                 let result = services::download_with(&track, &dir, &format, &cancel, &mut |f| {
+                    if cancel.load(Ordering::SeqCst) {
+                        return;
+                    }
                     if f - last >= 0.01 || f >= 1.0 {
                         last = f;
                         let _ = tx.send(Event::DownloadProgress(key.clone(), f));
@@ -1367,7 +1373,11 @@ impl YTDugem {
                     tracks
                 })
                 .map_err(err);
-                let _ = tx.send(Event::Downloaded(key, result));
+                // A cancelled row is already gone, and the same song may have been queued again
+                // under the same key; this worker's result must not land on that new row.
+                if !cancel.load(Ordering::SeqCst) {
+                    let _ = tx.send(Event::Downloaded(key, result));
+                }
             });
         }
     }
@@ -5706,6 +5716,14 @@ fn moved<T: Clone>(items: &[T], from: usize, to: usize) -> Vec<T> {
     out
 }
 
+/// Repeat-all queues each finished track again at the end (`next`). Going back to that track
+/// takes the copy out, so Previous then Next does not leave it queued twice.
+fn drop_repeat_copy(queue: &mut Vec<Track>, key: &str) {
+    if let Some(i) = queue.iter().rposition(|t| t.key() == key) {
+        queue.remove(i);
+    }
+}
+
 /// The playlist entry id of every track in order, when each one has one.
 fn set_id_order(
     tracks: &[Track],
@@ -5805,6 +5823,25 @@ mod playlist_tests {
         assert_eq!(moved(&ids, 0, 1), ["b", "a", "c"].map(String::from));
         assert_eq!(moved(&ids, 2, 1), ["a", "c", "b"].map(String::from));
         assert_eq!(moved(&ids, 1, 9), ids);
+    }
+
+    #[test]
+    fn repeat_all_previous_does_not_duplicate_the_track() {
+        let ids = |q: &[Track]| q.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let (a, b, c) = (track("a", "a"), track("b", "b"), track("c", "c"));
+        // Next from A under repeat-all: B plays, A is queued again at the end.
+        let mut queue = vec![c.clone(), a.clone()];
+        // Previous back to A: its repeat copy goes, B returns to the front.
+        drop_repeat_copy(&mut queue, a.key());
+        queue.insert(0, b);
+        assert_eq!(ids(&queue), ["b", "c"]);
+        // An earlier copy the user queued themselves stays; only the last one goes.
+        let mut queue = vec![a.clone(), c, a.clone()];
+        drop_repeat_copy(&mut queue, a.key());
+        assert_eq!(ids(&queue), ["a", "c"]);
+        let mut empty = vec![];
+        drop_repeat_copy(&mut empty, a.key());
+        assert!(empty.is_empty());
     }
 
     #[test]
