@@ -1536,11 +1536,7 @@ impl Drop for CookieFile {
 }
 pub fn cookie_file() -> Result<Option<CookieFile>> {
     let Some(s) = snapshot() else { return Ok(None) };
-    let path = auth_dir()?.join(format!("cookies-{}.txt", std::process::id()));
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
+    let (mut f, path) = new_cookie_file(&auth_dir()?)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1549,6 +1545,29 @@ pub fn cookie_file() -> Result<Option<CookieFile>> {
     f.write_all(netscape_cookies(&s.cookie).as_bytes())?;
     f.sync_all()?;
     Ok(Some(CookieFile { path }))
+}
+/// A cookie file of its own for each caller: a player falling back to signed-in extraction keeps
+/// one for the whole song, while downloads and a crossfading player may each need another.
+/// A name already taken can only be a file left by a crashed run that had the same process id,
+/// so that stale copy of the session is removed and the next name is tried.
+fn new_cookie_file(dir: &Path) -> Result<(fs::File, PathBuf)> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..64 {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("cookies-{}-{n}.txt", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((file, path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&path);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    bail!("Could not create a private cookie file")
 }
 /// yt-dlp rejects a cookies file without the Netscape header ("does not look like a Netscape
 /// format cookies file"), which made every signed-in playback fail.
@@ -1759,6 +1778,31 @@ mod tests {
         drop(CookieFile { path: path.clone() });
         assert!(!path.exists());
         fs::remove_dir(&dir).unwrap();
+    }
+    #[test]
+    fn concurrent_cookie_files_get_their_own_names_and_replace_stale_ones() {
+        let dir = std::env::temp_dir().join(format!(
+            "dugem-auth-cookie-names-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let (_a, first) = new_cookie_file(&dir).unwrap();
+        let (_b, second) = new_cookie_file(&dir).unwrap();
+        assert_ne!(first, second, "a second caller must not collide");
+        // A crashed run with the same process id left the next name behind.
+        let stem = second.file_stem().unwrap().to_string_lossy().into_owned();
+        let n: u64 = stem.rsplit('-').next().unwrap().parse().unwrap();
+        let stale = dir.join(format!("cookies-{}-{}.txt", std::process::id(), n + 1));
+        fs::write(&stale, "old session").unwrap();
+        let (_c, third) = new_cookie_file(&dir).unwrap();
+        assert!(!stale.exists(), "the stale session copy is removed");
+        assert_ne!(third, stale);
+        drop((_a, _b, _c));
+        fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
     fn parses_json_document_and_crlf_netscape() {

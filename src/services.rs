@@ -1621,7 +1621,14 @@ pub fn plain_path(path: &Path) -> PathBuf {
 /// so a library entry that points elsewhere can never remove the user's own music.
 pub fn delete_download(source: &str, directory: &Path) -> Result<PathBuf> {
     let path = plain_path(Path::new(source));
-    if !path.starts_with(directory) {
+    // `starts_with` compares components, so `<folder>\..\x` would otherwise pass.
+    let relative = path.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )
+    });
+    if relative || !path.starts_with(directory) {
         bail!("That file is not in your download folder");
     }
     if !path.is_file() || !is_audio(&path) {
@@ -2221,6 +2228,9 @@ mod tests {
             inside.display().to_string()
         };
         assert!(delete_download(&outside.to_string_lossy(), &downloads).is_err());
+        // `..` is a path component, so this "starts with" the folder yet names `outside`.
+        let escaping = downloads.join("..").join("mine.opus");
+        assert!(delete_download(&escaping.to_string_lossy(), &downloads).is_err());
         assert!(outside.exists());
         assert!(delete_download(&verbatim, &downloads).is_ok());
         assert!(!inside.exists());
