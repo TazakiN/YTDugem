@@ -26,6 +26,95 @@ fn disc(ui: &egui::Ui, center: Pos2, icon: Icon, bright: bool) {
     );
 }
 
+/// The drawer shell (upstream `PlayerDrawer`): a scrim over `sheet` and a rounded panel that
+/// slides up from its bottom edge, with a grab handle and `title`. `want` is the panel's full
+/// height, capped at 70% of the sheet. Returns the area for the rows, or `None` when the scrim
+/// was clicked and the caller should close the drawer.
+pub(super) fn player_drawer(
+    ui: &mut egui::Ui,
+    sheet: Rect,
+    salt: &str,
+    title: &str,
+    want: f32,
+) -> Option<Rect> {
+    let ctx = ui.ctx().clone();
+    // The slide starts afresh each time the drawer opens: it was not drawn last pass.
+    let (now, pass) = (ctx.input(|i| i.time), ctx.cumulative_pass_nr());
+    let key = ui.scope_id().with(salt);
+    let (opened, last) =
+        ctx.data(|d| d.get_temp::<(f64, u64)>(key))
+            .map_or((now, pass), |(o, l)| {
+                if pass.saturating_sub(l) > 2 {
+                    (now, pass)
+                } else {
+                    (o, pass)
+                }
+            });
+    ctx.data_mut(|d| d.insert_temp(key, (opened, last)));
+    let linear = ((now - opened) / SLIDE_SECONDS).clamp(0.0, 1.0) as f32;
+    let t = 1.0 - (1.0 - linear).powi(3);
+    if linear < 1.0 {
+        ctx.request_repaint();
+    }
+
+    let height = want.min(sheet.height() * 0.7);
+    let width = DIALOG_WIDTH.min(sheet.width() - 32.0).max(200.0);
+    let top = sheet.bottom() - height * t;
+    let dialog = Rect::from_min_size(
+        Pos2::new(sheet.center().x - width / 2.0, top),
+        Vec2::new(width, height),
+    );
+
+    // The scrim closes the drawer; it and the drawer also swallow drags and clicks, so
+    // nothing reaches the sheet underneath.
+    ui.painter()
+        .rect_filled(sheet, 0.0, Color32::from_black_alpha((102.0 * t) as u8));
+    let scrim = ui.interact(sheet, key.with("scrim"), egui::Sense::click_and_drag());
+    ui.interact(dialog, key.with("dialog"), egui::Sense::click_and_drag());
+    if scrim.clicked()
+        && ui.input(|i| {
+            i.pointer
+                .interact_pos()
+                .is_some_and(|p| !dialog.contains(p))
+        })
+    {
+        return None;
+    }
+
+    ui.painter().rect_filled(
+        dialog,
+        egui::CornerRadius {
+            nw: 24,
+            ne: 24,
+            sw: 0,
+            se: 0,
+        },
+        SURFACE,
+    );
+    ui.painter().rect_filled(
+        Rect::from_center_size(
+            Pos2::new(dialog.center().x, dialog.top() + 12.0),
+            Vec2::new(36.0, 4.0),
+        ),
+        2.0,
+        widgets::white_alpha(90),
+    );
+    fit_text(
+        ui.painter(),
+        Pos2::new(dialog.left() + 24.0, dialog.top() + 44.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        bold(22.0),
+        WHITE,
+        dialog.width() - 48.0,
+    );
+
+    Some(Rect::from_min_max(
+        Pos2::new(dialog.left() + 16.0, dialog.top() + 68.0),
+        Pos2::new(dialog.right() - 16.0, dialog.bottom() - 12.0),
+    ))
+}
+
 impl YTDugem {
     /// The same dialog over the whole window while the sheet is down (opened from the top bar);
     /// with the sheet up, `player_sheet` draws it instead, so it is never drawn twice.
@@ -47,86 +136,14 @@ impl YTDugem {
 
     /// Drawn over the whole sheet (or window) while `output_open`.
     pub(super) fn output_dialog(&mut self, ui: &mut egui::Ui, sheet: Rect) {
-        let ctx = ui.ctx().clone();
-        // The slide starts afresh each time the dialog opens: it was not drawn last pass.
-        let (now, pass) = (ctx.input(|i| i.time), ctx.cumulative_pass_nr());
-        let key = ui.scope_id().with("output-dialog-open");
-        let (opened, last) =
-            ctx.data(|d| d.get_temp::<(f64, u64)>(key))
-                .map_or((now, pass), |(o, l)| {
-                    if pass.saturating_sub(l) > 2 {
-                        (now, pass)
-                    } else {
-                        (o, pass)
-                    }
-                });
-        ctx.data_mut(|d| d.insert_temp(key, (opened, last)));
-        let linear = ((now - opened) / SLIDE_SECONDS).clamp(0.0, 1.0) as f32;
-        let t = 1.0 - (1.0 - linear).powi(3);
-        if linear < 1.0 {
-            ctx.request_repaint();
-        }
-
         // Rows: system default plus every device (or a reading line), then the volume and pipeline card.
         let rows = 1 + self.audio_devices.len() + usize::from(self.audio_devices_loading);
         let want = 64.0 + rows as f32 * (CARD_ROW + 8.0) + 16.0 + 144.0 + 24.0;
-        let height = want.min(sheet.height() * 0.7);
-        let width = DIALOG_WIDTH.min(sheet.width() - 32.0).max(200.0);
-        let top = sheet.bottom() - height * t;
-        let dialog = Rect::from_min_size(
-            Pos2::new(sheet.center().x - width / 2.0, top),
-            Vec2::new(width, height),
-        );
-
-        // The scrim closes the dialog; it and the dialog also swallow drags and clicks, so
-        // nothing reaches the sheet underneath.
-        ui.painter()
-            .rect_filled(sheet, 0.0, Color32::from_black_alpha((102.0 * t) as u8));
-        let scrim = ui.interact(sheet, key.with("scrim"), egui::Sense::click_and_drag());
-        ui.interact(dialog, key.with("dialog"), egui::Sense::click_and_drag());
-        if scrim.clicked()
-            && ui.input(|i| {
-                i.pointer
-                    .interact_pos()
-                    .is_some_and(|p| !dialog.contains(p))
-            })
-        {
+        let Some(content) = player_drawer(ui, sheet, "output-dialog-open", "Audio output", want)
+        else {
             self.output_open = false;
             return;
-        }
-
-        ui.painter().rect_filled(
-            dialog,
-            egui::CornerRadius {
-                nw: 24,
-                ne: 24,
-                sw: 0,
-                se: 0,
-            },
-            SURFACE,
-        );
-        ui.painter().rect_filled(
-            Rect::from_center_size(
-                Pos2::new(dialog.center().x, dialog.top() + 12.0),
-                Vec2::new(36.0, 4.0),
-            ),
-            2.0,
-            widgets::white_alpha(90),
-        );
-        fit_text(
-            ui.painter(),
-            Pos2::new(dialog.left() + 24.0, dialog.top() + 44.0),
-            egui::Align2::LEFT_CENTER,
-            "Audio output",
-            bold(22.0),
-            WHITE,
-            dialog.width() - 48.0,
-        );
-
-        let content = Rect::from_min_max(
-            Pos2::new(dialog.left() + 16.0, dialog.top() + 68.0),
-            Pos2::new(dialog.right() - 16.0, dialog.bottom() - 12.0),
-        );
+        };
         let mut choice = None;
         let mut settings = false;
         region(ui, content, |u| {
