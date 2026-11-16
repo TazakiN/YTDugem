@@ -4499,40 +4499,18 @@ impl YTDugem {
             (Page::Downloads, Icon::Download, "Downloads"),
             (Page::Local, Icon::Music, "Local Music"),
         ];
-        let rule = |ui: &egui::Ui, y: &mut f32| {
-            *y += 12.0;
+        // A divider row: 12px above and below the line.
+        let rule = |ui: &mut egui::Ui| {
+            let (r, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), egui::Sense::hover());
             ui.painter().line_segment(
-                [
-                    Pos2::new(rect.left() + 14.0, *y),
-                    Pos2::new(rect.right() - 14.0, *y),
-                ],
+                [r.left_center(), r.right_center()],
                 Stroke::new(1.0_f32, Color32::from_gray(42)),
             );
-            *y += 12.0;
         };
-        let mut y = rect.top() + 108.0;
-        for (i, (page, icon, label)) in rows.into_iter().enumerate() {
-            if i == 4 {
-                rule(ui, &mut y);
-            }
-            let r = Rect::from_min_size(
-                Pos2::new(rect.left() + 14.0, y),
-                Vec2::new(rect.width() - 28.0, 38.0),
-            );
-            if nav_row(ui, r, ("nav", i), icon, label, self.page == page).clicked() {
-                // Upstream `selectDestination` closes an open mood: Explore opens on its landing page.
-                if page == Page::Explore {
-                    self.explore.view = explore::View::Main;
-                }
-                self.navigate(page);
-                if self.page == Page::Search {
-                    ui.ctx()
-                        .memory_mut(|m| m.request_focus(search_box::input_id()));
-                }
-            }
-            y += 40.0;
-        }
-        rule(ui, &mut y);
+        // Everything between the fixed search box and the fixed Settings row scrolls together,
+        // so a short window can still reach every nav entry and playlist.
+        let top = rect.top() + 96.0;
         let bottom = rect.bottom() - 67.0;
         if self.account.is_some()
             && self.account_playlists.is_none()
@@ -4540,18 +4518,51 @@ impl YTDugem {
         {
             self.load_account_playlists();
         }
-        if bottom > y + 25.0 {
+        if bottom > top + 25.0 {
             region(
                 ui,
                 Rect::from_min_max(
-                    Pos2::new(rect.left() + 14.0, y + 5.0),
+                    Pos2::new(rect.left() + 14.0, top),
                     Pos2::new(rect.right() - 14.0, bottom),
                 ),
                 |ui| {
                     egui::ScrollArea::vertical()
-                        .id_salt("sidebar-playlists")
+                        .id_salt("sidebar-scroll")
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
+                            let spacing = ui.spacing().item_spacing.y;
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            ui.add_space(12.0);
+                            for (i, (page, icon, label)) in rows.into_iter().enumerate() {
+                                if i == 4 {
+                                    rule(ui);
+                                }
+                                // 38px rows on a 40px pitch, as before.
+                                let (slot, _) = ui.allocate_exact_size(
+                                    Vec2::new(ui.available_width(), 40.0),
+                                    egui::Sense::hover(),
+                                );
+                                let r =
+                                    Rect::from_min_size(slot.min, Vec2::new(slot.width(), 38.0));
+                                if nav_row(ui, r, ("nav", i), icon, label, self.page == page)
+                                    .clicked()
+                                {
+                                    // Upstream `selectDestination` closes an open mood: Explore
+                                    // opens on its landing page.
+                                    if page == Page::Explore {
+                                        self.explore.view = explore::View::Main;
+                                    }
+                                    self.navigate(page);
+                                    if self.page == Page::Search {
+                                        ui.ctx().memory_mut(|m| {
+                                            m.request_focus(search_box::input_id())
+                                        });
+                                    }
+                                }
+                            }
+                            rule(ui);
+                            ui.add_space(5.0);
+                            ui.spacing_mut().item_spacing.y = spacing;
                             let accounts = self.account_playlists.clone().unwrap_or_default();
                             let open_id = self
                                 .collection
