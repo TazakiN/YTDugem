@@ -53,6 +53,10 @@ pub(super) fn player_drawer(
         .constrain(false)
         .show(&ctx, |ui| {
             ui.set_clip_rect(sheet);
+            // The layer's size is what it has laid out, and the wheel only goes to the layer
+            // under the pointer by that size: painting and `interact` alone left it empty, so
+            // clicks reached the rows but the wheel never did.
+            ui.expand_to_include_rect(sheet);
             drawer_body(ui, sheet, key, title, want, add_rows)
         })
         .inner
