@@ -391,38 +391,39 @@ impl YTDugem {
         const GAP: f32 = 6.0;
         let providers = services::lyrics::ordered(&self.library.lyrics_order);
         let want = 68.0 + providers.len() as f32 * (ROW + GAP) + 24.0;
-        let Some(content) = super::sheet_output::player_drawer(
+        let mut pick = None;
+        let open = super::sheet_output::player_drawer(
             ui,
             sheet,
             "lyrics-sources-open",
             "Choose lyrics provider",
             want,
-        ) else {
+            |u| {
+                egui::ScrollArea::vertical()
+                    .id_salt("lyrics-sources-scroll")
+                    .auto_shrink([false, false])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(u, |u| {
+                        u.spacing_mut().item_spacing.y = GAP;
+                        let width = u.available_width();
+                        for provider in providers {
+                            let current = provider.label == self.lyrics_provider;
+                            let state = if self.lyrics_probe.pending == Some(provider.id) {
+                                Some(ProbeState::Fetching)
+                            } else {
+                                self.lyrics_probe.state(provider.id)
+                            };
+                            if lyrics_provider_row(u, width, ROW, provider, state, current) {
+                                pick = Some(provider.id);
+                            }
+                        }
+                    });
+            },
+        );
+        if !open {
             self.lyrics_sources_open = false;
             return;
-        };
-        let mut pick = None;
-        region(ui, content, |u| {
-            egui::ScrollArea::vertical()
-                .id_salt("lyrics-sources-scroll")
-                .auto_shrink([false, false])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(u, |u| {
-                    u.spacing_mut().item_spacing.y = GAP;
-                    let width = u.available_width();
-                    for provider in providers {
-                        let current = provider.label == self.lyrics_provider;
-                        let state = if self.lyrics_probe.pending == Some(provider.id) {
-                            Some(ProbeState::Fetching)
-                        } else {
-                            self.lyrics_probe.state(provider.id)
-                        };
-                        if lyrics_provider_row(u, width, ROW, provider, state, current) {
-                            pick = Some(provider.id);
-                        }
-                    }
-                });
-        });
+        }
         if let Some(id) = pick {
             self.choose_lyrics_provider(id);
         }

@@ -26,21 +26,49 @@ fn disc(ui: &egui::Ui, center: Pos2, icon: Icon, bright: bool) {
     );
 }
 
+/// A drawer pulled down further than this share of its height closes on release (upstream
+/// `DISMISS_DRAG_FRACTION`).
+const DISMISS_DRAG_FRACTION: f32 = 0.25;
+
 /// The drawer shell (upstream `PlayerDrawer`): a scrim over `sheet` and a rounded panel that
-/// slides up from its bottom edge, with a grab handle and `title`. `want` is the panel's full
-/// height, capped at 70% of the sheet. Returns the area for the rows, or `None` when the scrim
-/// was clicked and the caller should close the drawer.
+/// slides up from its bottom edge, with a grab handle and `title`, and `add_rows` drawn in a
+/// scrollable-ready area under the title. `want` is the panel's full height, capped at 70% of
+/// the sheet. It sits on its own foreground layer, so the wheel and clicks reach its rows and
+/// not the player beneath. Returns false when it was dismissed (scrim clicked, or the panel
+/// pulled down past `DISMISS_DRAG_FRACTION`) and the caller should close it.
 pub(super) fn player_drawer(
     ui: &mut egui::Ui,
     sheet: Rect,
     salt: &str,
     title: &str,
     want: f32,
-) -> Option<Rect> {
+    add_rows: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let ctx = ui.ctx().clone();
+    let key = ui.scope_id().with(salt);
+    egui::Area::new(key.with("layer"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(sheet.min)
+        .movable(false)
+        .constrain(false)
+        .show(&ctx, |ui| {
+            ui.set_clip_rect(sheet);
+            drawer_body(ui, sheet, key, title, want, add_rows)
+        })
+        .inner
+}
+
+fn drawer_body(
+    ui: &mut egui::Ui,
+    sheet: Rect,
+    key: egui::Id,
+    title: &str,
+    want: f32,
+    add_rows: impl FnOnce(&mut egui::Ui),
+) -> bool {
     let ctx = ui.ctx().clone();
     // The slide starts afresh each time the drawer opens: it was not drawn last pass.
     let (now, pass) = (ctx.input(|i| i.time), ctx.cumulative_pass_nr());
-    let key = ui.scope_id().with(salt);
     let (opened, last) =
         ctx.data(|d| d.get_temp::<(f64, u64)>(key))
             .map_or((now, pass), |(o, l)| {
@@ -50,6 +78,7 @@ pub(super) fn player_drawer(
                     (o, pass)
                 }
             });
+    let fresh = opened == now;
     ctx.data_mut(|d| d.insert_temp(key, (opened, last)));
     let linear = ((now - opened) / SLIDE_SECONDS).clamp(0.0, 1.0) as f32;
     let t = 1.0 - (1.0 - linear).powi(3);
@@ -59,18 +88,32 @@ pub(super) fn player_drawer(
 
     let height = want.min(sheet.height() * 0.7);
     let width = DIALOG_WIDTH.min(sheet.width() - 32.0).max(200.0);
-    let top = sheet.bottom() - height * t;
+    // How far the panel has been pulled down; it eases back when let go short of closing.
+    let drag_key = key.with("drag");
+    let mut drag = if fresh {
+        0.0
+    } else {
+        ctx.data(|d| d.get_temp::<f32>(drag_key)).unwrap_or(0.0)
+    };
+    let top = sheet.bottom() - height * t + drag;
     let dialog = Rect::from_min_size(
         Pos2::new(sheet.center().x - width / 2.0, top),
         Vec2::new(width, height),
     );
 
     // The scrim closes the drawer; it and the drawer also swallow drags and clicks, so
-    // nothing reaches the sheet underneath.
-    ui.painter()
-        .rect_filled(sheet, 0.0, Color32::from_black_alpha((102.0 * t) as u8));
+    // nothing reaches the sheet underneath. The panel itself is the drag handle: rows scroll
+    // their own list, everywhere else (the grab handle, the title, the margins) pulls it.
+    let fade = (1.0 - drag / height).clamp(0.0, 1.0);
+    ui.painter().rect_filled(
+        sheet,
+        0.0,
+        Color32::from_black_alpha((102.0 * t * fade) as u8),
+    );
     let scrim = ui.interact(sheet, key.with("scrim"), egui::Sense::click_and_drag());
-    ui.interact(dialog, key.with("dialog"), egui::Sense::click_and_drag());
+    let panel = ui
+        .interact(dialog, key.with("dialog"), egui::Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::Grab);
     if scrim.clicked()
         && ui.input(|i| {
             i.pointer
@@ -78,8 +121,22 @@ pub(super) fn player_drawer(
                 .is_some_and(|p| !dialog.contains(p))
         })
     {
-        return None;
+        return false;
     }
+    if panel.dragged() {
+        drag = (drag + panel.drag_delta().y).max(0.0);
+    } else if panel.drag_stopped() && drag > height * DISMISS_DRAG_FRACTION {
+        ctx.data_mut(|d| d.remove::<f32>(drag_key));
+        return false;
+    } else if drag > 0.0 {
+        let dt = ctx.input(|i| i.stable_dt).min(0.1);
+        drag *= (-dt * 18.0).exp();
+        if drag < 0.5 {
+            drag = 0.0;
+        }
+        ctx.request_repaint();
+    }
+    ctx.data_mut(|d| d.insert_temp(drag_key, drag));
 
     ui.painter().rect_filled(
         dialog,
@@ -109,10 +166,12 @@ pub(super) fn player_drawer(
         dialog.width() - 48.0,
     );
 
-    Some(Rect::from_min_max(
+    let rows = Rect::from_min_max(
         Pos2::new(dialog.left() + 16.0, dialog.top() + 68.0),
         Pos2::new(dialog.right() - 16.0, dialog.bottom() - 12.0),
-    ))
+    );
+    region(ui, rows, add_rows);
+    true
 }
 
 impl YTDugem {
@@ -139,14 +198,9 @@ impl YTDugem {
         // Rows: system default plus every device (or a reading line), then the volume and pipeline card.
         let rows = 1 + self.audio_devices.len() + usize::from(self.audio_devices_loading);
         let want = 64.0 + rows as f32 * (CARD_ROW + 8.0) + 16.0 + 144.0 + 24.0;
-        let Some(content) = player_drawer(ui, sheet, "output-dialog-open", "Audio output", want)
-        else {
-            self.output_open = false;
-            return;
-        };
         let mut choice = None;
         let mut settings = false;
-        region(ui, content, |u| {
+        let open = player_drawer(ui, sheet, "output-dialog-open", "Audio output", want, |u| {
             egui::ScrollArea::vertical()
                 .id_salt("output-dialog-scroll")
                 .auto_shrink([false, false])
@@ -186,6 +240,10 @@ impl YTDugem {
                     u.add_space(8.0);
                 });
         });
+        if !open {
+            self.output_open = false;
+            return;
+        }
         if let Some(id) = choice {
             self.choose_output(id);
         }
