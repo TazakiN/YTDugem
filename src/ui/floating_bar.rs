@@ -241,9 +241,10 @@ impl YTDugem {
         let response = region(ui, more, |ui| {
             widgets::button(ui, Icon::More, BUTTON, false, "More")
         });
-        egui::Popup::menu(&response)
-            .align(egui::RectAlign::TOP_END)
-            .show(|ui| self.track_menu(ui, &track));
+        self.track_popup(
+            egui::Popup::menu(&response).align(egui::RectAlign::TOP_END),
+            &track,
+        );
         self.floating_progress(
             ui,
             Rect::from_min_max(

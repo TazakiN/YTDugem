@@ -282,7 +282,7 @@ impl YTDugem {
         ) {
             self.open_artist_link(link);
         }
-        response.context_menu(|ui| self.track_menu(ui, track));
+        self.track_popup(egui::Popup::context_menu(&response), track);
         events.remove = x.clicked();
         events.clicked = response.clicked() && !events.remove;
         events

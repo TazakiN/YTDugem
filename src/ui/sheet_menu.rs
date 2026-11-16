@@ -1,8 +1,18 @@
-//! The player sheet's three-dot menu (upstream `DesktopSongMenuUi` on the player).
+//! The player sheet's three-dot menu (upstream `DesktopSongMenuUi` on the player), and the
+//! look every other song menu shares with it.
 use super::*;
 
 const MENU_WIDTH: f32 = 370.0;
 const ROW_HEIGHT: f32 = 40.0;
+
+/// The card every song menu is drawn on.
+fn menu_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(28, 28, 30))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(6, 6))
+        .stroke(Stroke::new(1.0, widgets::white_alpha(20)))
+}
 
 /// What a menu row asks for; applied after the popup closes over `self`.
 enum MenuAction {
@@ -27,7 +37,7 @@ fn sleep_remaining(left: Duration) -> String {
 }
 
 /// One menu row: icon, label, optional trailing text. Returns true when clicked.
-fn menu_row(
+pub(super) fn menu_row(
     ui: &mut egui::Ui,
     icon: Icon,
     label: &str,
@@ -78,7 +88,7 @@ fn menu_row(
     enabled && response.clicked()
 }
 
-fn separator(ui: &mut egui::Ui) {
+pub(super) fn separator(ui: &mut egui::Ui) {
     ui.add_space(3.0);
     let (rect, _) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
@@ -88,6 +98,19 @@ fn separator(ui: &mut egui::Ui) {
 }
 
 impl YTDugem {
+    /// A song's menu, from a right-click (`egui::Popup::context_menu`) or a "···" button
+    /// (`egui::Popup::menu`), drawn like the player's menu.
+    pub(super) fn track_popup(&mut self, popup: egui::Popup<'_>, track: &Track) {
+        popup
+            .frame(menu_frame())
+            .layout(egui::Layout::top_down_justified(Align::LEFT))
+            .show(|ui| {
+                ui.set_width(MENU_WIDTH - 12.0);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                self.track_menu(ui, track);
+            });
+    }
+
     /// Hangs the menu off the sheet's "more" button.
     pub(super) fn more_menu(&mut self, ui: &mut egui::Ui, button: &egui::Response) {
         let Some(track) = self.current.clone() else {
@@ -130,13 +153,7 @@ impl YTDugem {
             .align_alternatives(&[])
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .layout(egui::Layout::top_down_justified(Align::LEFT))
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(28, 28, 30))
-                    .corner_radius(10.0)
-                    .inner_margin(egui::Margin::symmetric(6, 6))
-                    .stroke(Stroke::new(1.0, widgets::white_alpha(20))),
-            )
+            .frame(menu_frame())
             .show(|ui| {
                 ui.set_width(MENU_WIDTH - 12.0);
                 ui.spacing_mut().item_spacing.y = 0.0;

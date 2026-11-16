@@ -1798,16 +1798,24 @@ impl YTDugem {
         } else {
             "Dislike"
         };
-        for (label, target) in [(like, LikeStatus::Like), (dislike, LikeStatus::Dislike)] {
-            if ui.button(label).clicked() {
+        let heart = if rating == LikeStatus::Like {
+            Icon::HeartFill
+        } else {
+            Icon::Heart
+        };
+        for (icon, label, target) in [
+            (heart, like, LikeStatus::Like),
+            (Icon::Dislike, dislike, LikeStatus::Dislike),
+        ] {
+            if sheet_menu::menu_row(ui, icon, label, None, true) {
                 self.rate_track(track.clone(), toggled_rating(rating, target));
                 ui.close();
             }
         }
     }
-    /// "Add to playlist…", which opens the dialog that holds the choices.
+    /// "Add to playlist", which opens the dialog that holds the choices.
     fn playlist_menu(&mut self, ui: &mut egui::Ui, track: &Track) {
-        if ui.button("Add to playlist…").clicked() {
+        if sheet_menu::menu_row(ui, Icon::Playlist, "Add to playlist", None, true) {
             self.open_playlist_dialog(PlaylistDialog::AddTo {
                 track: track.clone(),
             });
@@ -1831,7 +1839,8 @@ impl YTDugem {
                 ))
             });
         if let Some((id, set_id, has_previous, has_next)) = owned {
-            if ui.button("Remove from this playlist").clicked() {
+            sheet_menu::separator(ui);
+            if sheet_menu::menu_row(ui, Icon::Trash, "Remove from this playlist", None, true) {
                 let video_id = track.id.clone();
                 let id = id.clone();
                 self.edit_account_playlist(move || {
@@ -1840,14 +1849,11 @@ impl YTDugem {
                 });
                 ui.close();
             }
-            for (label, enabled, up) in [
-                ("Move up", has_previous, true),
-                ("Move down", has_next, false),
+            for (icon, label, enabled, up) in [
+                (Icon::ArrowUp, "Move up", has_previous, true),
+                (Icon::ArrowDown, "Move down", has_next, false),
             ] {
-                if ui
-                    .add_enabled(enabled && !self.playlist_busy, egui::Button::new(label))
-                    .clicked()
-                {
+                if sheet_menu::menu_row(ui, icon, label, None, enabled && !self.playlist_busy) {
                     self.move_account_entry(id.clone(), track.id.clone(), up);
                     ui.close();
                 }
@@ -1862,21 +1868,23 @@ impl YTDugem {
                 return;
             };
             let mut changed = false;
-            for (label, target) in [
-                ("Move up", step_target(len, position, true)),
-                ("Move down", step_target(len, position, false)),
+            sheet_menu::separator(ui);
+            for (icon, label, target) in [
+                (Icon::ArrowUp, "Move up", step_target(len, position, true)),
+                (
+                    Icon::ArrowDown,
+                    "Move down",
+                    step_target(len, position, false),
+                ),
             ] {
-                if ui
-                    .add_enabled(target.is_some(), egui::Button::new(label))
-                    .clicked()
-                {
+                if sheet_menu::menu_row(ui, icon, label, None, target.is_some()) {
                     if let Some(to) = target {
                         changed |= self.library.move_in_playlist(i, position, to);
                     }
                     ui.close();
                 }
             }
-            if ui.button("Remove from playlist").clicked() {
+            if sheet_menu::menu_row(ui, Icon::Trash, "Remove from playlist", None, true) {
                 changed |= self.library.remove_from_playlist(i, track.key());
                 ui.close();
             }
@@ -4989,26 +4997,31 @@ impl YTDugem {
             self.report(r);
         }
     }
+    /// A song's menu entries, grouped and drawn like the player's menu (`sheet_menu`).
     fn track_menu(&mut self, ui: &mut egui::Ui, track: &Track) {
         self.rating_menu(ui, track);
-        if ui.button("Play next").clicked() {
+        self.playlist_menu(ui, track);
+        sheet_menu::separator(ui);
+        if sheet_menu::menu_row(ui, Icon::Download, "Download", None, true) {
+            self.download(track.clone());
+            ui.close();
+        }
+        if sheet_menu::menu_row(ui, Icon::PlayNext, "Play next", None, true) {
             self.library.queue.insert(0, track.clone());
             self.save();
             ui.close();
         }
-        if ui.button("Add to queue").clicked() {
+        if sheet_menu::menu_row(ui, Icon::AddToQueue, "Add to queue", None, true) {
             self.library.queue.push(track.clone());
             self.save();
             ui.close();
         }
-        self.playlist_menu(ui, track);
-        if ui.button("Download audio").clicked() {
-            self.download(track.clone());
-            ui.close();
-        }
-        if self.page == Page::Downloads && ui.button("Delete from computer").clicked() {
-            self.delete_download = Some(track.clone());
-            ui.close();
+        if self.page == Page::Downloads {
+            sheet_menu::separator(ui);
+            if sheet_menu::menu_row(ui, Icon::Trash, "Delete from computer", None, true) {
+                self.delete_download = Some(track.clone());
+                ui.close();
+            }
         }
         self.playlist_row_menu(ui, track);
     }
@@ -5144,10 +5157,11 @@ impl YTDugem {
                 // The 34 px slot is narrower than the padded label; wrapping split the dots.
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 ui.spacing_mut().button_padding = Vec2::new(6.0, 4.0);
-                ui.menu_button("···", |ui| self.track_menu(ui, track));
+                let more = ui.button("···");
+                self.track_popup(egui::Popup::menu(&more), track);
             },
         );
-        response.context_menu(|ui| self.track_menu(ui, track));
+        self.track_popup(egui::Popup::context_menu(&response), track);
         response.clicked()
     }
     fn track_list(&mut self, ui: &mut egui::Ui, tracks: Vec<Track>, origin: &str) {

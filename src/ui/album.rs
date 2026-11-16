@@ -252,10 +252,11 @@ impl YTDugem {
                 ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 ui.spacing_mut().button_padding = Vec2::new(6.0, 4.0);
-                ui.menu_button("···", |ui| self.track_menu(ui, track));
+                let more = ui.button("···");
+                self.track_popup(egui::Popup::menu(&more), track);
             },
         );
-        response.context_menu(|ui| self.track_menu(ui, track));
+        self.track_popup(egui::Popup::context_menu(&response), track);
         response.clicked()
     }
 }
