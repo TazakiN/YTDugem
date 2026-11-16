@@ -28,6 +28,7 @@ mod explore;
 mod floating_bar;
 mod library_view;
 mod playlist_files;
+mod pull_refresh;
 mod search_box;
 mod sheet;
 mod sheet_lyrics;
@@ -184,6 +185,12 @@ pub struct YTDugem {
     home_token: Option<String>,
     home_more: bool,
     recents: Vec<Track>,
+    /// Pull to refresh on Home; see `pull_refresh`.
+    home_pull: pull_refresh::Pull,
+    /// The shelves and recents shown while a pull refresh loads their replacements.
+    home_stale: Option<(Vec<HomeShelf>, Vec<Track>)>,
+    /// Whether the page's scroll area was at its top last frame.
+    page_at_top: bool,
     explore: explore::Explore,
     artists: artist::Artists,
     collection: Option<Collection>,
@@ -453,6 +460,9 @@ impl YTDugem {
             home_token: None,
             home_more: false,
             recents: vec![],
+            home_pull: Default::default(),
+            home_stale: None,
+            page_at_top: true,
             explore: Default::default(),
             artists: Default::default(),
             collection: None,
@@ -601,6 +611,7 @@ impl YTDugem {
         }
     }
     fn load_home(&mut self) {
+        self.home_stale = None;
         self.home_request += 1;
         let id = self.home_request;
         self.home.clear();
@@ -5162,10 +5173,18 @@ impl YTDugem {
         }
     }
     fn home_view(&mut self, ui: &mut egui::Ui) {
-        let recent = if self.recents.is_empty() {
+        self.settle_home_refresh();
+        self.home_pull_slot(ui);
+        // While a pull refresh loads, the old shelves stay on screen.
+        let refreshing = self.home_stale.is_some();
+        let (shelves, recents) = match &self.home_stale {
+            Some((shelves, recents)) => (shelves.clone(), recents.clone()),
+            None => (self.home.clone(), self.recents.clone()),
+        };
+        let recent = if recents.is_empty() {
             self.library.history.clone()
         } else {
-            self.recents.clone()
+            recents
         };
         if !recent.is_empty() {
             ui.horizontal(|ui| {
@@ -5194,8 +5213,10 @@ impl YTDugem {
                 });
             ui.add_space(32.0);
         }
-        let shelves = self.home.clone();
         self.shelf_rows(ui, &shelves, "home");
+        if refreshing {
+            return;
+        }
         if self.home_pending > 0 || self.home_more {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -6112,9 +6133,12 @@ impl eframe::App for YTDugem {
                     let floating = self.library.player_bar == store::PlayerBarStyle::Floating;
                     // The whole panel, margin included: the floating bar is placed in it.
                     let page = ui.max_rect().expand(28.0);
+                    if self.page == Page::Home {
+                        self.feed_home_pull(ui, page);
+                    }
                     // One scroll position per page: opening Settings from a scrolled Home page
                     // used to land halfway down it.
-                    egui::ScrollArea::vertical()
+                    let scrolled = egui::ScrollArea::vertical()
                         .id_salt(("page", self.page.clone(), self.explore_scroll_key()))
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
@@ -6127,6 +6151,8 @@ impl eframe::App for YTDugem {
                                 ui.add_space(floating_bar::RESERVED);
                             }
                         });
+                    // A touchpad's rubber band pulls the offset below zero: still the top.
+                    self.page_at_top = scrolled.state.unclamped_offset().y <= 0.5;
                     if floating {
                         self.floating_bar(ui, page, shown);
                     }
