@@ -1,6 +1,161 @@
 //! The Now Playing sheet's lyrics pane: the lyric sheet, and under it the romanize / source / translate bar (upstream `LandscapeLyricsPane`).
 use super::*;
 
+/// What the provider drawer knows about one provider for the current song (upstream
+/// `LyricsProviderState`; a provider absent from `Probe::states` has not been asked yet).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProbeState {
+    Fetching,
+    Found,
+    NotFound,
+}
+
+/// Every provider's answer for one song, kept so a hit switches without asking again.
+#[derive(Default)]
+pub(super) struct Probe {
+    pub(super) key: String,
+    /// Bumped whenever the answers are thrown away, so late ones are ignored.
+    pub(super) generation: u64,
+    pub(super) states: HashMap<&'static str, ProbeState>,
+    pub(super) found: HashMap<&'static str, services::lyrics::Lyrics>,
+    /// A row picked while its provider was still looking.
+    pub(super) pending: Option<&'static str>,
+}
+
+impl Probe {
+    /// Starts over for `key`, unless the answers are already for that song.
+    pub(super) fn reset_for(&mut self, key: &str) {
+        if self.key != key {
+            self.clear(key);
+        }
+    }
+    /// Starts over for `key` even when it is the same song (a reload or retry).
+    pub(super) fn clear(&mut self, key: &str) {
+        *self = Self {
+            key: key.into(),
+            generation: self.generation + 1,
+            ..Self::default()
+        };
+    }
+    pub(super) fn state(&self, id: &str) -> Option<ProbeState> {
+        self.states.get(id).copied()
+    }
+    pub(super) fn record(&mut self, id: &'static str, found: Option<services::lyrics::Lyrics>) {
+        match found {
+            Some(lyrics) => {
+                self.states.insert(id, ProbeState::Found);
+                self.found.insert(id, lyrics);
+            }
+            None => {
+                self.states.insert(id, ProbeState::NotFound);
+                self.found.remove(id);
+            }
+        }
+    }
+}
+
+/// What a row's second line says (upstream `lyrics_provider_*` strings).
+fn provider_status(state: Option<ProbeState>, current: bool) -> &'static str {
+    match state {
+        _ if current => "Current provider",
+        Some(ProbeState::Found) => "Lyrics found · Click to use",
+        Some(ProbeState::NotFound) => "Lyrics not found",
+        Some(ProbeState::Fetching) => "Fetching lyrics…",
+        None => "Not checked yet",
+    }
+}
+
+/// One provider in the drawer (upstream `LyricsProviderRow`); true when clicked. Only a
+/// provider that has, or may still have, lyrics and is not already shown can be clicked.
+fn lyrics_provider_row(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    provider: &services::lyrics::Provider,
+    state: Option<ProbeState>,
+    current: bool,
+) -> bool {
+    let enabled = !current && matches!(state, Some(ProbeState::Found | ProbeState::Fetching));
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), sense);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Button, enabled, current, provider.label)
+    });
+    let response = if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    };
+    let fill = if current {
+        26
+    } else if enabled && response.hovered() {
+        20
+    } else {
+        13
+    };
+    ui.painter()
+        .rect_filled(rect, 20.0, widgets::white_alpha(fill));
+    let center = Pos2::new(rect.left() + 14.0 + 20.0, rect.center().y);
+    ui.painter().circle_filled(
+        center,
+        20.0,
+        widgets::white_alpha(if current { 41 } else { 20 }),
+    );
+    let glyph = |icon, size: f32, alpha: f32| {
+        widgets::paint(
+            ui.painter(),
+            icon,
+            Rect::from_center_size(center, Vec2::splat(size)),
+            Color32::from_white_alpha((255.0 * alpha) as u8),
+        );
+    };
+    match state {
+        Some(ProbeState::Fetching) => egui::Spinner::new()
+            .size(20.0)
+            .color(Color32::from_white_alpha(204))
+            .paint_at(ui, Rect::from_center_size(center, Vec2::splat(20.0))),
+        _ if current => glyph(Icon::Check, 21.0, 1.0),
+        Some(ProbeState::Found) => glyph(Icon::Check, 21.0, 0.75),
+        Some(ProbeState::NotFound) => glyph(Icon::Close, 20.0, 0.4),
+        None => glyph(Icon::Search, 20.0, 0.7),
+    }
+    let x = center.x + 20.0 + 13.0;
+    let max = rect.right() - x - 14.0;
+    let title_font = if current {
+        FontId::new(16.0, egui::FontFamily::Name("bold".into()))
+    } else {
+        FontId::proportional(16.0)
+    };
+    let dim = |alpha: f32| Color32::from_white_alpha((255.0 * alpha) as u8);
+    fit_text(
+        ui.painter(),
+        Pos2::new(x, rect.center().y - 10.0),
+        egui::Align2::LEFT_CENTER,
+        provider.label,
+        title_font,
+        dim(match state {
+            _ if current => 1.0,
+            Some(ProbeState::NotFound) => 0.45,
+            _ => 0.85,
+        }),
+        max,
+    );
+    fit_text(
+        ui.painter(),
+        Pos2::new(x, rect.center().y + 11.0),
+        egui::Align2::LEFT_CENTER,
+        provider_status(state, current),
+        FontId::proportional(12.5),
+        dim(if current { 0.7 } else { 0.5 }),
+        max,
+    );
+    enabled && response.clicked()
+}
+
 impl YTDugem {
     pub(super) fn translation_target(&self) -> String {
         if self.library.translation_language.is_empty() {
@@ -136,49 +291,141 @@ impl YTDugem {
         )
     }
 
-    /// The list of lyric sources, opened from the status text; picking one loads the lyrics from it.
-    fn lyrics_source_picker(&mut self, ui: &mut egui::Ui, anchor: &egui::Response) {
-        let popup = ui.make_persistent_id("lyrics-source-popup");
-        if anchor.clicked() {
-            egui::Popup::toggle_id(ui.ctx(), popup);
+    /// Puts lyrics on screen, dropping any translation or romanization made for the old ones.
+    pub(super) fn show_lyrics(&mut self, found: services::lyrics::Lyrics) {
+        self.lyrics = found.lines;
+        self.lyrics_provider = found.provider.into();
+        self.lyrics_message.clear();
+        self.lyrics_detail.clear();
+        self.active_lyric = None;
+        self.translation_request += 1;
+        self.translation = None;
+        self.translating = false;
+        self.romanization_request += 1;
+        self.romanization = None;
+        self.romanizing = false;
+        match self.lyrics_mode {
+            LyricsMode::Translated => self.request_translation(),
+            LyricsMode::Romanized => self.request_romanization(),
+            LyricsMode::Original => {}
         }
+    }
+
+    /// Opens the provider drawer and asks every provider not yet asked about this song, all at
+    /// once, so each row ends up saying whether it has lyrics.
+    fn open_lyrics_sources(&mut self) {
+        let Some(song) = self.current.clone().filter(|_| self.library.lyrics_enabled) else {
+            return;
+        };
+        self.lyrics_sources_open = true;
+        self.lyrics_probe.reset_for(song.key());
+        for provider in services::lyrics::ordered(&self.library.lyrics_order) {
+            if self.lyrics_probe.state(provider.id).is_some() {
+                continue;
+            }
+            self.lyrics_probe
+                .states
+                .insert(provider.id, ProbeState::Fetching);
+            let (generation, id, song, tx) = (
+                self.lyrics_probe.generation,
+                provider.id,
+                song.clone(),
+                self.tx.clone(),
+            );
+            std::thread::spawn(move || {
+                let result = services::lyrics::lookup(&song, &[], &[], Some(id)).map_err(err);
+                let _ = tx.send(Event::LyricsProbe(generation, id, result));
+            });
+        }
+    }
+
+    /// One provider's answer from `open_lyrics_sources`; shown at once if its row was picked
+    /// while it was still looking.
+    pub(super) fn lyrics_probed(
+        &mut self,
+        generation: u64,
+        id: &'static str,
+        result: Result<services::lyrics::Lyrics, String>,
+    ) {
+        if generation != self.lyrics_probe.generation
+            || self.current.as_ref().map(Track::key) != Some(self.lyrics_probe.key.as_str())
+        {
+            return;
+        }
+        let found = result.ok();
+        let pending = self.lyrics_probe.pending == Some(id);
+        if pending {
+            self.lyrics_probe.pending = None;
+        }
+        self.lyrics_probe.record(id, found.clone());
+        if let (true, Some(found)) = (pending, found) {
+            self.use_lyrics_provider(id, found);
+        }
+    }
+
+    /// Shows what `id` found and keeps asking it for this song on a reload or retry.
+    fn use_lyrics_provider(&mut self, id: &'static str, found: services::lyrics::Lyrics) {
+        // An automatic lookup still running must not replace the choice when it lands.
+        self.lyrics_request += 1;
+        self.lyrics_override = Some(id.into());
+        self.show_lyrics(found);
+    }
+
+    /// A row clicked: a hit switches at once, a running lookup is applied when it answers.
+    fn choose_lyrics_provider(&mut self, id: &'static str) {
+        match self.lyrics_probe.state(id) {
+            Some(ProbeState::Found) => {
+                if let Some(found) = self.lyrics_probe.found.get(id).cloned() {
+                    self.use_lyrics_provider(id, found);
+                }
+            }
+            Some(ProbeState::Fetching) => self.lyrics_probe.pending = Some(id),
+            Some(ProbeState::NotFound) | None => return,
+        }
+        self.lyrics_sources_open = false;
+    }
+
+    /// The "Choose lyrics provider" drawer (upstream `LyricsProviderSheet`), over the sheet.
+    pub(super) fn lyrics_sources_dialog(&mut self, ui: &mut egui::Ui, sheet: Rect) {
+        const ROW: f32 = 64.0;
+        const GAP: f32 = 6.0;
+        let providers = services::lyrics::ordered(&self.library.lyrics_order);
+        let want = 68.0 + providers.len() as f32 * (ROW + GAP) + 24.0;
         let mut pick = None;
-        popup_below_widget(
-            popup,
-            anchor,
-            egui::PopupCloseBehavior::CloseOnClick,
-            |ui| {
-                ui.set_min_width(230.0);
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.spacing_mut().button_padding = Vec2::new(8.0, 5.0);
+        let open = super::sheet_output::player_drawer(
+            ui,
+            sheet,
+            "lyrics-sources-open",
+            "Choose lyrics provider",
+            want,
+            |u| {
                 egui::ScrollArea::vertical()
-                    .max_height(260.0)
-                    .show(ui, |ui| {
-                        ui.set_min_width(230.0);
-                        let current = self.lyrics_override.clone();
-                        if ui
-                            .selectable_label(current.is_none(), "Automatic (enabled order)")
-                            .clicked()
-                        {
-                            pick = Some(None);
-                        }
-                        ui.separator();
-                        for provider in services::lyrics::PROVIDERS {
-                            let chosen = current.as_deref() == Some(provider.id);
-                            if ui
-                                .selectable_label(chosen, provider.label)
-                                .on_hover_text(provider.detail)
-                                .clicked()
-                            {
-                                pick = Some(Some(provider.id.to_owned()));
+                    .id_salt("lyrics-sources-scroll")
+                    .auto_shrink([false, false])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(u, |u| {
+                        u.spacing_mut().item_spacing.y = GAP;
+                        let width = u.available_width();
+                        for provider in providers {
+                            let current = provider.label == self.lyrics_provider;
+                            let state = if self.lyrics_probe.pending == Some(provider.id) {
+                                Some(ProbeState::Fetching)
+                            } else {
+                                self.lyrics_probe.state(provider.id)
+                            };
+                            if lyrics_provider_row(u, width, ROW, provider, state, current) {
+                                pick = Some(provider.id);
                             }
                         }
                     });
             },
         );
-        if let Some(choice) = pick {
-            self.lyrics_override = choice.clone();
-            self.request_lyrics(choice);
+        if !open {
+            self.lyrics_sources_open = false;
+            return;
+        }
+        if let Some(id) = pick {
+            self.choose_lyrics_provider(id);
         }
     }
 
@@ -298,7 +545,9 @@ impl YTDugem {
             ],
             Stroke::new(1.0, color),
         );
-        self.lyrics_source_picker(ui, &response);
+        if response.clicked() {
+            self.open_lyrics_sources();
+        }
     }
 
     pub(super) fn lyrics_pane(&mut self, ui: &mut egui::Ui, rect: Rect) {
@@ -1269,6 +1518,76 @@ fn status_text(mode: LyricsMode, provider: &str, message: &str, prep: Prep, lang
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hit() -> services::lyrics::Lyrics {
+        services::lyrics::Lyrics {
+            provider: "LRCLIB",
+            lines: vec![],
+        }
+    }
+
+    #[test]
+    fn probe_keeps_answers_per_song_and_drops_them_for_another() {
+        let mut probe = Probe::default();
+        probe.reset_for("a");
+        let first = probe.generation;
+        probe.record("lrclib", Some(hit()));
+        probe.record("kugou", None);
+        assert_eq!(probe.state("lrclib"), Some(ProbeState::Found));
+        assert!(probe.found.contains_key("lrclib"));
+        assert_eq!(probe.state("kugou"), Some(ProbeState::NotFound));
+        assert_eq!(probe.state("genius"), None);
+
+        probe.reset_for("a");
+        assert_eq!(probe.generation, first, "same song keeps its answers");
+        assert_eq!(probe.state("lrclib"), Some(ProbeState::Found));
+
+        probe.pending = Some("genius");
+        probe.reset_for("b");
+        assert!(
+            probe.generation > first,
+            "late answers for the old song are ignored"
+        );
+        assert_eq!(probe.key, "b");
+        assert!(probe.states.is_empty() && probe.found.is_empty());
+        assert_eq!(probe.pending, None);
+
+        probe.clear("b");
+        assert!(
+            probe.generation > first + 1,
+            "a retry also drops answers in flight"
+        );
+    }
+
+    #[test]
+    fn a_miss_replaces_an_earlier_hit() {
+        let mut probe = Probe::default();
+        probe.record("lrclib", Some(hit()));
+        probe.record("lrclib", None);
+        assert_eq!(probe.state("lrclib"), Some(ProbeState::NotFound));
+        assert!(!probe.found.contains_key("lrclib"));
+    }
+
+    #[test]
+    fn provider_rows_say_what_each_provider_has() {
+        assert_eq!(
+            provider_status(Some(ProbeState::Found), true),
+            "Current provider"
+        );
+        assert_eq!(
+            provider_status(Some(ProbeState::Found), false),
+            "Lyrics found · Click to use"
+        );
+        assert_eq!(
+            provider_status(Some(ProbeState::NotFound), false),
+            "Lyrics not found"
+        );
+        assert_eq!(
+            provider_status(Some(ProbeState::Fetching), false),
+            "Fetching lyrics…"
+        );
+        assert_eq!(provider_status(None, false), "Not checked yet");
+    }
 
     #[test]
     fn blur_stamps_keep_core_weight_and_fall_off() {

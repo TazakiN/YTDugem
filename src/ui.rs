@@ -119,6 +119,8 @@ enum Event {
     Collection(u64, Result<Collection, String>),
     Imported(Result<Vec<Track>, String>),
     Lyrics(u64, String, Result<services::lyrics::Lyrics, String>),
+    /// One provider's answer for the provider drawer: (probe generation, provider id, result).
+    LyricsProbe(u64, &'static str, Result<services::lyrics::Lyrics, String>),
     /// A finished download (track key), already imported into local music.
     Downloaded(String, Result<Vec<Track>, String>),
     DownloadProgress(String, f32),
@@ -213,6 +215,10 @@ pub struct YTDugem {
     lyrics_provider: String,
     lyrics_override: Option<String>,
     lyrics_request: u64,
+    /// Each provider's answer for the current song, for the provider drawer.
+    lyrics_probe: sheet_lyrics::Probe,
+    /// The "Choose lyrics provider" drawer over the player sheet.
+    lyrics_sources_open: bool,
     follow_lyrics: bool,
     active_lyric: Option<usize>,
     cover: Option<egui::TextureHandle>,
@@ -486,6 +492,8 @@ impl YTDugem {
             lyrics_provider: String::new(),
             lyrics_override: None,
             lyrics_request: 0,
+            lyrics_probe: Default::default(),
+            lyrics_sources_open: false,
             follow_lyrics: true,
             active_lyric: None,
             cover: None,
@@ -850,6 +858,8 @@ impl YTDugem {
         self.lyrics_request += 1;
         let request = self.lyrics_request;
         let key = song.key().to_owned();
+        // A reload or retry asks every provider afresh (keys or settings may have changed).
+        self.lyrics_probe.clear(&key);
         self.lyrics.clear();
         self.lyrics_provider.clear();
         self.lyrics_message = "Finding lyrics…".into();
@@ -4132,17 +4142,17 @@ impl YTDugem {
                     if id == self.lyrics_request
                         && self.current.as_ref().is_some_and(|t| t.key() == key) =>
                 {
+                    let provider = services::lyrics::PROVIDERS.iter().find(|p| match &r {
+                        Ok(found) => p.label == found.provider,
+                        Err(_) => self.lyrics_override.as_deref() == Some(p.id),
+                    });
+                    // The drawer reuses what this lookup learned: the hit, or a chosen
+                    // provider's miss. An automatic miss says nothing about any one provider.
+                    if let Some(p) = provider.filter(|_| self.lyrics_probe.key == key) {
+                        self.lyrics_probe.record(p.id, r.as_ref().ok().cloned());
+                    }
                     match r {
-                        Ok(found) => {
-                            self.lyrics = found.lines;
-                            self.lyrics_provider = found.provider.into();
-                            self.lyrics_message.clear();
-                            match self.lyrics_mode {
-                                LyricsMode::Translated => self.request_translation(),
-                                LyricsMode::Romanized => self.request_romanization(),
-                                LyricsMode::Original => {}
-                            }
-                        }
+                        Ok(found) => self.show_lyrics(found),
                         // The providers' reasons are for whoever asks; the pane says it plainly.
                         Err(e) => {
                             self.lyrics_message = sheet_lyrics::no_lyrics_line().into();
@@ -4150,6 +4160,7 @@ impl YTDugem {
                         }
                     }
                 }
+                Event::LyricsProbe(generation, id, r) => self.lyrics_probed(generation, id, r),
                 Event::Artwork(key, Ok((cover, back)))
                     if self.current.as_ref().is_some_and(|t| t.key() == key) =>
                 {

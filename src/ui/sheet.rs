@@ -176,6 +176,10 @@ impl YTDugem {
             self.output_open = false;
             return;
         }
+        if self.lyrics_sources_open {
+            self.lyrics_sources_open = false;
+            return;
+        }
         if !self.expanded {
             return;
         }
@@ -299,6 +303,14 @@ impl YTDugem {
         // While the sheet is down, `output_overlay` draws the dialog over the page instead.
         if self.output_open && self.expanded {
             self.output_dialog(ui, rect);
+        }
+        // Belongs to the lyrics pane: leaving it (or the sheet) closes the drawer.
+        if self.lyrics_sources_open {
+            if self.expanded && self.tab == PlayerPane::Lyrics {
+                self.lyrics_sources_dialog(ui, rect);
+            } else {
+                self.lyrics_sources_open = false;
+            }
         }
         // The page's status line is hidden behind the sheet; failures must still be seen.
         if !self.message.is_empty() {
