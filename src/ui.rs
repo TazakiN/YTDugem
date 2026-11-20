@@ -6904,22 +6904,39 @@ fn font_definitions() -> egui::FontDefinitions {
         .get_mut(&egui::FontFamily::Proportional)
         .unwrap()
         .insert(0, "inter".into());
-    // Inter has no CJK glyphs; fall back to fonts Windows ships so Japanese/Chinese/Korean
-    // titles render instead of empty boxes. One font per script, first one found wins.
-    let groups: [&[&str]; 3] = [
-        &[
-            r"C:\Windows\Fonts\YuGothM.ttc",
-            r"C:\Windows\Fonts\meiryo.ttc",
-            r"C:\Windows\Fonts\msgothic.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-        ],
-        &[r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simsun.ttc"],
-        &[r"C:\Windows\Fonts\malgun.ttf"],
+    // Inter has no CJK glyphs, emoji or most symbols; fall back to fonts the system ships so
+    // Japanese/Chinese/Korean titles and shelf titles like "Rain + Feels ☔" render instead of
+    // empty boxes. One font per group, first one found wins. Emoji draw in one colour: epaint
+    // is built without colour-font support and uses the outlines.
+    let groups: [(&str, &[&str]); 5] = [
+        (
+            "cjk-0",
+            &[
+                r"C:\Windows\Fonts\YuGothM.ttc",
+                r"C:\Windows\Fonts\meiryo.ttc",
+                r"C:\Windows\Fonts\msgothic.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            ],
+        ),
+        (
+            "cjk-1",
+            &[r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simsun.ttc"],
+        ),
+        ("cjk-2", &[r"C:\Windows\Fonts\malgun.ttf"]),
+        (
+            "emoji",
+            &[
+                r"C:\Windows\Fonts\seguiemj.ttf",
+                "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",
+                "/usr/share/fonts/noto/NotoEmoji-Regular.ttf",
+            ],
+        ),
+        ("symbols", &[r"C:\Windows\Fonts\seguisym.ttf"]),
     ];
-    for (i, paths) in groups.iter().enumerate() {
+    for (name, paths) in groups {
         if let Some(bytes) = paths.iter().find_map(|p| std::fs::read(p).ok()) {
-            let name = format!("cjk-{i}");
+            let name = name.to_owned();
             let y_offset_factor = baseline_shift_em(inter_regular, &bytes).unwrap_or(0.0);
             let data = egui::FontData::from_owned(bytes).tweak(egui::FontTweak {
                 y_offset_factor,
