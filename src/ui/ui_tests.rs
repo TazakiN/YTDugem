@@ -177,7 +177,14 @@ fn search_results_narrow() {
 fn search_dropdown() {
     let mut app = app();
     app.query = "dewa".into();
-    app.search_box_fixture("dewa", &["dewa 19 kangen", "dewa 19 pupus", "dewa budjana"]);
+    let songs: Vec<Track> = (0..6).map(track).collect();
+    let artist = search_app().artists.results[0].clone();
+    app.search_box_fixture(
+        "dewa",
+        &["dewa 19 kangen", "dewa 19 pupus", "dewa budjana"],
+        &[artist],
+        &songs,
+    );
     let mut h = harness(app, 1440.0, 900.0);
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::F);
     h.run_steps(3);

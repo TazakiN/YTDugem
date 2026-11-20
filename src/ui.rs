@@ -139,6 +139,8 @@ enum Event {
     Suggestions(u64, String, Result<Vec<String>, String>),
     /// Typeahead suggestions for the top bar search box: (request, query, suggestions).
     SearchSuggestions(u64, String, Result<Vec<String>, String>),
+    /// The top result and first songs for the search box's dropdown, under its request.
+    SearchPreview(u64, search_box::SearchPreview),
     /// Writing `stats.json` failed in the background.
     StatsSaveFailed(String),
     Translated(u64, Result<Translation, String>),
@@ -3987,6 +3989,7 @@ impl YTDugem {
                 Event::SearchSuggestions(id, query, r) => {
                     self.search_suggestions_arrived(id, query, r)
                 }
+                Event::SearchPreview(id, preview) => self.search_box.accept_preview(id, preview),
                 Event::StatsSaveFailed(e) => {
                     self.toast_error(format!("Could not save listening stats: {e}"))
                 }
