@@ -288,7 +288,7 @@ pub(super) fn card(ui: &mut egui::Ui, item: &ShelfItem, width: f32) -> Option<Ca
     action
 }
 
-fn round_image(ui: &mut egui::Ui, url: &str, name: &str, rect: Rect) {
+pub(super) fn round_image(ui: &mut egui::Ui, url: &str, name: &str, rect: Rect) {
     if !ui.is_rect_visible(rect) {
         return;
     }
@@ -987,13 +987,14 @@ impl YTDugem {
         }
     }
 
-    /// Search's Artists and Playlists rows, above the songs.
+    /// Search's Artists and Playlists rows, between the top result and the songs.
+    /// The best artist is the top result, so the Artists row starts after it.
     pub(super) fn artist_results(&mut self, ui: &mut egui::Ui) {
-        if self.artists.results.is_empty() && self.artists.playlists.is_empty() {
-            return;
-        }
         let rows = [
-            ("Artists", self.artists.results.clone()),
+            (
+                "Artists",
+                self.artists.results.iter().skip(1).cloned().collect(),
+            ),
             ("Playlists", self.artists.playlists.clone()),
         ];
         for (title, items) in rows {
@@ -1008,9 +1009,6 @@ impl YTDugem {
             }
             ui.add_space(8.0);
         }
-        ui.add_space(10.0);
-        ui.label(heading("Songs", 20.0));
-        ui.add_space(4.0);
     }
 }
 
