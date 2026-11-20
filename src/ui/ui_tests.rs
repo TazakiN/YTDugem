@@ -234,3 +234,23 @@ fn tabs_and_library_entries_navigate() {
     h.run_steps(2);
     assert_eq!(h.state().page, Page::Settings);
 }
+
+#[test]
+fn recents_take_one_column_per_320_points_up_to_three() {
+    assert_eq!(recent_columns(200.0), 1);
+    assert_eq!(recent_columns(639.0), 1);
+    assert_eq!(recent_columns(640.0), 2);
+    assert_eq!(recent_columns(944.0), 2);
+    assert_eq!(recent_columns(960.0), 3);
+    assert_eq!(recent_columns(1240.0), 3);
+}
+
+#[test]
+fn shelf_arrows_page_the_row() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness(app(), 1440.0, 900.0);
+    assert!(h.query_by_label("Scroll left").is_none());
+    h.get_all_by_label("Scroll right").next().unwrap().click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Scroll left").is_some());
+}
