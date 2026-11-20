@@ -3,8 +3,8 @@
 //! the `main` branch's header shuffle/radio targets.
 
 use super::{
-    account_call, collect_cards, continuation, find_renderer, innertube_value, parse_renderers,
-    text, thumbnails, ShelfItem,
+    account_call, collect_cards, continuation, find_renderer, innertube_value, innertube_value_as,
+    parse_renderers, text, thumbnails, ShelfItem,
 };
 use crate::model::Track;
 use anyhow::{bail, Result};
@@ -332,15 +332,23 @@ pub fn set_subscribed(channel_id: &str, subscribed: bool) -> Result<()> {
 
 /// Artists matching a search, best match first.
 pub fn search_artists(query: &str) -> Result<Vec<ShelfItem>> {
+    search_artists_as(query, crate::auth::snapshot())
+}
+
+/// `search_artists` signed out, for the search box's preview; see `search_signed_out`.
+pub fn search_artists_signed_out(query: &str) -> Result<Vec<ShelfItem>> {
+    search_artists_as(query, None)
+}
+
+fn search_artists_as(query: &str, session: Option<crate::auth::Session>) -> Result<Vec<ShelfItem>> {
     let query = query.trim();
     if query.is_empty() || query.len() > 500 {
         bail!("Enter a search between 1 and 500 characters");
     }
-    let v = innertube_value(
-        "search",
-        json!({ "query": query, "params": ARTISTS_FILTER }),
-    )?;
-    Ok(parse_artist_results(&v))
+    let body = json!({ "query": query, "params": ARTISTS_FILTER });
+    Ok(parse_artist_results(&innertube_value_as(
+        "search", body, session,
+    )?))
 }
 
 fn parse_artist_results(v: &Value) -> Vec<ShelfItem> {
