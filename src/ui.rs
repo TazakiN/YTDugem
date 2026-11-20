@@ -30,6 +30,7 @@ mod library_view;
 mod playlist_files;
 mod pull_refresh;
 mod search_box;
+mod search_page;
 mod sheet;
 mod sheet_lyrics;
 mod sheet_menu;
@@ -4908,15 +4909,17 @@ impl YTDugem {
         response.clicked()
     }
     fn track_list(&mut self, ui: &mut egui::Ui, tracks: Vec<Track>, origin: &str) {
-        self.track_list_with(ui, tracks, origin, true);
+        self.track_list_with(ui, tracks, origin, true, 0);
     }
-    /// The rows of a list; `header` adds Play all, Add all to queue and the count above them.
+    /// The rows of a list from row `from` on; `header` adds Play all, Add all to queue and the
+    /// count of the whole list above them.
     fn track_list_with(
         &mut self,
         ui: &mut egui::Ui,
         tracks: Vec<Track>,
         origin: &str,
         header: bool,
+        from: usize,
     ) {
         if tracks.is_empty() {
             ui.add_space(28.0);
@@ -4943,7 +4946,7 @@ impl YTDugem {
             });
             ui.add_space(12.0);
         }
-        for (i, t) in tracks.iter().enumerate() {
+        for (i, t) in tracks.iter().enumerate().skip(from) {
             ui.push_id((origin, i), |ui| {
                 if self.song_row(ui, t, Some(i), ui.available_width()) {
                     self.start_tracks(tracks.clone(), i, origin);
@@ -5143,7 +5146,7 @@ impl YTDugem {
                 });
             });
             ui.add_space(20.0);
-            self.track_list_with(ui, c.tracks, &c.title, playlist_id.is_none());
+            self.track_list_with(ui, c.tracks, &c.title, playlist_id.is_none(), 0);
             if c.continuation.is_some()
                 && ui
                     .add_enabled(!self.busy, egui::Button::new("Load more tracks"))
@@ -5163,18 +5166,7 @@ impl YTDugem {
             Page::Collection => self.collection_view(ui),
             Page::Artist(id) => self.artist_view(ui, &id),
             Page::ArtistGrid(target) => self.artist_grid_view(ui, &target),
-            Page::Search => {
-                ui.label(heading(
-                    if self.submitted_query.is_empty() {
-                        "Search"
-                    } else {
-                        &self.submitted_query
-                    },
-                    26.0,
-                ));
-                self.artist_results(ui);
-                self.track_list(ui, self.results.clone(), "Search");
-            }
+            Page::Search => self.search_view(ui),
             Page::Library => {
                 ui.label(heading("Your library", 26.0));
                 ui.add_space(10.0);

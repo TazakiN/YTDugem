@@ -101,13 +101,20 @@ fn search_app() -> YTDugem {
     app.query = "dewa 19".into();
     app.submitted_query = "dewa 19".into();
     app.results = (0..12).map(track).collect();
-    app.artists.results = vec![ShelfItem {
-        title: "Dewa 19".into(),
-        subtitle: "Artist • 4.1M subscribers".into(),
-        browse_id: Some("UCdewa19".into()),
+    app.artists.results = [
+        ("Dewa 19", "4.1M"),
+        ("Dewa Budjana", "310K"),
+        ("Dewata", "12K"),
+    ]
+    .into_iter()
+    .map(|(name, subscribers)| ShelfItem {
+        title: name.into(),
+        subtitle: format!("Artist • {subscribers} subscribers"),
+        browse_id: Some(format!("UC{name}")),
         page_type: Some("MUSIC_PAGE_TYPE_ARTIST".into()),
         ..Default::default()
-    }];
+    })
+    .collect();
     app.artists.playlists = (0..6)
         .map(|i| item("Dewa 19 Hits", "Playlist • Fans", i))
         .collect();
@@ -158,6 +165,12 @@ fn home_narrow() {
 fn search_results() {
     let mut h = harness(search_app(), 1440.0, 900.0);
     snapshot(&mut h, "search_results_1440x900");
+}
+
+#[test]
+fn search_results_narrow() {
+    let mut h = harness(search_app(), 900.0, 700.0);
+    snapshot(&mut h, "search_results_900x700");
 }
 
 #[test]

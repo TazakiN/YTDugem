@@ -69,7 +69,7 @@ impl YTDugem {
         recent_first: bool,
     ) {
         if tracks.is_empty() {
-            self.track_list_with(ui, Vec::new(), origin, header);
+            self.track_list_with(ui, Vec::new(), origin, header, 0);
             return;
         }
         let id = egui::Id::unique(("list-view", origin));
@@ -127,7 +127,7 @@ impl YTDugem {
             ui.label(RichText::new("No songs match the filter").color(MUTED));
             return;
         }
-        self.track_list_with(ui, shown, origin, header);
+        self.track_list_with(ui, shown, origin, header, 0);
     }
 }
 
