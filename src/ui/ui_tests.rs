@@ -134,7 +134,7 @@ fn harness(app: YTDugem, width: f32, height: f32) -> Harness<'static, YTDugem> {
     harness
 }
 
-fn snapshot(harness: &mut Harness<'_, YTDugem>, name: &str) {
+fn snapshot<S>(harness: &mut Harness<'_, S>, name: &str) {
     if std::env::var_os("CI").is_some() {
         eprintln!("CI: drew {name} but skipped the image comparison");
         return;
@@ -169,4 +169,26 @@ fn search_dropdown() {
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::F);
     h.run_steps(3);
     snapshot(&mut h, "search_dropdown_1440x900");
+}
+
+#[test]
+fn emoji_in_headings() {
+    if !font_definitions().font_data.contains_key("emoji") {
+        eprintln!("no emoji font installed; skipping");
+        return;
+    }
+    // The harness panics on any character no font can draw, so drawing it checks coverage.
+    // U+FE0F (emoji presentation) follows the cloud, as in YouTube's own titles.
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(420.0, 60.0))
+        .with_pixels_per_point(1.0)
+        .with_context_setup(|ctx| configure_style(ctx, store::Theme::Classic))
+        .build_ui(|ui| {
+            ui.label(heading(
+                "Rain + Feels \u{2614} \u{1F327}\u{FE0F} \u{1F3B5}",
+                24.0,
+            ));
+        });
+    h.run();
+    snapshot(&mut h, "emoji_heading");
 }
