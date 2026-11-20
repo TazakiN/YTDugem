@@ -192,3 +192,45 @@ fn emoji_in_headings() {
     h.run();
     snapshot(&mut h, "emoji_heading");
 }
+
+#[test]
+fn library_owns_its_sub_pages_and_other_pages_light_no_tab() {
+    for (page, _) in TABS {
+        assert_eq!(owning_tab(&page), Some(page.clone()));
+    }
+    for page in [
+        Page::History,
+        Page::Downloads,
+        Page::Local,
+        Page::Playlist(3),
+        Page::Stats,
+    ] {
+        assert_eq!(owning_tab(&page), Some(Page::Library), "{page:?}");
+    }
+    for page in [
+        Page::Search,
+        Page::Settings,
+        Page::Collection,
+        Page::Artist("UC".into()),
+    ] {
+        assert_eq!(owning_tab(&page), None, "{page:?}");
+    }
+}
+
+#[test]
+fn tabs_and_library_entries_navigate() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness(app(), 1440.0, 900.0);
+    h.get_by_label("Library").click();
+    h.run_steps(2);
+    assert_eq!(h.state().page, Page::Library);
+    h.get_by_label("History").click();
+    h.run_steps(2);
+    assert_eq!(h.state().page, Page::History);
+    h.get_by_label("Back").click();
+    h.run_steps(2);
+    assert_eq!(h.state().page, Page::Library);
+    h.get_by_label("Settings").click();
+    h.run_steps(2);
+    assert_eq!(h.state().page, Page::Settings);
+}

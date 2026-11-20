@@ -393,7 +393,13 @@ fn bottom_fade(painter: &egui::Painter, rect: Rect) {
 }
 
 /// A rounded action button: icon and label, filled for the main action.
-fn pill(ui: &mut egui::Ui, icon: Icon, label: &str, filled: bool, enabled: bool) -> egui::Response {
+pub(super) fn pill(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    filled: bool,
+    enabled: bool,
+) -> egui::Response {
     let font = FontId::new(15.0, egui::FontFamily::Name("bold".into()));
     let text_width = ui
         .painter()
@@ -407,6 +413,7 @@ fn pill(ui: &mut egui::Ui, icon: Icon, label: &str, filled: bool, enabled: bool)
         egui::Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(size, sense);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     let (fill, ink) = match (filled, response.hovered() && enabled) {
         (true, false) => (ACCENT, BG),
         (true, true) => (Color32::from_rgb(196, 224, 178), BG),
