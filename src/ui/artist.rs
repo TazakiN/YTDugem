@@ -204,16 +204,11 @@ pub(super) enum CardAction {
     Artist(ArtistLink),
 }
 
-/// One shelf card: square artwork, a 16:9 video frame, or a round artist photo, with its title
-/// and a subtitle whose artist names link to their pages.
-pub(super) fn card(ui: &mut egui::Ui, item: &ShelfItem) -> Option<CardAction> {
+/// One shelf card `width` wide: square artwork, a 16:9 video frame, or a round artist photo,
+/// with its title and a subtitle whose artist names link to their pages.
+pub(super) fn card(ui: &mut egui::Ui, item: &ShelfItem, width: f32) -> Option<CardAction> {
     let round = item.is_artist();
-    let width = if item.wide { WIDE_CARD } else { CARD };
-    let art_height = if item.wide {
-        WIDE_CARD * 9.0 / 16.0
-    } else {
-        CARD
-    };
+    let art_height = if item.wide { width * 9.0 / 16.0 } else { width };
     let mut action = None;
     ui.vertical(|ui| {
         ui.set_width(width);
@@ -310,28 +305,115 @@ fn round_image(ui: &mut egui::Ui, url: &str, name: &str, rect: Rect) {
     }
 }
 
-/// A row of cards that scrolls sideways.
+/// The least width of a square card in a row; rows stretch their cards to fill the width.
+const MIN_CARD: f32 = 160.0;
+/// How much wider a 16:9 card is than a square one.
+const WIDE_RATIO: f32 = WIDE_CARD / CARD;
+const CARD_GAP: f32 = 16.0;
+
+/// How many cards at least `min` wide fit in `width`, and the card width that fills it.
+pub(super) fn fit_cards(width: f32, min: f32) -> (usize, f32) {
+    let count = ((width + CARD_GAP) / (min + CARD_GAP)).floor().max(1.0) as usize;
+    let card = (width - CARD_GAP * (count - 1) as f32) / count as f32;
+    (count, card.max(1.0))
+}
+
+/// The scroll offset `visible` cards on from `offset`, on a card boundary, within `0..=max`.
+fn page_offset(offset: f32, pitch: f32, visible: usize, max: f32, forward: bool) -> f32 {
+    let first = (offset / pitch).round();
+    let step = if forward { 1.0 } else { -1.0 } * visible as f32;
+    ((first + step) * pitch).clamp(0.0, max.max(0.0))
+}
+
+/// A row of cards sized to fill the width, scrolled sideways a page at a time by the arrows
+/// over its ends (or by touchpad and drag).
 pub(super) fn card_row(
     ui: &mut egui::Ui,
     items: &[ShelfItem],
     salt: impl std::hash::Hash + std::fmt::Debug,
 ) -> Option<CardAction> {
+    // A row with videos is paged by its 16:9 cards.
+    let wide = items.iter().any(|i| i.wide);
+    let min = if wide {
+        MIN_CARD * WIDE_RATIO
+    } else {
+        MIN_CARD
+    };
+    let (visible, width) = fit_cards(ui.available_width(), min);
+    let square = if wide { width / WIDE_RATIO } else { width };
     let mut action = None;
-    egui::ScrollArea::horizontal()
+    // An arrow's page lands on the next frame: the scroll area takes offsets before it draws.
+    let paged = ui.make_persistent_id(("card-row-page", &salt));
+    let mut area = egui::ScrollArea::horizontal()
         .id_salt(("card-row", &salt))
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-        .show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 16.0;
-                for (i, item) in items.iter().enumerate() {
-                    ui.push_id(i, |ui| {
-                        if let Some(a) = card(ui, item) {
-                            action = Some(a);
-                        }
-                    });
-                }
-            });
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+    if let Some(x) = ui.data_mut(|d| d.remove_temp::<f32>(paged)) {
+        area = area.horizontal_scroll_offset(x);
+    }
+    let output = area.show(ui, |ui| {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = CARD_GAP;
+            for (i, item) in items.iter().enumerate() {
+                ui.push_id(i, |ui| {
+                    let w = if item.wide {
+                        square * WIDE_RATIO
+                    } else {
+                        square
+                    };
+                    if let Some(a) = card(ui, item, w) {
+                        action = Some(a);
+                    }
+                });
+            }
         });
+    });
+    let row = output.inner_rect;
+    let max = output.content_size.x - row.width();
+    let offset = output.state.clamped_offset().x;
+    let art = if wide { width * 9.0 / 16.0 } else { width };
+    let mut target = None;
+    for (forward, shown) in [(false, offset > 0.5), (true, offset < max - 0.5)] {
+        if !shown {
+            continue;
+        }
+        let x = if forward {
+            row.right() - 22.0
+        } else {
+            row.left() + 22.0
+        };
+        let r = Rect::from_center_size(Pos2::new(x, row.top() + art / 2.0), Vec2::splat(36.0));
+        let label = if forward {
+            "Scroll right"
+        } else {
+            "Scroll left"
+        };
+        let response = ui.interact(r, output.id.with(label), egui::Sense::click());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+        let fill = Color32::from_black_alpha(if response.hovered() { 220 } else { 170 });
+        let p = ui.painter();
+        p.circle_filled(r.center(), 18.0, fill);
+        p.circle_stroke(
+            r.center(),
+            18.0,
+            Stroke::new(1.0_f32, widgets::white_alpha(30)),
+        );
+        let icon = if forward {
+            Icon::CaretRight
+        } else {
+            Icon::CaretLeft
+        };
+        widgets::paint(p, icon, r.shrink(9.0), WHITE);
+        if response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            target = Some(page_offset(offset, width + CARD_GAP, visible, max, forward));
+        }
+    }
+    if let Some(x) = target {
+        ui.data_mut(|d| d.insert_temp(paged, x));
+        ui.ctx().request_repaint();
+    }
     action
 }
 
@@ -883,7 +965,8 @@ impl YTDugem {
                         ui.spacing_mut().item_spacing.x = gap;
                         for (i, item) in chunk.iter().enumerate() {
                             ui.push_id(row * columns + i, |ui| {
-                                if let Some(a) = card(ui, item) {
+                                let width = if item.wide { WIDE_CARD } else { CARD };
+                                if let Some(a) = card(ui, item, width) {
                                     action = Some(a);
                                 }
                             });
@@ -979,6 +1062,32 @@ fn artist_about(ui: &mut egui::Ui, page: &ArtistPage) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cards_stretch_to_fill_the_row() {
+        for width in [300.0, 944.0, 1240.0, 2000.0] {
+            let (count, card) = fit_cards(width, MIN_CARD);
+            assert!(card >= MIN_CARD, "{width}: {card}");
+            let used = count as f32 * card + (count - 1) as f32 * CARD_GAP;
+            assert!((used - width).abs() < 0.01, "{width}: {used}");
+            // One more would not fit.
+            assert!((count + 1) as f32 * MIN_CARD + count as f32 * CARD_GAP > width);
+        }
+        // Narrower than one card: one card, as wide as there is.
+        assert_eq!(fit_cards(100.0, MIN_CARD), (1, 100.0));
+    }
+
+    #[test]
+    fn arrows_page_by_whole_cards_within_the_row() {
+        let pitch = 100.0;
+        assert_eq!(page_offset(0.0, pitch, 4, 1000.0, true), 400.0);
+        // A drag left the row between cards: the page lands on a card edge.
+        assert_eq!(page_offset(130.0, pitch, 4, 1000.0, true), 500.0);
+        assert_eq!(page_offset(400.0, pitch, 4, 1000.0, false), 0.0);
+        assert_eq!(page_offset(900.0, pitch, 4, 1000.0, true), 1000.0);
+        assert_eq!(page_offset(100.0, pitch, 4, 1000.0, false), 0.0);
+        assert_eq!(page_offset(0.0, pitch, 4, -5.0, true), 0.0);
+    }
 
     fn linked(segments: &[(String, Option<ArtistLink>)]) -> Vec<(&str, Option<&str>)> {
         segments

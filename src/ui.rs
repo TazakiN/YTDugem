@@ -98,6 +98,14 @@ fn owning_tab(page: &Page) -> Option<Page> {
     }
 }
 
+/// Recently played songs on Home, at most.
+const RECENTS: usize = 12;
+
+/// Columns of the Home Recents grid in a page `width` wide: one per 320 px, up to three.
+fn recent_columns(width: f32) -> usize {
+    ((width / 320.0) as usize).clamp(1, 3)
+}
+
 /// The Library page's links to its sub-pages.
 const LIBRARY_ENTRIES: [(Page, Icon, &str); 4] = [
     (Page::History, Icon::History, "History"),
@@ -4958,30 +4966,32 @@ impl YTDugem {
             recents
         };
         if !recent.is_empty() {
+            let recent: Vec<Track> = recent.into_iter().take(RECENTS).collect();
             ui.horizontal(|ui| {
                 ui.label(heading("Recents", 24.0));
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if artist::pill(ui, Icon::Play, "Play all", false, true).clicked() {
+                        self.start_tracks(recent.clone(), 0, "Recents");
+                    }
+                });
             });
             ui.add_space(12.0);
-            let column = (ui.available_width() / 3.0).clamp(310.0, 510.0);
-            egui::ScrollArea::horizontal()
-                .id_salt("recent-shelf")
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(ui, |ui| {
-                    ui.horizontal_top(|ui| {
-                        for base in (0..recent.len().min(32)).step_by(4) {
-                            ui.vertical(|ui| {
-                                ui.set_min_width(column);
-                                for i in base..(base + 4).min(recent.len()) {
-                                    ui.push_id(("recent", i), |ui| {
-                                        if self.song_row(ui, &recent[i], None, column) {
-                                            self.start_tracks(recent.clone(), i, "Recents");
-                                        }
-                                    });
-                                }
-                            });
-                        }
-                    });
+            let columns = recent_columns(ui.available_width());
+            let gap = 16.0;
+            let width = (ui.available_width() - gap * (columns - 1) as f32) / columns as f32;
+            for (row, chunk) in recent.chunks(columns).enumerate() {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for (j, t) in chunk.iter().enumerate() {
+                        let i = row * columns + j;
+                        ui.push_id(("recent", i), |ui| {
+                            if self.song_row(ui, t, None, width) {
+                                self.start_tracks(recent.clone(), i, "Recents");
+                            }
+                        });
+                    }
                 });
+            }
             ui.add_space(32.0);
         }
         self.shelf_rows(ui, &shelves, "home");
