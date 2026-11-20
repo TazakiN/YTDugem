@@ -329,6 +329,13 @@ impl YTDugem {
         }
     }
 
+    /// Suggestions already answered for `asked`, so a test needs no network.
+    #[cfg(test)]
+    pub(super) fn search_box_fixture(&mut self, asked: &str, remote: &[&str]) {
+        self.search_box.asked = asked.into();
+        self.search_box.remote = remote.iter().map(|s| s.to_string()).collect();
+    }
+
     pub(super) fn clear_recent_searches(&mut self) {
         self.library.recent_searches.clear();
         self.search_box.selected = None;

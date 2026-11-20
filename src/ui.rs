@@ -36,6 +36,8 @@ mod sheet_menu;
 mod sheet_output;
 mod sheet_queue;
 mod stats_page;
+#[cfg(test)]
+mod ui_tests;
 mod updater;
 
 const BG: Color32 = Color32::from_rgb(29, 31, 27);
@@ -440,9 +442,48 @@ impl YTDugem {
         let integrations = Integrations::for_window(hwnd.map(|h| h as *mut std::ffi::c_void));
         #[cfg(not(windows))]
         let integrations = Integrations::new();
+        let mut app = Self::with_parts(
+            library,
+            path,
+            read_only,
+            message,
+            account,
+            stats,
+            integrations,
+        );
+        #[cfg(windows)]
+        {
+            app.tray = crate::tray::Tray::new(&cc.egui_ctx);
+            app.hwnd = hwnd;
+        }
+        if app.account.is_some() {
+            // The saved session is shown at once and checked with YouTube in the background;
+            // one YouTube retired is read again from its browser or ends (Meiro `renewSession`).
+            let tx = app.tx.clone();
+            std::thread::spawn(move || {
+                let result = auth::renew().map_err(|e| (e.is::<auth::SessionGone>(), err(e)));
+                let _ = tx.send(Event::Renewed(result));
+            });
+        }
+        app.load_home();
+        if std::env::var_os("YTDUGEM_NO_UPDATE_CHECK").is_none() {
+            app.check_updates(false);
+        }
+        app
+    }
+    /// The app state around a loaded library, before any window, tray or network work starts.
+    fn with_parts(
+        library: Library,
+        path: PathBuf,
+        read_only: bool,
+        message: String,
+        account: Option<Account>,
+        stats: stats_page::Stats,
+        integrations: Integrations,
+    ) -> Self {
         let download_path = library.download_dir.to_string_lossy().into_owned();
         let (tx, rx) = mpsc::channel();
-        let mut app = Self {
+        Self {
             library,
             path,
             read_only,
@@ -534,9 +575,9 @@ impl YTDugem {
             palette_request: 0,
             palette_loading: false,
             #[cfg(windows)]
-            tray: crate::tray::Tray::new(&cc.egui_ctx),
+            tray: None,
             #[cfg(windows)]
-            hwnd,
+            hwnd: None,
             quitting: false,
             screenshot: None,
             screenshot_requested: false,
@@ -576,21 +617,7 @@ impl YTDugem {
             updates: Default::default(),
             stats,
             search_box: Default::default(),
-        };
-        if app.account.is_some() {
-            // The saved session is shown at once and checked with YouTube in the background;
-            // one YouTube retired is read again from its browser or ends (Meiro `renewSession`).
-            let tx = app.tx.clone();
-            std::thread::spawn(move || {
-                let result = auth::renew().map_err(|e| (e.is::<auth::SessionGone>(), err(e)));
-                let _ = tx.send(Event::Renewed(result));
-            });
         }
-        app.load_home();
-        if std::env::var_os("YTDUGEM_NO_UPDATE_CHECK").is_none() {
-            app.check_updates(false);
-        }
-        app
     }
     fn save(&mut self) {
         if !self.read_only {
@@ -6043,6 +6070,13 @@ impl eframe::App for YTDugem {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+    }
+}
+
+impl YTDugem {
+    /// One frame of the window; `eframe::App::ui` without the frame, so tests can drive it.
+    fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         let typing = ctx.egui_wants_keyboard_input();
         // While the palette is open it owns Escape (its modal closes on it), and so does the
