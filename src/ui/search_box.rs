@@ -1,4 +1,4 @@
-//! The sidebar search box's dropdown (a YTDugem addition): recent searches while it is empty,
+//! The top bar search box's dropdown (a YTDugem addition): recent searches while it is empty,
 //! then matching recent searches and YouTube Music's typeahead suggestions while typing.
 use super::*;
 

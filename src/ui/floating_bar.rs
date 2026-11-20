@@ -1,4 +1,4 @@
-//! The floating player bar (`PlayerBarStyle::Floating`): one pill over the bottom of the page
+//! The player bar: one floating pill over the bottom of the page
 //! with the transport, what is playing with a seekable progress line, and the lyrics, queue and
 //! volume buttons. A YTDugem addition modelled on the Apple Music web mini-player.
 use super::*;
@@ -73,7 +73,7 @@ fn fit(width: f32) -> Fit {
     })
 }
 
-/// The bar within `page` (the area right of the sidebar, below the top bar): centred, at most
+/// The bar within `page` (the window below the top bar): centred, at most
 /// `MAX_WIDTH` wide, `GAP` above the bottom edge.
 fn bar_rect(page: Rect) -> Rect {
     let width = (page.width() - 2.0 * SIDE_MARGIN).clamp(0.0, MAX_WIDTH);
@@ -389,11 +389,8 @@ mod tests {
             lyrics: true,
         };
         assert_eq!(fit(880.0), all);
-        // The narrowest page: a 900 px window with the sidebar open.
-        let narrowest = bar_rect(Rect::from_min_size(
-            Pos2::ZERO,
-            Vec2::new(900.0 - 258.0, 500.0),
-        ));
+        // The narrowest page: a 900 px window.
+        let narrowest = bar_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 500.0)));
         assert_eq!(fit(narrowest.width()), all);
         let no_extras = Fit {
             extras: false,
