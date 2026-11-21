@@ -206,6 +206,19 @@ fn parse_checksum(text: &str) -> Option<String> {
     (word.len() == 64 && word.bytes().all(|b| b.is_ascii_hexdigit())).then_some(word)
 }
 
+/// An update attempt that could not put every replaced item back: some are still in
+/// `.update/old`. Its text never says the app was left unchanged.
+#[derive(Debug)]
+pub struct NotRestored(pub String);
+
+impl std::fmt::Display for NotRestored {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotRestored {}
+
 fn check_package(root: &Path) -> Result<()> {
     for required in ["YTDugem.exe", "tools/mpv.exe", "tools/yt-dlp.exe"] {
         if !root.join(required).is_file() {
@@ -245,11 +258,13 @@ fn system_tool(name: &str) -> PathBuf {
 /// Moves each top-level item of the extracted package into `dir`, keeping what it replaces in
 /// `.update/old` until the next start. Windows lets a running exe be renamed, not overwritten;
 /// a folder with a file in use (a tool still running) cannot be moved at all. On any failure
-/// everything moved so far goes back, so the app folder is left as it was.
+/// everything moved so far goes back, so the app folder is left as it was; when a rename back
+/// fails, the error is [`NotRestored`]. What an earlier attempt left in `.update/old` is put back
+/// first, never deleted.
 pub fn apply(dir: &Path, staged: &Path) -> Result<()> {
-    check_package(staged)?;
     let old = dir.join(STAGING).join("old");
-    let _ = fs::remove_dir_all(&old);
+    restore(dir, &old)?;
+    check_package(staged)?;
     fs::create_dir_all(&old)?;
     let mut names: Vec<OsString> = fs::read_dir(staged)?
         .map(|entry| entry.map(|e| e.file_name()))
@@ -258,18 +273,56 @@ pub fn apply(dir: &Path, staged: &Path) -> Result<()> {
     swap(dir, staged, &old, names)
 }
 
+/// Puts back what an earlier attempt, whose rollback failed, left in `old`. Nothing in `old`
+/// is deleted here: while anything cannot go back, the update stops, so an original item is
+/// never destroyed before an update succeeds.
+fn restore(dir: &Path, old: &Path) -> Result<()> {
+    let entries = match fs::read_dir(old) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let name = entry?.file_name();
+        let current = dir.join(&name);
+        if current.symlink_metadata().is_ok() || fs::rename(old.join(&name), &current).is_err() {
+            return Err(NotRestored(format!(
+                "An earlier update attempt left {} in {}. Nothing more was changed; \
+                 if YTDugem is missing it, copy it back into {}",
+                name.to_string_lossy(),
+                old.display(),
+                dir.display()
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn swap(dir: &Path, staged: &Path, old: &Path, names: Vec<OsString>) -> Result<()> {
+    swap_with(dir, staged, old, names, &|from, to| fs::rename(from, to))
+}
+
+/// `swap` with its renames supplied, so tests can make chosen ones fail.
+fn swap_with(
+    dir: &Path,
+    staged: &Path,
+    old: &Path,
+    names: Vec<OsString>,
+    rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
     let mut moved: Vec<(OsString, bool)> = vec![];
     for name in names {
         let current = dir.join(&name);
         let had = current.symlink_metadata().is_ok();
-        let step = || -> std::io::Result<()> {
+        let mut restored = true;
+        let mut step = || -> std::io::Result<()> {
             if had {
-                fs::rename(&current, old.join(&name))?;
+                rename(&current, &old.join(&name))?;
             }
-            if let Err(e) = fs::rename(staged.join(&name), &current) {
-                if had {
-                    let _ = fs::rename(old.join(&name), &current);
+            if let Err(e) = rename(&staged.join(&name), &current) {
+                if had && rename(&old.join(&name), &current).is_err() {
+                    restored = false;
                 }
                 return Err(e);
             }
@@ -277,10 +330,21 @@ fn swap(dir: &Path, staged: &Path, old: &Path, names: Vec<OsString>) -> Result<(
         };
         if let Err(e) = step() {
             for (name, had) in moved.iter().rev() {
-                let _ = fs::rename(dir.join(name), staged.join(name));
-                if *had {
-                    let _ = fs::rename(old.join(name), dir.join(name));
+                if rename(&dir.join(name), &staged.join(name)).is_err() {
+                    restored = false;
                 }
+                if *had && rename(&old.join(name), &dir.join(name)).is_err() {
+                    restored = false;
+                }
+            }
+            if !restored {
+                return Err(NotRestored(format!(
+                    "Could not replace {} ({e}), and some replaced files could not be put back; \
+                     they are in {}",
+                    name.to_string_lossy(),
+                    old.display()
+                ))
+                .into());
             }
             return Err(e).with_context(|| {
                 format!(
@@ -499,7 +563,9 @@ mod tests {
         let names = ["YTDugem.exe", "tools", "missing"]
             .map(OsString::from)
             .to_vec();
-        assert!(swap(&app, &staged, &old, names).is_err());
+        let error = swap(&app, &staged, &old, names).unwrap_err();
+        assert!(error.downcast_ref::<NotRestored>().is_none());
+        assert!(format!("{error:#}").contains("left unchanged"));
         assert_eq!(fs::read_to_string(app.join("YTDugem.exe")).unwrap(), "old");
         assert_eq!(
             fs::read_to_string(app.join("tools/mpv.exe")).unwrap(),
@@ -514,6 +580,64 @@ mod tests {
             "new"
         );
         assert!(fs::read_dir(&old).unwrap().next().is_none());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_rollback_is_not_reported_as_unchanged_and_the_retry_restores() {
+        let root = std::env::temp_dir().join(format!("ytdugem-held-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let app = root.join("app");
+        let staged = root.join("staged");
+        let old = app.join(STAGING).join("old");
+        package(&app, "old");
+        package(&staged, "new");
+        fs::create_dir_all(&old).unwrap();
+        // A scanner holds the new exe, and then the original one as it is put back.
+        let rename = |from: &Path, to: &Path| {
+            if from == staged.join("YTDugem.exe") || from == old.join("YTDugem.exe") {
+                Err(std::io::Error::other("held"))
+            } else {
+                fs::rename(from, to)
+            }
+        };
+        let names = ["YTDugem.exe", "tools"].map(OsString::from).to_vec();
+        let error = swap_with(&app, &staged, &old, names, &rename).unwrap_err();
+        assert!(error.downcast_ref::<NotRestored>().is_some());
+        assert!(!app.join("YTDugem.exe").exists());
+        assert_eq!(fs::read_to_string(old.join("YTDugem.exe")).unwrap(), "old");
+        // The retry puts the original back before swapping, instead of deleting it.
+        apply(&app, &staged).unwrap();
+        assert_eq!(fs::read_to_string(app.join("YTDugem.exe")).unwrap(), "new");
+        assert_eq!(fs::read_to_string(old.join("YTDugem.exe")).unwrap(), "old");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn apply_refuses_and_deletes_nothing_when_a_leftover_cannot_go_back() {
+        let root = std::env::temp_dir().join(format!("ytdugem-leftover-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let app = root.join("app");
+        let staged = root.join("staged");
+        let old = app.join(STAGING).join("old");
+        package(&app, "current");
+        package(&staged, "new");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("YTDugem.exe"), "original").unwrap();
+        let error = apply(&app, &staged).unwrap_err();
+        assert!(error.downcast_ref::<NotRestored>().is_some());
+        assert_eq!(
+            fs::read_to_string(old.join("YTDugem.exe")).unwrap(),
+            "original"
+        );
+        assert_eq!(
+            fs::read_to_string(app.join("YTDugem.exe")).unwrap(),
+            "current"
+        );
+        assert_eq!(
+            fs::read_to_string(staged.join("YTDugem.exe")).unwrap(),
+            "new"
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 }
