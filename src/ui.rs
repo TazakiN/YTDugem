@@ -159,8 +159,9 @@ enum Event {
     /// The account's liked songs, fetched under (account epoch).
     LikedSongs(u64, Result<HashSet<String>, String>),
     PlaylistEdited(Result<PlaylistEdit, String>),
-    /// Every track of a playlist, fetched for a bulk action.
-    BulkTracks(PlaylistBulk, String, Result<Vec<Track>, String>),
+    /// Every track of a playlist, fetched for a bulk action:
+    /// (request, `play_request` when asked, action, origin, tracks).
+    BulkTracks(u64, u64, PlaylistBulk, String, Result<Vec<Track>, String>),
     Results(u64, Result<Vec<Track>, String>),
     Home(u64, Result<HomeFeed, String>),
     Supplement(u64, Result<Vec<HomeShelf>, String>),
@@ -352,6 +353,8 @@ pub struct YTDugem {
     playlist_error: String,
     /// A whole playlist is being fetched for Play, Shuffle, Add to queue or Download all.
     bulk_loading: bool,
+    /// Tags a playlist fetch for a bulk action; bumped to drop it.
+    bulk_request: u64,
     /// The lyrics translated for (track key, language), when asked for.
     translation: Option<(String, String, Translation)>,
     /// Romanized or translated sub-lines; stays on across songs, as upstream.
@@ -646,6 +649,7 @@ impl YTDugem {
             playlist_pending: false,
             playlist_error: String::new(),
             bulk_loading: false,
+            bulk_request: 0,
             translation: None,
             lyrics_mode: LyricsMode::Original,
             romanization: None,
@@ -1196,6 +1200,8 @@ impl YTDugem {
         self.lyrics_message.clear();
         self.active_lyric = None;
         self.radio_pending = false;
+        self.bulk_request += 1;
+        self.bulk_loading = false;
     }
     fn sync_account(&mut self) {
         self.invalidate_account_results();
@@ -1791,10 +1797,12 @@ impl YTDugem {
             return;
         }
         self.bulk_loading = true;
+        self.bulk_request += 1;
+        let (request, played) = (self.bulk_request, self.play_request);
         let (tx, origin) = (self.tx.clone(), origin.to_owned());
         std::thread::spawn(move || {
             let r = services::playlist_all(&id).map(|c| c.tracks).map_err(err);
-            let _ = tx.send(Event::BulkTracks(action, origin, r));
+            let _ = tx.send(Event::BulkTracks(request, played, action, origin, r));
         });
     }
     fn apply_bulk(&mut self, action: PlaylistBulk, mut tracks: Vec<Track>, origin: &str) {
@@ -4007,9 +4015,13 @@ impl YTDugem {
                     self.palette_selected = None;
                 }
                 Event::PlaylistEdited(r) => self.playlist_edited(r),
-                Event::BulkTracks(action, origin, r) => {
+                Event::BulkTracks(id, played, action, origin, r) if id == self.bulk_request => {
                     self.bulk_loading = false;
                     match r {
+                        // The user started something else while the playlist loaded.
+                        Ok(_)
+                            if matches!(action, PlaylistBulk::Play | PlaylistBulk::Shuffle)
+                                && played != self.play_request => {}
                         Ok(tracks) => self.apply_bulk(action, tracks, &origin),
                         Err(e) => self.message = e,
                     }
