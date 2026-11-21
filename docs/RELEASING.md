@@ -51,6 +51,15 @@ long-lived `stable` or `nightly` branches:
 If the workflow fails, fix the problem on `main`, delete the tag (`git push origin :v0.2.0`,
 `git tag -d v0.2.0`), and tag again. Do not reuse a version that has already been published.
 
+## Runtime tool updates
+
+The bundled mpv, FFmpeg, yt-dlp and Deno builds are pinned in `scripts/runtime-tools.json`.
+The **Runtime tools** workflow checks their latest upstream releases daily. When one is newer, it
+rewrites the pin with the SHA-256 of the downloaded file and opens or updates a single
+`runtime-tools/update` pull request, then runs the **Rust desktop** checks on it. Merging that PR
+ships nothing by itself: users get the new tools with the next release. To bump by hand, run
+`python scripts/update-runtime.py`.
+
 ## The installer
 
 `packaging/windows/ytdugem.iss` (Inno Setup 6 or later) is built by
