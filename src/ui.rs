@@ -164,8 +164,9 @@ enum Event {
     /// The account's liked songs, fetched under (account epoch).
     LikedSongs(u64, Result<HashSet<String>, String>),
     PlaylistEdited(Result<PlaylistEdit, String>),
-    /// Every track of a playlist, fetched for a bulk action.
-    BulkTracks(PlaylistBulk, String, Result<Vec<Track>, String>),
+    /// Every track of a playlist, fetched for a bulk action:
+    /// (request, `play_request` when asked, action, origin, tracks).
+    BulkTracks(u64, u64, PlaylistBulk, String, Result<Vec<Track>, String>),
     Results(u64, Result<Vec<Track>, String>),
     Home(u64, Result<HomeFeed, String>),
     Supplement(u64, Result<Vec<HomeShelf>, String>),
@@ -198,7 +199,8 @@ enum Event {
     Moods(u64, Result<Vec<services::MoodGenreSection>, String>),
     /// A mood/genre tile's cover: (request, category key, url).
     MoodArtwork(u64, String, String),
-    Artist(String, Result<services::artist::ArtistPage, String>),
+    /// (account epoch when asked, browse id, page).
+    Artist(u64, String, Result<services::artist::ArtistPage, String>),
     ArtistGrid(
         services::artist::BrowseTarget,
         Result<Vec<ShelfItem>, String>,
@@ -363,6 +365,8 @@ pub struct YTDugem {
     playlist_error: String,
     /// A whole playlist is being fetched for Play, Shuffle, Add to queue or Download all.
     bulk_loading: bool,
+    /// Tags a playlist fetch for a bulk action; bumped to drop it.
+    bulk_request: u64,
     /// The lyrics translated for (track key, language), when asked for.
     translation: Option<(String, String, Translation)>,
     /// Romanized or translated sub-lines; stays on across songs, as upstream.
@@ -653,6 +657,7 @@ impl YTDugem {
             playlist_pending: false,
             playlist_error: String::new(),
             bulk_loading: false,
+            bulk_request: 0,
             translation: None,
             lyrics_mode: LyricsMode::Original,
             romanization: None,
@@ -1255,6 +1260,18 @@ impl YTDugem {
         self.lyrics_message.clear();
         self.active_lyric = None;
         self.radio_pending = false;
+        self.bulk_request += 1;
+        self.bulk_loading = false;
+    }
+    /// A translation still running is for the previous language: drop it, then ask again.
+    fn set_translation_language(&mut self, language: String) {
+        self.library.translation_language = language;
+        self.save();
+        self.translation_request += 1;
+        self.translating = false;
+        if self.lyrics_mode == LyricsMode::Translated {
+            self.request_translation();
+        }
     }
     fn sync_account(&mut self) {
         self.invalidate_account_results();
@@ -1850,10 +1867,12 @@ impl YTDugem {
             return;
         }
         self.bulk_loading = true;
+        self.bulk_request += 1;
+        let (request, played) = (self.bulk_request, self.play_request);
         let (tx, origin) = (self.tx.clone(), origin.to_owned());
         std::thread::spawn(move || {
             let r = services::playlist_all(&id).map(|c| c.tracks).map_err(err);
-            let _ = tx.send(Event::BulkTracks(action, origin, r));
+            let _ = tx.send(Event::BulkTracks(request, played, action, origin, r));
         });
     }
     fn apply_bulk(&mut self, action: PlaylistBulk, mut tracks: Vec<Track>, origin: &str) {
@@ -2992,11 +3011,7 @@ impl YTDugem {
                                     }
                                 });
                             if chosen != current {
-                                self.library.translation_language = chosen;
-                                self.save();
-                                if self.lyrics_mode == LyricsMode::Translated {
-                                    self.request_translation();
-                                }
+                                self.set_translation_language(chosen);
                             }
                         },
                     );
@@ -4069,9 +4084,13 @@ impl YTDugem {
                     self.palette_selected = None;
                 }
                 Event::PlaylistEdited(r) => self.playlist_edited(r),
-                Event::BulkTracks(action, origin, r) => {
+                Event::BulkTracks(id, played, action, origin, r) if id == self.bulk_request => {
                     self.bulk_loading = false;
                     match r {
+                        // The user started something else while the playlist loaded.
+                        Ok(_)
+                            if matches!(action, PlaylistBulk::Play | PlaylistBulk::Shuffle)
+                                && played != self.play_request => {}
                         Ok(tracks) => self.apply_bulk(action, tracks, &origin),
                         Err(e) => self.message = e,
                     }
@@ -4183,7 +4202,7 @@ impl YTDugem {
                 Event::MoodArtwork(id, key, url) if id == self.explore.request => {
                     self.explore.artwork_loaded(&key, url);
                 }
-                Event::Artist(id, r) => self.artist_loaded(id, r),
+                Event::Artist(epoch, id, r) => self.artist_loaded(epoch, id, r),
                 Event::ArtistGrid(target, r) => self.grid_loaded(target, r),
                 Event::ArtistLookup(id, name, r) => self.artist_found(id, name, r),
                 Event::ArtistQueue(id, origin, r) => self.artist_queue_loaded(id, origin, r),
@@ -7268,5 +7287,93 @@ mod library_safety_tests {
         assert!(!read_only);
         assert!(message.is_empty(), "{message}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod stale_result_tests {
+    use super::*;
+
+    /// The app with an empty library, read-only so nothing is saved.
+    fn app() -> YTDugem {
+        let path = std::env::temp_dir()
+            .join("ytdugem-stale-tests-no-data")
+            .join("library.json");
+        let stats = stats_page::Stats::load(&path);
+        YTDugem::with_parts(
+            Library::default(),
+            path,
+            true,
+            String::new(),
+            None,
+            stats,
+            Integrations::new(),
+        )
+    }
+
+    fn deliver(app: &mut YTDugem, event: Event) {
+        app.tx.send(event).unwrap();
+        app.events(&egui::Context::default());
+    }
+
+    fn bulk(id: u64, played: u64, action: PlaylistBulk) -> Event {
+        Event::BulkTracks(id, played, action, "x".into(), Ok(vec![Track::default()]))
+    }
+
+    #[test]
+    fn a_bulk_result_from_an_old_request_is_ignored() {
+        let mut app = app();
+        app.bulk_request = 2;
+        let played = app.play_request;
+        deliver(&mut app, bulk(1, played, PlaylistBulk::Queue));
+        assert!(app.library.queue.is_empty());
+        deliver(&mut app, bulk(2, played, PlaylistBulk::Queue));
+        assert_eq!(app.library.queue.len(), 1);
+    }
+
+    #[test]
+    fn a_bulk_play_after_other_playback_is_ignored() {
+        let mut app = app();
+        app.bulk_request = 1;
+        app.bulk_loading = true;
+        let played = app.play_request;
+        app.play_request += 1;
+        deliver(&mut app, bulk(1, played, PlaylistBulk::Play));
+        assert!(app.current.is_none());
+        assert!(app.library.queue.is_empty());
+        assert!(!app.bulk_loading);
+    }
+
+    #[test]
+    fn an_account_switch_drops_bulk_and_artist_results() {
+        let mut app = app();
+        let (request, epoch) = (app.bulk_request, app.account_epoch);
+        app.invalidate_account_results();
+        let played = app.play_request;
+        deliver(&mut app, bulk(request, played, PlaylistBulk::Queue));
+        assert!(app.library.queue.is_empty());
+        deliver(
+            &mut app,
+            Event::Artist(epoch, "UCold".into(), Err("x".into())),
+        );
+        assert!(!app.artists.pages.contains_key("UCold"));
+        let epoch = app.account_epoch;
+        deliver(
+            &mut app,
+            Event::Artist(epoch, "UCnew".into(), Err("x".into())),
+        );
+        assert!(app.artists.pages.contains_key("UCnew"));
+    }
+
+    #[test]
+    fn changing_the_language_drops_a_running_translation() {
+        let mut app = app();
+        app.translation_request = 5;
+        app.translating = true;
+        app.set_translation_language("de".into());
+        assert_eq!(app.translation_request, 6);
+        assert!(!app.translating);
+        deliver(&mut app, Event::Translated(5, Err("late".into())));
+        assert!(app.message.is_empty());
     }
 }
