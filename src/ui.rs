@@ -7088,3 +7088,91 @@ mod font_baseline_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod stale_result_tests {
+    use super::*;
+
+    /// The app with an empty library, read-only so nothing is saved.
+    fn app() -> YTDugem {
+        let path = std::env::temp_dir()
+            .join("ytdugem-stale-tests-no-data")
+            .join("library.json");
+        let stats = stats_page::Stats::load(&path);
+        YTDugem::with_parts(
+            Library::default(),
+            path,
+            true,
+            String::new(),
+            None,
+            stats,
+            Integrations::new(),
+        )
+    }
+
+    fn deliver(app: &mut YTDugem, event: Event) {
+        app.tx.send(event).unwrap();
+        app.events(&egui::Context::default());
+    }
+
+    fn bulk(id: u64, played: u64, action: PlaylistBulk) -> Event {
+        Event::BulkTracks(id, played, action, "x".into(), Ok(vec![Track::default()]))
+    }
+
+    #[test]
+    fn a_bulk_result_from_an_old_request_is_ignored() {
+        let mut app = app();
+        app.bulk_request = 2;
+        let played = app.play_request;
+        deliver(&mut app, bulk(1, played, PlaylistBulk::Queue));
+        assert!(app.library.queue.is_empty());
+        deliver(&mut app, bulk(2, played, PlaylistBulk::Queue));
+        assert_eq!(app.library.queue.len(), 1);
+    }
+
+    #[test]
+    fn a_bulk_play_after_other_playback_is_ignored() {
+        let mut app = app();
+        app.bulk_request = 1;
+        app.bulk_loading = true;
+        let played = app.play_request;
+        app.play_request += 1;
+        deliver(&mut app, bulk(1, played, PlaylistBulk::Play));
+        assert!(app.current.is_none());
+        assert!(app.library.queue.is_empty());
+        assert!(!app.bulk_loading);
+    }
+
+    #[test]
+    fn an_account_switch_drops_bulk_and_artist_results() {
+        let mut app = app();
+        let (request, epoch) = (app.bulk_request, app.account_epoch);
+        app.invalidate_account_results();
+        let played = app.play_request;
+        deliver(&mut app, bulk(request, played, PlaylistBulk::Queue));
+        assert!(app.library.queue.is_empty());
+        deliver(
+            &mut app,
+            Event::Artist(epoch, "UCold".into(), Err("x".into())),
+        );
+        assert!(!app.artists.pages.contains_key("UCold"));
+        let epoch = app.account_epoch;
+        deliver(
+            &mut app,
+            Event::Artist(epoch, "UCnew".into(), Err("x".into())),
+        );
+        assert!(app.artists.pages.contains_key("UCnew"));
+    }
+
+    #[test]
+    fn changing_the_language_drops_a_running_translation() {
+        let mut app = app();
+        app.translation_request = 5;
+        app.translating = true;
+        app.set_translation_language("de".into());
+        assert_eq!(app.translation_request, 6);
+        assert!(!app.translating);
+        deliver(&mut app, Event::Translated(5, Err("late".into())));
+        assert!(app.message.is_empty());
+    }
+}

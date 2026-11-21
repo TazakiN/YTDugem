@@ -23,7 +23,7 @@ pub(super) struct ArtistLink {
 
 #[derive(Default)]
 pub(super) struct Artists {
-    pages: HashMap<String, Loadable<ArtistPage>>,
+    pub(super) pages: HashMap<String, Loadable<ArtistPage>>,
     grids: HashMap<BrowseTarget, (String, Loadable<Vec<ShelfItem>>)>,
     /// Bumped per name lookup, so only the last click opens a page.
     lookup_request: u64,
