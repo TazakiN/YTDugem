@@ -412,6 +412,24 @@ pub fn data_path() -> PathBuf {
         .join("library.json")
 }
 
+/// Writes serialized library bytes the way `Library::save` always has: a synced temp file, the
+/// previous file kept as `.bak`, then an atomic rename. Safe to call from a worker thread.
+pub fn save_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension("json.tmp");
+    let mut file = std::fs::File::create(&temp)?;
+    use std::io::Write;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    // Keep a last-known-good copy; rename replaces files atomically on Windows too.
+    if path.exists() {
+        std::fs::copy(path, path.with_extension("json.bak"))?;
+    }
+    std::fs::rename(temp, path).context("Cannot commit library")
+}
+
 pub fn lock(path: &Path) -> Result<std::fs::File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -465,20 +483,10 @@ impl Library {
         Ok(value)
     }
 
+    /// The app writes through `save_bytes` off the GUI thread; tests save directly.
+    #[cfg(test)]
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temp = path.with_extension("json.tmp");
-        let mut file = std::fs::File::create(&temp)?;
-        use std::io::Write;
-        file.write_all(&serde_json::to_vec_pretty(self)?)?;
-        file.sync_all()?;
-        // Keep a last-known-good copy; rename replaces files atomically on Windows too.
-        if path.exists() {
-            std::fs::copy(path, path.with_extension("json.bak"))?;
-        }
-        std::fs::rename(temp, path).context("Cannot commit library")
+        save_bytes(path, &serde_json::to_vec_pretty(self)?)
     }
 
     pub fn remember(&mut self, track: &Track) {
@@ -655,6 +663,31 @@ mod tests {
         assert!(Library::load(&path).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken");
         drop(guard);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn backup_holds_the_previous_save() {
+        let dir =
+            std::env::temp_dir().join(format!("ytdugem-store-backup-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.json");
+        let first = Library {
+            volume: 10.0,
+            ..Default::default()
+        };
+        first.save(&path).unwrap();
+        let a = std::fs::read(&path).unwrap();
+        let second = Library {
+            volume: 20.0,
+            ..Default::default()
+        };
+        second.save(&path).unwrap();
+        let b = std::fs::read(&path).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(std::fs::read(path.with_extension("json.bak")).unwrap(), a);
+        assert_eq!(Library::load(&path).unwrap().volume, 20.0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

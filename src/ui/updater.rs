@@ -148,12 +148,33 @@ impl YTDugem {
         std::thread::spawn(move || {
             // A stream lookup may still be running a bundled tool; give it a few seconds.
             let mut result = update::apply(&dir, &staged);
+            let mut not_restored = None;
             for _ in 0..5 {
+                if let Some(e) = result
+                    .as_ref()
+                    .err()
+                    .and_then(|e| e.downcast_ref::<update::NotRestored>())
+                {
+                    not_restored = Some(e.0.clone());
+                }
                 if result.is_ok() {
                     break;
                 }
                 std::thread::sleep(Duration::from_secs(1));
                 result = update::apply(&dir, &staged);
+            }
+            if let Some(e) = result
+                .as_ref()
+                .err()
+                .and_then(|e| e.downcast_ref::<update::NotRestored>())
+            {
+                not_restored = Some(e.0.clone());
+            }
+            // A later attempt's "left unchanged" would hide items still in `.update/old`.
+            if let (Err(_), Some(text)) = (&result, not_restored) {
+                result = Err(anyhow::anyhow!(
+                    "The update failed, and the app folder may not be as it was. {text}"
+                ));
             }
             if result.is_ok() {
                 update::record_installed_version(&dir, &version);
