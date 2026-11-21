@@ -82,7 +82,7 @@ impl YTDugem {
                 i.stable_dt.min(0.1),
             )
         });
-        // Over the page only: not the sidebar, a menu or a dialog above it.
+        // Over the page only: not the top bar, a menu or a dialog above it.
         let delta = if ui.rect_contains_pointer(area) {
             delta
         } else {

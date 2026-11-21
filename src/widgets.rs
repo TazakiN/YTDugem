@@ -26,7 +26,6 @@ pub enum Icon {
     Back,
     Collapse,
     Raise,
-    Sidebar,
     Translate,
     Refresh,
     Close,
@@ -52,6 +51,7 @@ pub enum Icon {
     Globe,
     Speaker,
     Waveform,
+    CaretLeft,
     CaretRight,
     VolumeLow,
     DragHandle,
@@ -83,6 +83,15 @@ pub fn white_alpha(alpha: u8) -> Color32 {
     Color32::from_rgba_premultiplied(channel, channel, channel, alpha)
 }
 
+/// Paints the app's own icon (the window and tray icon) into `rect`.
+pub fn app_icon(ui: &egui::Ui, rect: Rect) {
+    egui::Image::from_bytes(
+        "bytes://ytdugem-icon.png",
+        include_bytes!("../assets/icon.png").as_slice(),
+    )
+    .paint_at(ui, rect);
+}
+
 pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, selected: bool, label: &str) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
@@ -95,11 +104,7 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, selected: bool, label: &
         );
     }
     if matches!(icon, Icon::Logo) {
-        egui::Image::from_bytes(
-            "bytes://ytdugem-icon.png",
-            include_bytes!("../assets/icon.png").as_slice(),
-        )
-        .paint_at(ui, rect.shrink(3.0));
+        app_icon(ui, rect.shrink(3.0));
         return response.on_hover_text(label);
     }
     paint(
@@ -247,7 +252,6 @@ fn glyph(icon: Icon) -> (&'static str, bool) {
         Icon::Back => (regular::CARET_LEFT, false),
         Icon::Collapse => (regular::CARET_DOWN, false),
         Icon::Raise => (regular::CARET_UP, false),
-        Icon::Sidebar => (regular::SIDEBAR, false),
         Icon::Translate => (regular::TRANSLATE, false),
         Icon::Refresh => (regular::ARROWS_CLOCKWISE, false),
         Icon::Close => (regular::X, false),
@@ -273,6 +277,7 @@ fn glyph(icon: Icon) -> (&'static str, bool) {
         Icon::Globe => (regular::GLOBE, false),
         Icon::Speaker => (regular::SPEAKER_HIFI, false),
         Icon::Waveform => (regular::WAVEFORM, false),
+        Icon::CaretLeft => (regular::CARET_LEFT, false),
         Icon::CaretRight => (regular::CARET_RIGHT, false),
         Icon::VolumeLow => (regular::SPEAKER_LOW, false),
         Icon::DragHandle => (regular::EQUALS, false),

@@ -87,9 +87,6 @@ pub struct Library {
     /// One of `services::DOWNLOAD_FORMATS`; unknown values fall back to `best`.
     #[serde(default = "download_format_default")]
     pub download_format: String,
-    /// Where the playback controls live: the original top bar, or a floating bar at the bottom.
-    #[serde(default, deserialize_with = "deserialize_lenient")]
-    pub player_bar: PlayerBarStyle,
     /// How surfaces and controls are drawn: the original flat look, or translucent glass.
     #[serde(default, deserialize_with = "deserialize_lenient")]
     pub theme: Theme,
@@ -127,14 +124,6 @@ pub fn remember_search(list: &mut Vec<String>, query: &str) {
 pub fn forget_search(list: &mut Vec<String>, query: &str) {
     let query = query.trim().to_lowercase();
     list.retain(|q| q.to_lowercase() != query);
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlayerBarStyle {
-    #[default]
-    TopBar,
-    Floating,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -400,7 +389,6 @@ impl Default for Library {
             close_to_tray: false,
             translation_language: String::new(),
             download_format: download_format_default(),
-            player_bar: PlayerBarStyle::default(),
             theme: Theme::default(),
             skip_non_music: false,
             record_stats: true,
@@ -570,21 +558,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn player_bar_defaults_roundtrips_and_tolerates_unknown_values() {
-        assert_eq!(Library::default().player_bar, PlayerBarStyle::TopBar);
-        let old: Library = serde_json::from_str(r#"{"volume":70.0}"#).unwrap();
-        assert_eq!(old.player_bar, PlayerBarStyle::TopBar);
-        let mut library = Library::default();
-        library.player_bar = PlayerBarStyle::Floating;
-        let json = serde_json::to_string(&library).unwrap();
-        assert!(json.contains(r#""player_bar":"floating""#));
-        let read: Library = serde_json::from_str(&json).unwrap();
-        assert_eq!(read.player_bar, PlayerBarStyle::Floating);
-        for bad in [r#""sideways""#, "42", "null", r#"{"x":1}"#] {
+    fn libraries_saved_with_the_old_player_bar_setting_still_load() {
+        for value in [r#""top_bar""#, r#""floating""#, "42"] {
             let lib: Library =
-                serde_json::from_str(&format!(r#"{{"volume":55.0,"player_bar":{bad}}}"#)).unwrap();
-            assert_eq!(lib.player_bar, PlayerBarStyle::TopBar);
+                serde_json::from_str(&format!(r#"{{"volume":55.0,"player_bar":{value}}}"#))
+                    .unwrap();
             assert_eq!(lib.volume, 55.0);
+            assert!(!serde_json::to_string(&lib).unwrap().contains("player_bar"));
         }
     }
 

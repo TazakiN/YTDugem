@@ -30,12 +30,15 @@ mod library_view;
 mod playlist_files;
 mod pull_refresh;
 mod search_box;
+mod search_page;
 mod sheet;
 mod sheet_lyrics;
 mod sheet_menu;
 mod sheet_output;
 mod sheet_queue;
 mod stats_page;
+#[cfg(test)]
+mod ui_tests;
 mod updater;
 
 const BG: Color32 = Color32::from_rgb(29, 31, 27);
@@ -50,6 +53,11 @@ const ACCENT: Color32 = Color32::from_rgb(178, 208, 158);
 const ERROR: Color32 = Color32::from_rgb(232, 120, 110);
 /// Width of a toast notification; its height follows the text.
 const TOAST_WIDTH: f32 = 340.0;
+const TOP_BAR_HEIGHT: f32 = 64.0;
+/// The top bar's search field at its widest.
+const SEARCH_WIDTH: f32 = 560.0;
+/// Pages are centred and at most this wide.
+const CONTENT_WIDTH: f32 = 1240.0;
 
 #[derive(Clone, Debug, PartialEq, Hash)]
 enum Page {
@@ -69,6 +77,44 @@ enum Page {
     /// Listening stats and the yearly Wrapped card.
     Stats,
 }
+/// The top bar's tabs, in order.
+const TABS: [(Page, &str); 3] = [
+    (Page::Home, "Home"),
+    (Page::Explore, "Explore"),
+    (Page::Library, "Library"),
+];
+
+/// The tab a page is reached from, lit while it shows; `None` for pages outside the tabs.
+fn owning_tab(page: &Page) -> Option<Page> {
+    match page {
+        Page::Home | Page::Explore | Page::Library => Some(page.clone()),
+        Page::History | Page::Downloads | Page::Local | Page::Playlist(_) | Page::Stats => {
+            Some(Page::Library)
+        }
+        Page::Search
+        | Page::Collection
+        | Page::Artist(_)
+        | Page::ArtistGrid(_)
+        | Page::Settings => None,
+    }
+}
+
+/// Recently played songs on Home, at most.
+const RECENTS: usize = 12;
+
+/// Columns of the Home Recents grid in a page `width` wide: one per 320 px, up to three.
+fn recent_columns(width: f32) -> usize {
+    ((width / 320.0) as usize).clamp(1, 3)
+}
+
+/// The Library page's links to its sub-pages.
+const LIBRARY_ENTRIES: [(Page, Icon, &str); 4] = [
+    (Page::History, Icon::History, "History"),
+    (Page::Downloads, Icon::Download, "Downloads"),
+    (Page::Local, Icon::Music, "Local music"),
+    (Page::Stats, Icon::Trending, "Listening stats"),
+];
+
 #[derive(Clone, Copy, PartialEq)]
 enum PlayerPane {
     Main,
@@ -91,8 +137,10 @@ enum Event {
     Prepared(String, Option<Stream>),
     AccountPlaylists(u64, Result<Vec<ShelfItem>, String>),
     Suggestions(u64, String, Result<Vec<String>, String>),
-    /// Typeahead suggestions for the sidebar search box: (request, query, suggestions).
+    /// Typeahead suggestions for the top bar search box: (request, query, suggestions).
     SearchSuggestions(u64, String, Result<Vec<String>, String>),
+    /// The top result and first songs for the search box's dropdown, under its request.
+    SearchPreview(u64, search_box::SearchPreview),
     /// Writing `stats.json` failed in the background.
     StatsSaveFailed(String),
     Translated(u64, Result<Translation, String>),
@@ -253,8 +301,6 @@ pub struct YTDugem {
     now_origin: String,
     radio_pending: bool,
     discord: Presence,
-    /// The left sidebar (navigation); toggled from the top bar.
-    sidebar_open: bool,
     palette_open: bool,
     palette_query: String,
     palette_suggestions: Vec<String>,
@@ -440,9 +486,48 @@ impl YTDugem {
         let integrations = Integrations::for_window(hwnd.map(|h| h as *mut std::ffi::c_void));
         #[cfg(not(windows))]
         let integrations = Integrations::new();
+        let mut app = Self::with_parts(
+            library,
+            path,
+            read_only,
+            message,
+            account,
+            stats,
+            integrations,
+        );
+        #[cfg(windows)]
+        {
+            app.tray = crate::tray::Tray::new(&cc.egui_ctx);
+            app.hwnd = hwnd;
+        }
+        if app.account.is_some() {
+            // The saved session is shown at once and checked with YouTube in the background;
+            // one YouTube retired is read again from its browser or ends (Meiro `renewSession`).
+            let tx = app.tx.clone();
+            std::thread::spawn(move || {
+                let result = auth::renew().map_err(|e| (e.is::<auth::SessionGone>(), err(e)));
+                let _ = tx.send(Event::Renewed(result));
+            });
+        }
+        app.load_home();
+        if std::env::var_os("YTDUGEM_NO_UPDATE_CHECK").is_none() {
+            app.check_updates(false);
+        }
+        app
+    }
+    /// The app state around a loaded library, before any window, tray or network work starts.
+    fn with_parts(
+        library: Library,
+        path: PathBuf,
+        read_only: bool,
+        message: String,
+        account: Option<Account>,
+        stats: stats_page::Stats,
+        integrations: Integrations,
+    ) -> Self {
         let download_path = library.download_dir.to_string_lossy().into_owned();
         let (tx, rx) = mpsc::channel();
-        let mut app = Self {
+        Self {
             library,
             path,
             read_only,
@@ -476,10 +561,10 @@ impl YTDugem {
             tx,
             rx,
             message,
-            // Top right, below the top bar (78 px) so the account button stays clear.
+            // Top right, below the top bar so the account button stays clear.
             toasts: egui_notify::Toasts::new()
                 .with_anchor(egui_notify::Anchor::TopRight)
-                .with_margin(Vec2::new(16.0, 92.0)),
+                .with_margin(Vec2::new(16.0, TOP_BAR_HEIGHT + 14.0)),
             importing: false,
             downloads: vec![],
             expanded: false,
@@ -523,7 +608,6 @@ impl YTDugem {
             now_origin: "Home".into(),
             radio_pending: false,
             discord: Presence::new(),
-            sidebar_open: true,
             palette_open: false,
             palette_query: String::new(),
             palette_suggestions: vec![],
@@ -534,9 +618,9 @@ impl YTDugem {
             palette_request: 0,
             palette_loading: false,
             #[cfg(windows)]
-            tray: crate::tray::Tray::new(&cc.egui_ctx),
+            tray: None,
             #[cfg(windows)]
-            hwnd,
+            hwnd: None,
             quitting: false,
             screenshot: None,
             screenshot_requested: false,
@@ -576,21 +660,7 @@ impl YTDugem {
             updates: Default::default(),
             stats,
             search_box: Default::default(),
-        };
-        if app.account.is_some() {
-            // The saved session is shown at once and checked with YouTube in the background;
-            // one YouTube retired is read again from its browser or ends (Meiro `renewSession`).
-            let tx = app.tx.clone();
-            std::thread::spawn(move || {
-                let result = auth::renew().map_err(|e| (e.is::<auth::SessionGone>(), err(e)));
-                let _ = tx.send(Event::Renewed(result));
-            });
         }
-        app.load_home();
-        if std::env::var_os("YTDUGEM_NO_UPDATE_CHECK").is_none() {
-            app.check_updates(false);
-        }
-        app
     }
     fn save(&mut self) {
         if !self.read_only {
@@ -2484,7 +2554,7 @@ impl YTDugem {
         let mut shown = false;
 
         // Appearance
-        let rows = ["Theme", "Playback controls"];
+        let rows = ["Theme"];
         if let Some(q) = group_query(&query, "Appearance", &rows) {
             shown = true;
             settings_group(ui, "Appearance", |ui| {
@@ -2511,34 +2581,6 @@ impl YTDugem {
                             if chosen != self.library.theme {
                                 self.library.theme = chosen;
                                 apply_theme(ui.ctx(), chosen);
-                                self.save();
-                            }
-                        },
-                    );
-                }
-                if hit(&q, rows[1]) {
-                    setting_row(
-                        ui,
-                        rows[1],
-                        "Show the controls in the top bar or in a floating bar at the bottom of the window",
-                        |ui| {
-                            use store::PlayerBarStyle;
-                            let label = |style| match style {
-                                PlayerBarStyle::TopBar => "Top bar",
-                                PlayerBarStyle::Floating => "Floating bar",
-                            };
-                            let mut chosen = self.library.player_bar;
-                            egui::ComboBox::from_id_salt("player-bar-style")
-                                .width(280.0)
-                                .selected_text(label(chosen))
-                                .show_ui(ui, |ui| {
-                                    for style in [PlayerBarStyle::TopBar, PlayerBarStyle::Floating]
-                                    {
-                                        ui.selectable_value(&mut chosen, style, label(style));
-                                    }
-                                });
-                            if chosen != self.library.player_bar {
-                                self.library.player_bar = chosen;
                                 self.save();
                             }
                         },
@@ -3947,6 +3989,7 @@ impl YTDugem {
                 Event::SearchSuggestions(id, query, r) => {
                     self.search_suggestions_arrived(id, query, r)
                 }
+                Event::SearchPreview(id, preview) => self.search_box.accept_preview(id, preview),
                 Event::StatsSaveFailed(e) => {
                     self.toast_error(format!("Could not save listening stats: {e}"))
                 }
@@ -4414,275 +4457,8 @@ impl YTDugem {
         );
     }
 
-    fn sidebar(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        ui.painter().rect_filled(rect, 0.0, surface(ui, SIDE, 120));
-        ui.painter()
-            .line_segment([rect.right_top(), rect.right_bottom()], divider(ui, 43));
-        // The strip above the search box moves the window, like the top bar (the macOS-style
-        // traffic lights that used to sit here duplicated the real window controls).
-        let drag = ui.interact(
-            Rect::from_min_size(rect.min, Vec2::new(rect.width(), 40.0)),
-            ui.make_persistent_id("sidebar-drag"),
-            egui::Sense::click_and_drag(),
-        );
-        if drag.drag_started() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
-        if drag.double_clicked() {
-            let max = ui.ctx().input(|s| s.viewport().maximized.unwrap_or(false));
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
-        }
-        let chosen = self.search_box_keys(ui.ctx());
-        let (field, focused) = region(
-            ui,
-            Rect::from_min_size(
-                rect.min + Vec2::new(14.0, 44.0),
-                Vec2::new(rect.width() - 28.0, 42.0),
-            ),
-            |ui| {
-                let mut focused = false;
-                let (fill, rim, radius) = if glass(ui) {
-                    (
-                        Color32::from_black_alpha(60),
-                        widgets::white_alpha(20),
-                        21.0,
-                    )
-                } else {
-                    (Color32::from_rgb(36, 37, 34), Color32::from_gray(63), 7.0)
-                };
-                let frame = egui::Frame::new()
-                    .fill(fill)
-                    .stroke(Stroke::new(1.0_f32, rim))
-                    .corner_radius(radius)
-                    // The left padding puts the icon in the same column as the nav icons (11px
-                    // in from the sidebar's inset), and the text starts where the nav labels do.
-                    .inner_margin(egui::Margin {
-                        left: 11,
-                        right: 8,
-                        top: 8,
-                        bottom: 8,
-                    })
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 14.0;
-                            let (r, _) =
-                                ui.allocate_exact_size(Vec2::splat(18.0), egui::Sense::hover());
-                            // Phosphor glyphs sit a little high in their box; the text reads lower.
-                            widgets::paint(
-                                ui.painter(),
-                                Icon::Search,
-                                r.translate(Vec2::new(0.0, 2.5)),
-                                MUTED,
-                            );
-                            let response = ui.add(
-                                egui::TextEdit::singleline(&mut self.query)
-                                    .id(search_box::input_id())
-                                    .desired_width(rect.width() - 78.0)
-                                    .hint_text("Search")
-                                    .font(FontId::proportional(15.0))
-                                    .margin(egui::Margin {
-                                        left: 0,
-                                        right: 4,
-                                        top: 2,
-                                        bottom: 2,
-                                    })
-                                    .frame(bare_text_frame()),
-                            );
-                            if response.changed() {
-                                self.search_box_edited();
-                            }
-                            focused = response.has_focus();
-                            if response.lost_focus()
-                                && ui.input(|s| s.key_pressed(egui::Key::Enter))
-                            {
-                                // The entry picked with Up/Down, else what was typed.
-                                if let Some(text) = chosen.clone() {
-                                    self.query = text;
-                                }
-                                self.search_box_done(ui.ctx());
-                                self.search();
-                            }
-                        });
-                    });
-                (frame.response.rect, focused)
-            },
-        );
-        self.search_dropdown(ui.ctx(), field, focused);
-        let rows = [
-            (Page::Home, Icon::Home, "Home"),
-            (Page::Explore, Icon::Compass, "Explore"),
-            (Page::Library, Icon::Library, "Library"),
-            (Page::Search, Icon::Search, "Search"),
-            (Page::History, Icon::History, "History"),
-            (Page::Downloads, Icon::Download, "Downloads"),
-            (Page::Local, Icon::Music, "Local Music"),
-        ];
-        // A divider row: 12px above and below the line.
-        let rule = |ui: &mut egui::Ui| {
-            let (r, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), egui::Sense::hover());
-            ui.painter().line_segment(
-                [r.left_center(), r.right_center()],
-                Stroke::new(1.0_f32, Color32::from_gray(42)),
-            );
-        };
-        // Everything between the fixed search box and the fixed Settings row scrolls together,
-        // so a short window can still reach every nav entry and playlist.
-        let top = rect.top() + 96.0;
-        let bottom = rect.bottom() - 67.0;
-        if self.account.is_some()
-            && self.account_playlists.is_none()
-            && !self.account_playlists_loading
-        {
-            self.load_account_playlists();
-        }
-        if bottom > top + 25.0 {
-            region(
-                ui,
-                Rect::from_min_max(
-                    Pos2::new(rect.left() + 14.0, top),
-                    Pos2::new(rect.right() - 14.0, bottom),
-                ),
-                |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("sidebar-scroll")
-                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                        .show(ui, |ui| {
-                            let spacing = ui.spacing().item_spacing.y;
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.add_space(12.0);
-                            for (i, (page, icon, label)) in rows.into_iter().enumerate() {
-                                if i == 4 {
-                                    rule(ui);
-                                }
-                                // 38px rows on a 40px pitch, as before.
-                                let (slot, _) = ui.allocate_exact_size(
-                                    Vec2::new(ui.available_width(), 40.0),
-                                    egui::Sense::hover(),
-                                );
-                                let r =
-                                    Rect::from_min_size(slot.min, Vec2::new(slot.width(), 38.0));
-                                if nav_row(ui, r, ("nav", i), icon, label, self.page == page)
-                                    .clicked()
-                                {
-                                    // Upstream `selectDestination` closes an open mood: Explore
-                                    // opens on its landing page.
-                                    if page == Page::Explore {
-                                        self.explore.view = explore::View::Main;
-                                    }
-                                    self.navigate(page);
-                                    if self.page == Page::Search {
-                                        ui.ctx().memory_mut(|m| {
-                                            m.request_focus(search_box::input_id())
-                                        });
-                                    }
-                                }
-                            }
-                            rule(ui);
-                            ui.add_space(5.0);
-                            ui.spacing_mut().item_spacing.y = spacing;
-                            let accounts = self.account_playlists.clone().unwrap_or_default();
-                            let open_id = self
-                                .collection
-                                .as_ref()
-                                .filter(|_| self.page == Page::Collection)
-                                .and_then(|c| c.playlist_id.clone());
-                            for (i, p) in accounts.iter().enumerate() {
-                                let r = Rect::from_min_size(
-                                    ui.cursor().min,
-                                    Vec2::new(ui.available_width(), 35.0),
-                                );
-                                ui.allocate_space(r.size());
-                                let active = p
-                                    .browse_id
-                                    .as_deref()
-                                    .is_some_and(|b| open_id.as_deref() == b.strip_prefix("VL"));
-                                if nav_thumb_row(
-                                    ui,
-                                    r,
-                                    ("account-playlist-nav", i),
-                                    &p.thumbnail,
-                                    &p.title,
-                                    active,
-                                )
-                                .clicked()
-                                {
-                                    self.open_item(p.clone());
-                                }
-                            }
-                            // Local playlists have no artwork of their own; the first track's
-                            // cover stands in for it.
-                            let locals: Vec<(String, String)> = self
-                                .library
-                                .playlists
-                                .iter()
-                                .map(|p| {
-                                    let thumb = p
-                                        .tracks
-                                        .iter()
-                                        .map(|t| t.thumbnail.as_str())
-                                        .find(|t| t.starts_with("https://"))
-                                        .unwrap_or_default();
-                                    (p.name.clone(), thumb.to_owned())
-                                })
-                                .collect();
-                            for (i, (name, thumb)) in locals.iter().enumerate() {
-                                let r = Rect::from_min_size(
-                                    ui.cursor().min,
-                                    Vec2::new(ui.available_width(), 35.0),
-                                );
-                                ui.allocate_space(r.size());
-                                if nav_thumb_row(
-                                    ui,
-                                    r,
-                                    ("playlist", i),
-                                    thumb,
-                                    name,
-                                    self.page == Page::Playlist(i),
-                                )
-                                .clicked()
-                                {
-                                    self.navigate(Page::Playlist(i));
-                                }
-                            }
-                            if accounts.is_empty() && locals.is_empty() {
-                                ui.label(
-                                    RichText::new("Your playlists will appear here")
-                                        .size(12.5)
-                                        .color(MUTED),
-                                );
-                            }
-                            if ui.small_button("+ New playlist").clicked() {
-                                self.open_playlist_dialog(PlaylistDialog::Create {
-                                    name: String::new(),
-                                    privacy: "PRIVATE".into(),
-                                    seed: None,
-                                });
-                            }
-                        });
-                },
-            );
-        }
-        let r = Rect::from_min_size(
-            Pos2::new(rect.left() + 14.0, rect.bottom() - 53.0),
-            Vec2::new(rect.width() - 28.0, 38.0),
-        );
-        if nav_row(
-            ui,
-            r,
-            "settings",
-            Icon::Settings,
-            "Settings",
-            self.page == Page::Settings,
-        )
-        .clicked()
-        {
-            self.navigate(Page::Settings);
-        }
-    }
     /// Shuffle, previous, play/pause (a spinner while loading), next and repeat, or just the
-    /// middle three without `extras`. Shared by the top bar and the floating bar.
+    /// middle three without `extras`, for the player bar.
     fn transport_buttons(&mut self, ui: &mut egui::Ui, t: Transport) {
         if t.extras && widgets::button(ui, Icon::Shuffle, t.side, self.shuffle, "Shuffle").clicked()
         {
@@ -4733,20 +4509,24 @@ impl YTDugem {
             self.repeat = (self.repeat + 1) % 3;
         }
     }
-    fn settings_button(&mut self, ui: &mut egui::Ui) {
+    /// The audio output button (top bar).
+    fn output_button(&mut self, ui: &mut egui::Ui) {
         if widgets::button(ui, Icon::Headphones, 30.0, self.output_open, "Audio output").clicked() {
             self.open_output();
         }
     }
+    /// One row: Back, the app name and the tabs; the search field in the middle; audio output,
+    /// Settings and the account on the right, before the window controls. Empty space drags
+    /// the window and a double click maximizes it.
     fn topbar(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        let floating = self.library.player_bar == store::PlayerBarStyle::Floating;
         ui.painter().rect_filled(rect, 0.0, surface(ui, SIDE, 120));
         ui.painter()
             .line_segment([rect.left_bottom(), rect.right_bottom()], divider(ui, 42));
+        // Added first, so every control drawn over it takes its clicks.
         let drag = ui.interact(
             Rect::from_min_max(
                 rect.min,
-                Pos2::new(rect.right() - 3.0 * CAPTION.x, rect.top() + 20.0),
+                Pos2::new(rect.right() - 3.0 * CAPTION.x, rect.bottom()),
             ),
             ui.make_persistent_id("window-drag"),
             egui::Sense::click_and_drag(),
@@ -4759,176 +4539,143 @@ impl YTDugem {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Maximized(!m));
         }
-        region(
-            ui,
-            Rect::from_min_size(rect.min + Vec2::new(10.0, 21.0), Vec2::new(285.0, 42.0)),
-            |ui| {
-                ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    if widgets::button(
-                        ui,
-                        Icon::Sidebar,
-                        32.0,
-                        false,
-                        if self.sidebar_open {
-                            "Hide sidebar"
-                        } else {
-                            "Show sidebar"
-                        },
-                    )
+        let row = |left: f32, right: f32| {
+            Rect::from_min_max(
+                Pos2::new(left, rect.center().y - 20.0),
+                Pos2::new(right, rect.center().y + 20.0),
+            )
+        };
+        let tabs_end = region(ui, row(rect.left() + 10.0, rect.center().x), |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if ui
+                    .add_enabled_ui(!self.nav.is_empty(), |ui| {
+                        widgets::button(ui, Icon::Back, 28.0, false, "Back")
+                    })
+                    .inner
                     .clicked()
-                    {
-                        self.sidebar_open = !self.sidebar_open;
+                {
+                    if let Some(p) = self.nav.pop() {
+                        self.page = p;
                     }
-                    if ui
-                        .add_enabled_ui(!self.nav.is_empty(), |ui| {
-                            widgets::button(ui, Icon::Back, 28.0, false, "Back")
-                        })
-                        .inner
-                        .clicked()
-                    {
-                        if let Some(p) = self.nav.pop() {
-                            self.page = p;
+                }
+                let (logo, _) = ui.allocate_exact_size(Vec2::splat(24.0), egui::Sense::hover());
+                widgets::app_icon(ui, logo);
+                ui.label(heading("YTDugem", 17.0));
+                ui.add_space(14.0);
+                let current = owning_tab(&self.page);
+                for (page, label) in TABS {
+                    if tab_pill(ui, label, current.as_ref() == Some(&page)).clicked() {
+                        // Upstream `selectDestination` closes an open mood: Explore opens on
+                        // its landing page.
+                        if page == Page::Explore {
+                            self.explore.view = explore::View::Main;
                         }
+                        self.navigate(page);
                     }
-                    if !floating {
-                        self.transport_buttons(ui, Transport::TOP_BAR);
-                    }
-                });
-            },
-        );
-        if floating {
-            // Only the tools that are not playback controls stay; those moved to the floating bar.
-            region(
-                ui,
-                Rect::from_min_size(
-                    Pos2::new(rect.right() - 84.0, rect.top() + 26.0),
-                    Vec2::new(72.0, 40.0),
-                ),
-                |ui| {
-                    ui.horizontal_centered(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        self.settings_button(ui);
-                        self.account_button(ui);
-                    });
-                },
-            );
-            window_controls(ui, rect);
-            return;
+                }
+            })
+            .response
+            .rect
+            .right()
+        });
+        let tools_right = rect.right() - 3.0 * CAPTION.x - 10.0;
+        let tools_left = region(ui, row(tools_right - 110.0, tools_right), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                self.account_button(ui);
+                if widgets::button(
+                    ui,
+                    Icon::Settings,
+                    30.0,
+                    self.page == Page::Settings,
+                    "Settings",
+                )
+                .clicked()
+                {
+                    self.navigate(Page::Settings);
+                }
+                self.output_button(ui);
+                ui.min_rect().left()
+            })
+            .inner
+        });
+        // As wide as fits between the tabs and the tools, centred on the window when it can be.
+        let (free_left, free_right) = (tabs_end + 24.0, tools_left - 24.0);
+        let width = (free_right - free_left).min(SEARCH_WIDTH);
+        if width >= 120.0 {
+            let center = rect
+                .center()
+                .x
+                .clamp(free_left + width / 2.0, free_right - width / 2.0);
+            self.search_field(ui, row(center - width / 2.0, center + width / 2.0));
         }
-        let tools_width = if rect.width() < 900.0 { 160.0 } else { 282.0 };
-        let card_left = rect.left() + 300.0;
-        let card_right = rect.right() - tools_width - 12.0;
-        let card_width = (card_right - card_left).clamp(80.0, 650.0);
-        let card = Rect::from_center_size(
-            Pos2::new((card_left + card_right) / 2.0, rect.top() + 40.0),
-            Vec2::new(card_width, 52.0),
-        );
-        if glass(ui) {
-            glass_slab(ui.painter(), card, 14.0, 150);
-        } else {
-            ui.painter()
-                .rect_filled(card, 5.0, Color32::from_rgb(47, 49, 51));
-            ui.painter().rect_stroke(
-                card,
-                5.0,
-                Stroke::new(1.0_f32, Color32::from_gray(66)),
-                egui::StrokeKind::Inside,
-            );
-        }
-        let response = ui.interact(
-            card,
-            ui.make_persistent_id("open-player"),
-            egui::Sense::click(),
-        );
-        response.clone().on_hover_text("Open Now Playing");
-        if response.clicked() {
-            self.expanded = true;
-            self.tab = PlayerPane::Main;
-        }
-        if let Some(t) = self.current.clone() {
-            let art = Rect::from_min_size(card.min, Vec2::splat(card.height()));
-            draw_cover(ui, &t, art, Some(self.cover.as_ref()));
-            if self.loading {
-                self.now_playing_badge(ui, art);
-            }
-            fit_text(
-                ui.painter(),
-                Pos2::new(card.left() + 61.0, card.top() + 15.0),
-                egui::Align2::LEFT_CENTER,
-                &t.title,
-                FontId::new(12.5, egui::FontFamily::Name("bold".into())),
-                WHITE,
-                card.width() - 70.0,
-            );
-            if let Some(link) = artist::credit_text(
-                ui,
-                ui.make_persistent_id("bar-credit"),
-                Pos2::new(card.left() + 61.0, card.top() + 33.0),
-                &artist::track_credit(&t),
-                FontId::proportional(11.0),
-                MUTED,
-                card.width() - 70.0,
-            ) {
-                self.open_artist_link(link);
-            }
-            let progress = if self.duration() > 0.0 {
-                (self.status.position / self.duration()).clamp(0.0, 1.0) as f32
-            } else {
-                0.0
-            };
-            ui.painter().line_segment(
-                [
-                    card.left_bottom(),
-                    Pos2::new(card.left() + card.width() * progress, card.bottom()),
-                ],
-                Stroke::new(2.0_f32, WHITE),
-            );
-        } else {
-            widgets::paint(
-                ui.painter(),
-                Icon::Logo,
-                Rect::from_center_size(card.center(), Vec2::splat(20.0)),
-                Color32::from_gray(105),
-            );
-        }
-        region(
-            ui,
-            Rect::from_min_size(
-                Pos2::new(rect.right() - tools_width, rect.top() + 26.0),
-                Vec2::new(tools_width - 12.0, 40.0),
-            ),
-            |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    if tools_width > 160.0 {
-                        let (r, _) =
-                            ui.allocate_exact_size(Vec2::splat(17.0), egui::Sense::hover());
-                        widgets::paint(ui.painter(), Icon::Volume, r, MUTED);
-                        self.volume_slider(ui, 76.0, "top-volume");
-                    }
-                    self.settings_button(ui);
-                    if widgets::button(
-                        ui,
-                        Icon::Lyrics,
-                        30.0,
-                        self.expanded && self.tab == PlayerPane::Lyrics,
-                        "Lyrics",
-                    )
-                    .clicked()
-                    {
-                        self.expanded = true;
-                        self.tab = PlayerPane::Lyrics;
-                    }
-                    if widgets::button(ui, Icon::Queue, 30.0, false, "Queue").clicked() {
-                        self.expanded = true;
-                        self.tab = PlayerPane::Queue;
-                    }
-                    self.account_button(ui);
-                });
-            },
-        );
         window_controls(ui, rect);
+    }
+    /// The search box: typing shows the dropdown, Up/Down pick an entry and Enter searches.
+    fn search_field(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let chosen = self.search_box_keys(ui.ctx());
+        let (field, focused) = region(ui, rect, |ui| {
+            let mut focused = false;
+            let (fill, rim) = if glass(ui) {
+                (Color32::from_black_alpha(60), widgets::white_alpha(20))
+            } else {
+                (Color32::from_rgb(36, 37, 34), Color32::from_gray(63))
+            };
+            let frame = egui::Frame::new()
+                .fill(fill)
+                .stroke(Stroke::new(1.0_f32, rim))
+                .corner_radius(rect.height() / 2.0)
+                .inner_margin(egui::Margin {
+                    left: 14,
+                    right: 8,
+                    top: 8,
+                    bottom: 8,
+                })
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        let (r, _) =
+                            ui.allocate_exact_size(Vec2::splat(18.0), egui::Sense::hover());
+                        // Phosphor glyphs sit a little high in their box; the text reads lower.
+                        widgets::paint(
+                            ui.painter(),
+                            Icon::Search,
+                            r.translate(Vec2::new(0.0, 2.5)),
+                            MUTED,
+                        );
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut self.query)
+                                .id(search_box::input_id())
+                                .desired_width(ui.available_width())
+                                .hint_text("Search songs, artists, playlists")
+                                .font(FontId::proportional(15.0))
+                                .margin(egui::Margin {
+                                    left: 0,
+                                    right: 4,
+                                    top: 2,
+                                    bottom: 2,
+                                })
+                                .frame(bare_text_frame()),
+                        );
+                        if response.changed() {
+                            self.search_box_edited();
+                        }
+                        focused = response.has_focus();
+                        if response.lost_focus() && ui.input(|s| s.key_pressed(egui::Key::Enter)) {
+                            // The entry picked with Up/Down, else what was typed.
+                            if let Some(text) = chosen.clone() {
+                                self.query = text;
+                            }
+                            self.search_box_done(ui.ctx());
+                            self.search();
+                        }
+                    });
+                });
+            (frame.response.rect, focused)
+        });
+        self.search_dropdown(ui.ctx(), field, focused);
     }
     /// Over the artwork of the current track: a spinner while its stream opens, then a small
     /// equalizer that moves while it plays.
@@ -5104,7 +4851,8 @@ impl YTDugem {
             );
             34.0
         } else {
-            0.0
+            // Inset like the cover's top and bottom, so the hover highlight frames it.
+            6.0
         };
         let art = Rect::from_min_size(rect.min + Vec2::new(offset, 5.0), Vec2::splat(56.0));
         draw_cover(ui, track, art, None);
@@ -5165,15 +4913,17 @@ impl YTDugem {
         response.clicked()
     }
     fn track_list(&mut self, ui: &mut egui::Ui, tracks: Vec<Track>, origin: &str) {
-        self.track_list_with(ui, tracks, origin, true);
+        self.track_list_with(ui, tracks, origin, true, 0);
     }
-    /// The rows of a list; `header` adds Play all, Add all to queue and the count above them.
+    /// The rows of a list from row `from` on; `header` adds Play all, Add all to queue and the
+    /// count of the whole list above them.
     fn track_list_with(
         &mut self,
         ui: &mut egui::Ui,
         tracks: Vec<Track>,
         origin: &str,
         header: bool,
+        from: usize,
     ) {
         if tracks.is_empty() {
             ui.add_space(28.0);
@@ -5200,7 +4950,7 @@ impl YTDugem {
             });
             ui.add_space(12.0);
         }
-        for (i, t) in tracks.iter().enumerate() {
+        for (i, t) in tracks.iter().enumerate().skip(from) {
             ui.push_id((origin, i), |ui| {
                 if self.song_row(ui, t, Some(i), ui.available_width()) {
                     self.start_tracks(tracks.clone(), i, origin);
@@ -5223,30 +4973,32 @@ impl YTDugem {
             recents
         };
         if !recent.is_empty() {
+            let recent: Vec<Track> = recent.into_iter().take(RECENTS).collect();
             ui.horizontal(|ui| {
                 ui.label(heading("Recents", 24.0));
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if artist::pill(ui, Icon::Play, "Play all", false, true).clicked() {
+                        self.start_tracks(recent.clone(), 0, "Recents");
+                    }
+                });
             });
             ui.add_space(12.0);
-            let column = (ui.available_width() / 3.0).clamp(310.0, 510.0);
-            egui::ScrollArea::horizontal()
-                .id_salt("recent-shelf")
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(ui, |ui| {
-                    ui.horizontal_top(|ui| {
-                        for base in (0..recent.len().min(32)).step_by(4) {
-                            ui.vertical(|ui| {
-                                ui.set_min_width(column);
-                                for i in base..(base + 4).min(recent.len()) {
-                                    ui.push_id(("recent", i), |ui| {
-                                        if self.song_row(ui, &recent[i], None, column) {
-                                            self.start_tracks(recent.clone(), i, "Recents");
-                                        }
-                                    });
-                                }
-                            });
-                        }
-                    });
+            let columns = recent_columns(ui.available_width());
+            let gap = 16.0;
+            let width = (ui.available_width() - gap * (columns - 1) as f32) / columns as f32;
+            for (row, chunk) in recent.chunks(columns).enumerate() {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for (j, t) in chunk.iter().enumerate() {
+                        let i = row * columns + j;
+                        ui.push_id(("recent", i), |ui| {
+                            if self.song_row(ui, t, None, width) {
+                                self.start_tracks(recent.clone(), i, "Recents");
+                            }
+                        });
+                    }
                 });
+            }
             ui.add_space(32.0);
         }
         self.shelf_rows(ui, &shelves, "home");
@@ -5398,7 +5150,7 @@ impl YTDugem {
                 });
             });
             ui.add_space(20.0);
-            self.track_list_with(ui, c.tracks, &c.title, playlist_id.is_none());
+            self.track_list_with(ui, c.tracks, &c.title, playlist_id.is_none(), 0);
             if c.continuation.is_some()
                 && ui
                     .add_enabled(!self.busy, egui::Button::new("Load more tracks"))
@@ -5418,28 +5170,18 @@ impl YTDugem {
             Page::Collection => self.collection_view(ui),
             Page::Artist(id) => self.artist_view(ui, &id),
             Page::ArtistGrid(target) => self.artist_grid_view(ui, &target),
-            Page::Search => {
-                ui.label(heading(
-                    if self.submitted_query.is_empty() {
-                        "Search"
-                    } else {
-                        &self.submitted_query
-                    },
-                    26.0,
-                ));
-                self.artist_results(ui);
-                self.track_list(ui, self.results.clone(), "Search");
-            }
+            Page::Search => self.search_view(ui),
             Page::Library => {
-                ui.horizontal(|ui| {
-                    ui.label(heading("Your library", 26.0));
-                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Listening stats").clicked() {
-                            self.navigate(Page::Stats);
+                ui.label(heading("Your library", 26.0));
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui| {
+                    for (page, icon, label) in LIBRARY_ENTRIES {
+                        if artist::pill(ui, icon, label, false, true).clicked() {
+                            self.navigate(page);
                         }
-                    });
+                    }
                 });
-                ui.add_space(14.0);
+                ui.add_space(24.0);
                 self.account_playlists_view(ui);
                 ui.add_space(24.0);
                 ui.label(heading("On this computer", 20.0));
@@ -6043,6 +5785,13 @@ impl eframe::App for YTDugem {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+    }
+}
+
+impl YTDugem {
+    /// One frame of the window; `eframe::App::ui` without the frame, so tests can drive it.
+    fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         let typing = ctx.egui_wants_keyboard_input();
         // While the palette is open it owns Escape (its modal closes on it), and so does the
@@ -6136,21 +5885,15 @@ impl eframe::App for YTDugem {
         // The page stays drawn while the sheet is dragged down, so it shows behind it.
         if shown < 1.0 || self.sheet_drag > 0.0 {
             self.ambient_backdrop(ui);
-            if self.sidebar_open {
-                egui::Panel::left("sidebar")
-                    .exact_size(258.0)
-                    .resizable(false)
-                    .frame(
-                        egui::Frame::new()
-                            .fill(surface(ui, SIDE, 0))
-                            .inner_margin(0.0),
-                    )
-                    .show(ui, |ui| {
-                        self.sidebar(ui, ui.max_rect());
-                    });
+            if self.account.is_some()
+                && self.account_playlists.is_none()
+                && !self.account_playlists_loading
+            {
+                // Song menus offer them under "Add to playlist".
+                self.load_account_playlists();
             }
             egui::Panel::top("topbar")
-                .exact_size(78.0)
+                .exact_size(TOP_BAR_HEIGHT)
                 .frame(
                     egui::Frame::new()
                         .fill(surface(ui, SIDE, 0))
@@ -6166,8 +5909,7 @@ impl eframe::App for YTDugem {
                         .inner_margin(egui::Margin::same(28)),
                 )
                 .show(ui, |ui| {
-                    let floating = self.library.player_bar == store::PlayerBarStyle::Floating;
-                    // The whole panel, margin included: the floating bar is placed in it.
+                    // The whole panel, margin included: the player bar is placed in it.
                     let page = ui.max_rect().expand(28.0);
                     if self.page == Page::Home {
                         self.feed_home_pull(ui, page);
@@ -6178,20 +5920,25 @@ impl eframe::App for YTDugem {
                         .id_salt(("page", self.page.clone(), self.explore_scroll_key()))
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
-                            if !self.message.is_empty() {
-                                ui.label(RichText::new(&self.message).color(MUTED));
-                            }
-                            self.content(ui);
-                            if floating {
-                                // Room to scroll the last row out from under the floating bar.
-                                ui.add_space(floating_bar::RESERVED);
-                            }
+                            // Centred, at most CONTENT_WIDTH wide.
+                            let width = ui.available_width().min(CONTENT_WIDTH);
+                            let pad = (ui.available_width() - width) / 2.0;
+                            ui.horizontal_top(|ui| {
+                                ui.add_space(pad);
+                                ui.vertical(|ui| {
+                                    ui.set_width(width);
+                                    if !self.message.is_empty() {
+                                        ui.label(RichText::new(&self.message).color(MUTED));
+                                    }
+                                    self.content(ui);
+                                    // Room to scroll the last row out from under the player bar.
+                                    ui.add_space(floating_bar::RESERVED);
+                                });
+                            });
                         });
                     // A touchpad's rubber band pulls the offset below zero: still the top.
                     self.page_at_top = scrolled.state.unclamped_offset().y <= 0.5;
-                    if floating {
-                        self.floating_bar(ui, page, shown);
-                    }
+                    self.floating_bar(ui, page, shown);
                 });
         }
         if shown > 0.0 {
@@ -6472,16 +6219,6 @@ struct Transport {
     next: Icon,
     extras: bool,
 }
-impl Transport {
-    const TOP_BAR: Self = Self {
-        side: 30.0,
-        skip: 32.0,
-        play: 34.0,
-        previous: Icon::Previous,
-        next: Icon::Next,
-        extras: true,
-    };
-}
 fn region<R>(ui: &mut egui::Ui, rect: Rect, f: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let mut child = ui.new_child(
         egui::UiBuilder::new()
@@ -6526,78 +6263,24 @@ fn truncate(s: &str, max: usize) -> String {
         s.into()
     }
 }
-fn nav_row(
-    ui: &mut egui::Ui,
-    r: Rect,
-    id: impl std::hash::Hash + std::fmt::Debug,
-    icon: Icon,
-    label: &str,
-    selected: bool,
-) -> egui::Response {
-    nav_row_with(ui, r, id, label, selected, |ui, color| {
-        widgets::paint(
-            ui.painter(),
-            icon,
-            Rect::from_min_size(r.min + Vec2::new(11.0, 10.0), Vec2::splat(18.0)),
-            color,
-        );
-    })
-}
-/// A sidebar playlist row: the playlist's artwork stands where `nav_row` draws its icon.
-fn nav_thumb_row(
-    ui: &mut egui::Ui,
-    r: Rect,
-    id: impl std::hash::Hash + std::fmt::Debug,
-    thumbnail: &str,
-    label: &str,
-    selected: bool,
-) -> egui::Response {
-    nav_row_with(ui, r, id, label, selected, |ui, _| {
-        let side = (r.height() - 8.0).min(28.0);
-        let art =
-            Rect::from_center_size(Pos2::new(r.left() + 20.0, r.center().y), Vec2::splat(side));
-        draw_image(ui, thumbnail, art, None);
-    })
-}
-fn nav_row_with(
-    ui: &mut egui::Ui,
-    r: Rect,
-    id: impl std::hash::Hash + std::fmt::Debug,
-    label: &str,
-    selected: bool,
-    leading: impl FnOnce(&mut egui::Ui, Color32),
-) -> egui::Response {
-    let response = ui.interact(r, ui.make_persistent_id(id), egui::Sense::click());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
-    if selected || response.hovered() {
-        let fill = widgets::white_alpha(if selected { 30 } else { 12 });
-        if glass(ui) {
-            let radius = r.height() / 2.0;
-            ui.painter().rect_filled(r, radius, fill);
-            if selected {
-                ui.painter().rect_stroke(
-                    r,
-                    radius,
-                    Stroke::new(1.0_f32, widgets::white_alpha(26)),
-                    egui::StrokeKind::Inside,
-                );
-            }
-        } else {
-            ui.painter().rect_filled(r, 6.0, fill);
-        }
-    }
-    let color = if selected { WHITE } else { MUTED };
-    leading(ui, color);
-    fit_text(
-        ui.painter(),
-        Pos2::new(r.left() + 43.0, r.center().y),
-        egui::Align2::LEFT_CENTER,
-        label,
-        FontId::proportional(15.0),
-        color,
-        r.right() - r.left() - 51.0,
-    );
-    response
+/// A top bar tab: a rounded label, filled while its page shows.
+fn tab_pill(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let font = FontId::new(14.0, egui::FontFamily::Name("bold".into()));
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
+    let size = Vec2::new(galley.size().x + 30.0, 34.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, label));
+    let (fill, ink) = match (selected, response.hovered()) {
+        (true, _) => (Color32::from_gray(232), BG),
+        (false, false) => (widgets::white_alpha(14), WHITE),
+        (false, true) => (widgets::white_alpha(26), WHITE),
+    };
+    ui.painter().rect_filled(rect, rect.height() / 2.0, fill);
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, ink);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 /// A round icon button whose label is its tooltip; disabled buttons dim instead of vanishing.
 fn icon_action(ui: &mut egui::Ui, enabled: bool, icon: Icon, label: &str) -> egui::Response {
@@ -6646,7 +6329,9 @@ fn draw_image(ui: &mut egui::Ui, url: &str, r: Rect, texture: Option<&egui::Text
     } else {
         ui.painter()
             .rect_filled(r, 8.0, Color32::from_rgb(51, 53, 48));
-        widgets::paint(ui.painter(), Icon::Logo, r.shrink(r.width() * 0.3), MUTED);
+        // The shorter side: a 16:9 card shrunk by its width would turn inside out.
+        let inset = r.width().min(r.height()) * 0.3;
+        widgets::paint(ui.painter(), Icon::Logo, r.shrink(inset), MUTED);
     }
 }
 
@@ -6870,22 +6555,39 @@ fn font_definitions() -> egui::FontDefinitions {
         .get_mut(&egui::FontFamily::Proportional)
         .unwrap()
         .insert(0, "inter".into());
-    // Inter has no CJK glyphs; fall back to fonts Windows ships so Japanese/Chinese/Korean
-    // titles render instead of empty boxes. One font per script, first one found wins.
-    let groups: [&[&str]; 3] = [
-        &[
-            r"C:\Windows\Fonts\YuGothM.ttc",
-            r"C:\Windows\Fonts\meiryo.ttc",
-            r"C:\Windows\Fonts\msgothic.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-        ],
-        &[r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simsun.ttc"],
-        &[r"C:\Windows\Fonts\malgun.ttf"],
+    // Inter has no CJK glyphs, emoji or most symbols; fall back to fonts the system ships so
+    // Japanese/Chinese/Korean titles and shelf titles like "Rain + Feels ☔" render instead of
+    // empty boxes. One font per group, first one found wins. Emoji draw in one colour: epaint
+    // is built without colour-font support and uses the outlines.
+    let groups: [(&str, &[&str]); 5] = [
+        (
+            "cjk-0",
+            &[
+                r"C:\Windows\Fonts\YuGothM.ttc",
+                r"C:\Windows\Fonts\meiryo.ttc",
+                r"C:\Windows\Fonts\msgothic.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            ],
+        ),
+        (
+            "cjk-1",
+            &[r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simsun.ttc"],
+        ),
+        ("cjk-2", &[r"C:\Windows\Fonts\malgun.ttf"]),
+        (
+            "emoji",
+            &[
+                r"C:\Windows\Fonts\seguiemj.ttf",
+                "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",
+                "/usr/share/fonts/noto/NotoEmoji-Regular.ttf",
+            ],
+        ),
+        ("symbols", &[r"C:\Windows\Fonts\seguisym.ttf"]),
     ];
-    for (i, paths) in groups.iter().enumerate() {
+    for (name, paths) in groups {
         if let Some(bytes) = paths.iter().find_map(|p| std::fs::read(p).ok()) {
-            let name = format!("cjk-{i}");
+            let name = name.to_owned();
             let y_offset_factor = baseline_shift_em(inter_regular, &bytes).unwrap_or(0.0);
             let data = egui::FontData::from_owned(bytes).tweak(egui::FontTweak {
                 y_offset_factor,
@@ -7030,7 +6732,7 @@ fn row_highlight(ui: &egui::Ui, rect: Rect, classic_radius: f32, active: bool) {
         .rect_filled(rect, radius, widgets::white_alpha(alpha));
 }
 
-/// The page, sidebar and top bar surfaces: opaque in Classic, tinted glass in Liquid Glass.
+/// The page and top bar surfaces: opaque in Classic, tinted glass in Liquid Glass.
 fn surface(ui: &egui::Ui, classic: Color32, alpha: u8) -> Color32 {
     if glass(ui) {
         Color32::from_rgba_unmultiplied(16, 18, 24, alpha)

@@ -315,7 +315,15 @@ pub(crate) fn innertube_request(
 }
 
 fn innertube_value(endpoint: &str, body: Value) -> Result<Value> {
-    let session = crate::auth::snapshot();
+    innertube_value_as(endpoint, body, crate::auth::snapshot())
+}
+
+/// `innertube_value` as `session`, or signed out with `None`.
+fn innertube_value_as(
+    endpoint: &str,
+    body: Value,
+    session: Option<crate::auth::Session>,
+) -> Result<Value> {
     let (mut status, mut response) = send_innertube(endpoint, &body, session.as_ref())?;
     if session.is_some() && status == reqwest::StatusCode::UNAUTHORIZED {
         // The saved cookies no longer sign in; still show public music.
@@ -333,12 +341,16 @@ fn innertube_value(endpoint: &str, body: Value) -> Result<Value> {
 }
 
 fn innertube(endpoint: &str, body: Value) -> Result<Vec<Track>> {
-    let response = innertube_value(endpoint, body)?;
+    Ok(tracks_of(&innertube_value(endpoint, body)?))
+}
+
+/// The tracks of a response, without repeats.
+fn tracks_of(response: &Value) -> Vec<Track> {
     let mut tracks = vec![];
-    parse_renderers(&response, &mut tracks);
+    parse_renderers(response, &mut tracks);
     let mut seen = HashSet::new();
     tracks.retain(|t| seen.insert(t.id.clone()));
-    Ok(tracks)
+    tracks
 }
 
 fn continuation(v: &Value) -> Option<String> {
@@ -1461,14 +1473,22 @@ fn parse_suggestions(response: &Value) -> Vec<String> {
 }
 
 pub fn search(query: &str) -> Result<Vec<Track>> {
+    search_as(query, crate::auth::snapshot())
+}
+
+/// `search` signed out, so it stays out of the account's YouTube search history: the search
+/// box's preview asks at every pause in typing, as `search_suggestions` does.
+pub fn search_signed_out(query: &str) -> Result<Vec<Track>> {
+    search_as(query, None)
+}
+
+fn search_as(query: &str, session: Option<crate::auth::Session>) -> Result<Vec<Track>> {
     let query = query.trim();
     if query.is_empty() || query.len() > 500 {
         bail!("Enter a search between 1 and 500 characters");
     }
-    innertube(
-        "search",
-        json!({"query":query,"params":"EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"}),
-    )
+    let body = json!({"query":query,"params":"EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"});
+    Ok(tracks_of(&innertube_value_as("search", body, session)?))
 }
 
 /// YouTube Music's "Playlists" search filter (upstream `SearchFilter.PLAYLISTS`).

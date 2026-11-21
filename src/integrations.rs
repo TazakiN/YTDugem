@@ -50,9 +50,13 @@ impl Integrations {
             display_name: "YTDugem",
             hwnd,
         };
-        let has_session_bus =
-            !cfg!(target_os = "linux") || std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some();
-        let controls = has_session_bus
+        // Linux needs a session bus; Windows needs a window (souvlaki panics without one).
+        let available = if cfg!(target_os = "linux") {
+            std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+        } else {
+            !cfg!(windows) || config.hwnd.is_some()
+        };
+        let controls = available
             .then(|| MediaControls::new(config).ok())
             .flatten()
             .and_then(|mut controls| {

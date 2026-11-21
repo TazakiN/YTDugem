@@ -1,5 +1,7 @@
-//! The sidebar search box's dropdown (a YTDugem addition): recent searches while it is empty,
-//! then matching recent searches and YouTube Music's typeahead suggestions while typing.
+//! The top bar search box's dropdown (a YTDugem addition): recent searches while it is empty,
+//! then matching recent searches and YouTube Music's typeahead suggestions while typing, with a
+//! preview of the results (top result and first songs) under them.
+use super::search_page::{top_result, TopResult};
 use super::*;
 
 /// Rows shown at most.
@@ -7,6 +9,50 @@ const LIMIT: usize = 10;
 /// Recent searches shown above the suggestions while typing.
 const RECENT_WHILE_TYPING: usize = 3;
 const ROW: f32 = 32.0;
+/// Songs in the preview.
+const PREVIEW_SONGS: usize = 3;
+const PREVIEW_ROW: f32 = 52.0;
+
+/// What a query finds, fetched with the suggestions; drawn under them while it matches the box.
+#[derive(Clone, Debug)]
+pub(super) struct SearchPreview {
+    pub query: String,
+    pub top: Option<TopResult>,
+    pub songs: Vec<Track>,
+}
+
+impl SearchPreview {
+    /// From the song and artist searches; a song on top is not listed again under it.
+    fn new(query: String, artists: &[ShelfItem], songs: &[Track]) -> Self {
+        let top = top_result(artists, songs);
+        let skip = usize::from(matches!(top, Some(TopResult::Song(_))));
+        Self {
+            query,
+            top,
+            songs: songs
+                .iter()
+                .skip(skip)
+                .take(PREVIEW_SONGS)
+                .cloned()
+                .collect(),
+        }
+    }
+    /// The top result, then the songs: the queue a click in the preview starts.
+    fn queue(&self) -> Vec<Track> {
+        let top = match &self.top {
+            Some(TopResult::Song(t)) => Some(t.clone()),
+            _ => None,
+        };
+        top.into_iter().chain(self.songs.iter().cloned()).collect()
+    }
+}
+
+/// A click in the preview.
+enum PreviewPick {
+    Top,
+    Song(usize),
+    AllResults,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Entry {
@@ -81,6 +127,17 @@ pub(super) struct SearchBox {
     /// The query the last suggestion request was sent for.
     asked: String,
     request: u64,
+    /// The results preview for the last query asked; shown while it matches the box.
+    preview: Option<SearchPreview>,
+}
+
+impl SearchBox {
+    /// A preview answers the request it was fetched for; one for an older query is dropped.
+    pub(super) fn accept_preview(&mut self, id: u64, preview: SearchPreview) {
+        if id == self.request && preview.query == self.asked {
+            self.preview = Some(preview);
+        }
+    }
 }
 
 pub(super) fn input_id() -> egui::Id {
@@ -180,10 +237,35 @@ impl YTDugem {
             return;
         }
         let (id, tx) = (self.search_box.request, self.tx.clone());
+        let q = query.clone();
         std::thread::spawn(move || {
-            let result = services::search_suggestions(&query).map_err(err);
-            let _ = tx.send(Event::SearchSuggestions(id, query, result));
+            let result = services::search_suggestions(&q).map_err(err);
+            let _ = tx.send(Event::SearchSuggestions(id, q, result));
         });
+        // The results page's searches, signed out like the suggestions so typing stays out of
+        // the account's search history, and without touching the page's results. A failed song
+        // search shows no preview; a failed artist search just has no artist on top.
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let (artists, songs) = std::thread::scope(|s| {
+                let artists = s.spawn(|| services::artist::search_artists_signed_out(&query));
+                (artists.join(), services::search_signed_out(&query))
+            });
+            if let Ok(songs) = songs {
+                let artists = artists.ok().and_then(Result::ok).unwrap_or_default();
+                let preview = SearchPreview::new(query, &artists, &songs);
+                let _ = tx.send(Event::SearchPreview(id, preview));
+            }
+        });
+    }
+
+    /// The preview for exactly what is in the box, if it has arrived.
+    fn current_preview(&self) -> Option<&SearchPreview> {
+        let query = self.query.trim();
+        self.search_box
+            .preview
+            .as_ref()
+            .filter(|p| !query.is_empty() && p.query == query)
     }
 
     /// The dropdown under the search box (`anchor`), drawn over the page.
@@ -205,7 +287,8 @@ impl YTDugem {
         }
         self.search_box.focused = focused;
         let list = self.search_entries();
-        if !self.search_box.shown || list.is_empty() {
+        let preview = self.current_preview().cloned();
+        if !self.search_box.shown || list.is_empty() && preview.is_none() {
             self.search_box.popup = None;
             return;
         }
@@ -213,6 +296,7 @@ impl YTDugem {
         let mut chosen = None;
         let mut forget = None;
         let mut clear = false;
+        let mut picked = None;
         let area = egui::Area::new(egui::Id::unique("search-dropdown"))
             .order(egui::Order::Foreground)
             .fixed_pos(anchor.left_bottom() + Vec2::new(0.0, 4.0))
@@ -290,6 +374,27 @@ impl YTDugem {
                                 }
                             }
                         }
+                        if let Some(preview) = &preview {
+                            picked = preview_panel(ui, preview, width, !list.is_empty());
+                        }
+                        if typing {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(8.0);
+                                ui.label(
+                                    RichText::new("Enter: all results · Up/Down: move")
+                                        .size(11.5)
+                                        .color(MUTED),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                    ui.add_space(8.0);
+                                    if link(ui, "See all results").clicked() {
+                                        picked = Some(PreviewPick::AllResults);
+                                    }
+                                });
+                            });
+                            ui.add_space(4.0);
+                        }
                         if !typing {
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
@@ -327,6 +432,36 @@ impl YTDugem {
             self.search_box_done(ctx);
             self.search();
         }
+        if let (Some(pick), Some(preview)) = (picked, preview) {
+            self.search_box_done(ctx);
+            match pick {
+                PreviewPick::AllResults => self.search(),
+                PreviewPick::Top => match preview.top {
+                    Some(TopResult::Artist(item)) => self.open_item(item),
+                    Some(TopResult::Song(_)) => self.start_tracks(preview.queue(), 0, "Search"),
+                    None => {}
+                },
+                PreviewPick::Song(i) => {
+                    let queue = preview.queue();
+                    let at = queue.len() - preview.songs.len() + i;
+                    self.start_tracks(queue, at, "Search");
+                }
+            }
+        }
+    }
+
+    /// Suggestions and a preview already answered for `asked`, so a test needs no network.
+    #[cfg(test)]
+    pub(super) fn search_box_fixture(
+        &mut self,
+        asked: &str,
+        remote: &[&str],
+        artists: &[ShelfItem],
+        songs: &[Track],
+    ) {
+        self.search_box.asked = asked.into();
+        self.search_box.remote = remote.iter().map(|s| s.to_string()).collect();
+        self.search_box.preview = Some(SearchPreview::new(asked.into(), artists, songs));
     }
 
     pub(super) fn clear_recent_searches(&mut self) {
@@ -336,9 +471,192 @@ impl YTDugem {
     }
 }
 
+/// Under the entries: the top result with Play or Open, then the first songs.
+fn preview_panel(
+    ui: &mut egui::Ui,
+    preview: &SearchPreview,
+    width: f32,
+    after_entries: bool,
+) -> Option<PreviewPick> {
+    let mut pick = None;
+    if after_entries {
+        ui.add_space(4.0);
+        let (r, _) = ui.allocate_exact_size(Vec2::new(width, 9.0), egui::Sense::hover());
+        ui.painter().hline(
+            r.x_range(),
+            r.center().y,
+            Stroke::new(1.0_f32, Color32::from_gray(55)),
+        );
+    }
+    let caption = |ui: &mut egui::Ui, text: &str| {
+        ui.add_space(4.0);
+        ui.label(RichText::new(format!("  {text}")).size(11.5).color(MUTED));
+        ui.add_space(4.0);
+    };
+    if let Some(top) = &preview.top {
+        caption(ui, "Top result");
+        let (title, subtitle, action) = match top {
+            TopResult::Artist(item) => (&item.title, item.subtitle.clone(), "Open"),
+            TopResult::Song(t) => (&t.title, format!("Song • {}", t.artist), "Play"),
+        };
+        let (rect, response) =
+            preview_row(ui, width, 64.0, title, &subtitle, |ui, art| match top {
+                TopResult::Artist(item) => {
+                    artist::round_image(ui, &item.thumbnail, &item.title, art)
+                }
+                TopResult::Song(t) => draw_cover(ui, t, art, None),
+            });
+        let button = Rect::from_min_size(
+            Pos2::new(rect.right() - 100.0, rect.center().y - 20.0),
+            Vec2::new(92.0, 40.0),
+        );
+        let icon = if action == "Play" {
+            Icon::Play
+        } else {
+            Icon::CaretRight
+        };
+        let pressed = region(ui, button, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                artist::pill(ui, icon, action, true, true).clicked()
+            })
+            .inner
+        });
+        if pressed || response.clicked() {
+            pick = Some(PreviewPick::Top);
+        }
+    }
+    if !preview.songs.is_empty() {
+        caption(ui, "Songs");
+        for (i, t) in preview.songs.iter().enumerate() {
+            ui.push_id(("preview-song", i), |ui| {
+                let (rect, response) =
+                    preview_row(ui, width, PREVIEW_ROW, &t.title, &t.artist, |ui, art| {
+                        draw_cover(ui, t, art, None)
+                    });
+                ui.painter().text(
+                    Pos2::new(rect.right() - 12.0, rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    clock(t.duration),
+                    FontId::proportional(12.0),
+                    MUTED,
+                );
+                if response.clicked() {
+                    pick = Some(PreviewPick::Song(i));
+                }
+            });
+        }
+    }
+    ui.add_space(4.0);
+    let (r, _) = ui.allocate_exact_size(Vec2::new(width, 9.0), egui::Sense::hover());
+    ui.painter().hline(
+        r.x_range(),
+        r.center().y,
+        Stroke::new(1.0_f32, Color32::from_gray(55)),
+    );
+    pick
+}
+
+/// A clickable row of the preview: artwork, a bold title and a muted line under it.
+fn preview_row(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    title: &str,
+    subtitle: &str,
+    art: impl FnOnce(&mut egui::Ui, Rect),
+) -> (Rect, egui::Response) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, title));
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 5.0, widgets::white_alpha(14));
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let side = height - 12.0;
+    let art_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 8.0, rect.center().y - side / 2.0),
+        Vec2::splat(side),
+    );
+    art(ui, art_rect);
+    let x = art_rect.right() + 12.0;
+    let max = rect.right() - x - 110.0;
+    let p = ui.painter();
+    fit_text(
+        p,
+        Pos2::new(x, rect.center().y - 9.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        FontId::new(14.0, egui::FontFamily::Name("bold".into())),
+        WHITE,
+        max,
+    );
+    fit_text(
+        p,
+        Pos2::new(x, rect.center().y + 10.0),
+        egui::Align2::LEFT_CENTER,
+        subtitle,
+        FontId::proportional(12.5),
+        MUTED,
+        max,
+    );
+    (rect, response)
+}
+
+/// Text that acts as a link.
+fn link(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let response = ui.add(
+        egui::Label::new(RichText::new(text).size(12.0).color(ACCENT)).sense(egui::Sense::click()),
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn song(id: &str) -> Track {
+        Track {
+            id: id.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn previews_for_another_request_or_query_are_dropped() {
+        let mut b = SearchBox {
+            asked: "dewa".into(),
+            request: 3,
+            ..Default::default()
+        };
+        let preview = |query: &str| SearchPreview::new(query.into(), &[], &[song("a")]);
+        b.accept_preview(2, preview("dewa"));
+        assert!(b.preview.is_none(), "an older request");
+        b.accept_preview(3, preview("dew"));
+        assert!(b.preview.is_none(), "another query");
+        b.accept_preview(3, preview("dewa"));
+        assert_eq!(b.preview.as_ref().unwrap().query, "dewa");
+    }
+
+    #[test]
+    fn a_song_on_top_is_not_listed_again_and_starts_the_queue() {
+        let songs: Vec<Track> = ["a", "b", "c", "d", "e"].map(song).into();
+        let p = SearchPreview::new("q".into(), &[], &songs);
+        assert!(matches!(&p.top, Some(TopResult::Song(t)) if t.id == "a"));
+        let ids = |list: &[Track]| list.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&p.songs), ["b", "c", "d"]);
+        assert_eq!(ids(&p.queue()), ["a", "b", "c", "d"]);
+        let artist = ShelfItem {
+            title: "A".into(),
+            ..Default::default()
+        };
+        let p = SearchPreview::new("q".into(), &[artist], &songs);
+        assert!(matches!(&p.top, Some(TopResult::Artist(_))));
+        assert_eq!(ids(&p.songs), ["a", "b", "c"]);
+        assert_eq!(ids(&p.queue()), ["a", "b", "c"]);
+    }
 
     fn texts(list: &[Entry]) -> Vec<(&str, bool)> {
         list.iter().map(|e| (e.text.as_str(), e.recent)).collect()
