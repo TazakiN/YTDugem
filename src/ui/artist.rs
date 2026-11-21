@@ -539,13 +539,22 @@ impl YTDugem {
         self.artists
             .pages
             .insert(browse_id.clone(), Loadable::Loading);
-        let tx = self.tx.clone();
+        let (epoch, tx) = (self.account_epoch, self.tx.clone());
         std::thread::spawn(move || {
             let result = services::artist::artist_page(&browse_id).map_err(err);
-            let _ = tx.send(Event::Artist(browse_id, result));
+            let _ = tx.send(Event::Artist(epoch, browse_id, result));
         });
     }
-    pub(super) fn artist_loaded(&mut self, browse_id: String, result: Result<ArtistPage, String>) {
+    pub(super) fn artist_loaded(
+        &mut self,
+        epoch: u64,
+        browse_id: String,
+        result: Result<ArtistPage, String>,
+    ) {
+        // Fetched under another account; the open page asks again.
+        if epoch != self.account_epoch {
+            return;
+        }
         let state = match result {
             Ok(page) => Loadable::Ready(page),
             Err(e) => Loadable::Failed(e),

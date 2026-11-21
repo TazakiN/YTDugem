@@ -194,7 +194,8 @@ enum Event {
     Moods(u64, Result<Vec<services::MoodGenreSection>, String>),
     /// A mood/genre tile's cover: (request, category key, url).
     MoodArtwork(u64, String, String),
-    Artist(String, Result<services::artist::ArtistPage, String>),
+    /// (account epoch when asked, browse id, page).
+    Artist(u64, String, Result<services::artist::ArtistPage, String>),
     ArtistGrid(
         services::artist::BrowseTarget,
         Result<Vec<ShelfItem>, String>,
@@ -4133,7 +4134,7 @@ impl YTDugem {
                 Event::MoodArtwork(id, key, url) if id == self.explore.request => {
                     self.explore.artwork_loaded(&key, url);
                 }
-                Event::Artist(id, r) => self.artist_loaded(id, r),
+                Event::Artist(epoch, id, r) => self.artist_loaded(epoch, id, r),
                 Event::ArtistGrid(target, r) => self.grid_loaded(target, r),
                 Event::ArtistLookup(id, name, r) => self.artist_found(id, name, r),
                 Event::ArtistQueue(id, origin, r) => self.artist_queue_loaded(id, origin, r),
