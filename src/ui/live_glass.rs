@@ -1,7 +1,7 @@
 //! Liquid Glass's player bar is real glass: it blurs and refracts the page behind it, covers and
 //! text included. egui_glass draws the page a second time in a twin context, off screen, for the
-//! glass to sample. That twin pass gets no input and has no image loaders, and it only knows the
-//! textures registered with egui_glass, so the page draws a few things differently there.
+//! glass to sample. The twin pass gets no input, and of the window's textures it only knows those
+//! registered with egui_glass; it loads pictures through the window's loaders.
 use super::*;
 use eframe::{egui_wgpu, wgpu};
 
@@ -19,9 +19,6 @@ pub(super) const BAR: egui_glass::GlassStyle = egui_glass::GlassStyle {
     ..egui_glass::GlassStyle::dark()
 };
 
-/// What the twin pass draws where pictures go, since it cannot load them.
-const PICTURE_PLACEHOLDER: Color32 = Color32::from_rgb(51, 53, 48);
-
 /// Liquid Glass's GPU state. `None` without a wgpu renderer, as in the kittest harness.
 pub(super) struct GlassGpu {
     rs: egui_wgpu::RenderState,
@@ -29,6 +26,8 @@ pub(super) struct GlassGpu {
     /// Ids of dropped [`NativeTexture`]s. A frame may still draw one after it is dropped, so
     /// they are freed at the start of the next frame, once that one has been rendered.
     retired: Arc<Mutex<Vec<egui::TextureId>>>,
+    /// The twin context, once it has drawn: it keeps its own textures of the pictures it shows.
+    twin: Option<egui::Context>,
 }
 
 /// A texture both the screen and the twin pass can draw. Freed the frame after it is dropped.
@@ -73,6 +72,7 @@ impl GlassGpu {
             rs: rs.clone(),
             live,
             retired: Arc::default(),
+            twin: None,
         }
     }
 
@@ -128,6 +128,27 @@ impl GlassGpu {
             egui_glass::free_native_texture_id(&self.rs, &id);
         }
     }
+
+    /// The twin context, once it has drawn.
+    pub(super) fn twin(&self) -> Option<&egui::Context> {
+        self.twin.as_ref()
+    }
+
+    /// Lets the twin load pictures through the window's loaders, so they share downloads and
+    /// decoded images; only the twin's textures are its own.
+    fn adopt_twin(&mut self, window: &egui::Context, twin: &egui::Context) {
+        if self.twin.is_some() {
+            return;
+        }
+        let loaders = window.loaders();
+        for loader in loaders.bytes.lock().iter() {
+            twin.add_bytes_loader(loader.clone());
+        }
+        for loader in loaders.image.lock().iter() {
+            twin.add_image_loader(loader.clone());
+        }
+        self.twin = Some(twin.clone());
+    }
 }
 
 fn twin_id() -> egui::Id {
@@ -144,20 +165,6 @@ pub(super) fn twin_pass(ctx: &egui::Context) -> bool {
 /// when no bar is drawn.
 fn twin_clip(page: Rect, shown: f32) -> Option<Rect> {
     floating_bar::placed_bar(page, shown).map(|bar| bar.expand(SAMPLE_MARGIN).intersect(page))
-}
-
-/// Paints `image` at `rect`. The twin pass cannot load pictures and would paint a warning sign
-/// instead, so there it paints a plain placeholder of the same shape.
-pub(super) fn paint_picture(ui: &egui::Ui, image: egui::Image<'_>, rect: Rect) {
-    if twin_pass(ui.ctx()) {
-        ui.painter().rect_filled(
-            rect,
-            image.image_options().corner_radius,
-            PICTURE_PLACEHOLDER,
-        );
-    } else {
-        image.paint_at(ui, rect);
-    }
 }
 
 impl YTDugem {
@@ -177,6 +184,9 @@ impl YTDugem {
                     return;
                 };
                 ui.ctx().data_mut(|d| d.insert_temp(twin_id(), true));
+                if let Some(gpu) = &mut self.glass {
+                    gpu.adopt_twin(&window, ui.ctx());
+                }
                 ui.set_clip_rect(clip.intersect(ui.clip_rect()));
             }
             page = self.page_layers(ui);

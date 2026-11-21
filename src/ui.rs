@@ -5730,10 +5730,10 @@ fn dialog_frame(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 fn avatar(ui: &egui::Ui, url: &str, name: &str, rect: Rect) {
     let radius = rect.width() / 2.0;
     if url.starts_with("https://") {
-        let image = web_image(url.to_owned())
+        web_image(url.to_owned())
             .fit_to_exact_size(rect.size())
-            .corner_radius(radius);
-        live_glass::paint_picture(ui, image, rect);
+            .corner_radius(radius)
+            .paint_at(ui, rect);
         return;
     }
     ui.painter()
@@ -5785,7 +5785,7 @@ impl eframe::App for YTDugem {
         }
         self.tray_step(ctx);
         self.stats_save_step();
-        forget_idle_images(ctx);
+        forget_idle_images(ctx, self.glass.as_ref().and_then(|g| g.twin()));
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 
@@ -6331,11 +6331,12 @@ fn draw_image(ui: &mut egui::Ui, url: &str, r: Rect, texture: Option<&egui::Text
     if !ui.is_rect_visible(r) {
         return;
     }
-    if let Some(tex) = texture {
-        let image = egui::Image::new(tex)
+    // The window's own textures are unknown to Liquid Glass's twin pass; it loads `url` instead.
+    if let Some(tex) = texture.filter(|_| !live_glass::twin_pass(ui.ctx())) {
+        egui::Image::new(tex)
             .fit_to_exact_size(r.size())
-            .corner_radius(8.0);
-        live_glass::paint_picture(ui, image, r);
+            .corner_radius(8.0)
+            .paint_at(ui, r);
     } else if url.starts_with("https://") {
         // A few shared buckets so rows and cards reuse one cached download each.
         let px = r.width().max(r.height()) * ui.ctx().pixels_per_point();
@@ -6346,10 +6347,10 @@ fn draw_image(ui: &mut egui::Ui, url: &str, r: Rect, texture: Option<&egui::Text
         } else {
             544
         };
-        let image = web_image(artwork_at(url, px))
+        web_image(artwork_at(url, px))
             .fit_to_exact_size(r.size())
-            .corner_radius(8.0);
-        live_glass::paint_picture(ui, image, r);
+            .corner_radius(8.0)
+            .paint_at(ui, r);
     } else {
         ui.painter()
             .rect_filled(r, 8.0, Color32::from_rgb(51, 53, 48));
@@ -6382,8 +6383,9 @@ fn web_image(uri: String) -> egui::Image<'static> {
 
 /// Releases the download, pixels and texture of web pictures not drawn for `IMAGE_IDLE`,
 /// checking twice a minute. Pages left behind, and everything while the window sits in the
-/// tray, then stop holding memory; they load again when shown.
-fn forget_idle_images(ctx: &egui::Context) {
+/// tray, then stop holding memory; they load again when shown. Liquid Glass's `twin` keeps its
+/// own textures of them.
+fn forget_idle_images(ctx: &egui::Context, twin: Option<&egui::Context>) {
     let now = Instant::now();
     let stale = match DRAWN_IMAGES.lock() {
         Ok(mut drawn) if drawn.1.is_none_or(|at| now - at >= Duration::from_secs(30)) => {
@@ -6394,6 +6396,9 @@ fn forget_idle_images(ctx: &egui::Context) {
     };
     for uri in stale {
         ctx.forget_image(&uri);
+        if let Some(twin) = twin {
+            twin.forget_image(&uri);
+        }
     }
 }
 
