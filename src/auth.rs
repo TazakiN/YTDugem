@@ -285,6 +285,10 @@ pub fn logout() -> Result<()> {
         .lock()
         .map_err(|_| anyhow!("auth state unavailable"))?;
     secretfile::delete()?;
+    // Copies still handed to a running yt-dlp or mpv go too: the session is being revoked.
+    if let Ok(dir) = auth_dir() {
+        sweep_plaintext(&dir);
+    }
     *state = None;
     GENERATION.fetch_add(1, Ordering::SeqCst);
     Ok(())
@@ -1521,6 +1525,32 @@ fn auth_dir() -> Result<PathBuf> {
     Ok(p)
 }
 
+/// Deletes plaintext copies of the session that only exist while something uses them:
+/// `cookies-*.txt` files and `import-*` / `signin-*` folders. A crash leaves them behind, and
+/// their contents are not sealed like `session.json`, which is kept.
+fn sweep_plaintext(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let path = entry.path();
+        if name.starts_with("cookies-") && name.ends_with(".txt") {
+            let _ = fs::remove_file(&path);
+        } else if name.starts_with("import-") || name.starts_with("signin-") {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// At startup, with the single-instance lock held: nothing else can be using these files.
+pub fn sweep_leftovers() {
+    if let Some(dir) = crate::store::data_path().parent() {
+        sweep_plaintext(&dir.join("auth"));
+    }
+}
+
 pub struct CookieFile {
     path: PathBuf,
 }
@@ -1802,6 +1832,48 @@ mod tests {
         assert!(!stale.exists(), "the stale session copy is removed");
         assert_ne!(third, stale);
         drop((_a, _b, _c));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn sweep_removes_plaintext_copies_and_keeps_the_sealed_session() {
+        let dir = std::env::temp_dir().join(format!(
+            "dugem-auth-sweep-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&dir).unwrap();
+        for file in [
+            "session.json",
+            "cookies-123-0.txt",
+            "cookies-999-7.txt",
+            "notes.txt",
+            "cookies-backup.json",
+        ] {
+            fs::write(dir.join(file), "sealed").unwrap();
+        }
+        fs::create_dir_all(dir.join("import-123-456")).unwrap();
+        fs::write(dir.join("import-123-456/cookies.txt"), "session").unwrap();
+        fs::create_dir_all(dir.join("signin-1-2/Default")).unwrap();
+        fs::write(dir.join("signin-1-2/Default/x"), "profile").unwrap();
+        fs::create_dir(dir.join("other")).unwrap();
+
+        sweep_plaintext(&dir);
+
+        for kept in ["session.json", "notes.txt", "cookies-backup.json", "other"] {
+            assert!(dir.join(kept).exists(), "{kept} must be kept");
+        }
+        for gone in [
+            "cookies-123-0.txt",
+            "cookies-999-7.txt",
+            "import-123-456",
+            "signin-1-2",
+        ] {
+            assert!(!dir.join(gone).exists(), "{gone} must be deleted");
+        }
+        sweep_plaintext(&dir.join("missing"));
         fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
