@@ -3,7 +3,7 @@
 //! volume buttons. A YTDugem addition modelled on the Apple Music web mini-player.
 use super::*;
 
-const HEIGHT: f32 = 64.0;
+pub(super) const HEIGHT: f32 = 64.0;
 /// From the bottom of the page to the bar.
 const GAP: f32 = 18.0;
 /// The least room left on either side of the bar.
@@ -83,6 +83,13 @@ fn bar_rect(page: Rect) -> Rect {
     )
 }
 
+/// Where the bar is drawn while the Now Playing sheet is `shown` (0 to 1): it drops away as the
+/// sheet comes up. `None` once it is gone, or when the page is too narrow for it.
+pub(super) fn placed_bar(page: Rect, shown: f32) -> Option<Rect> {
+    (shown < 1.0 && page.width() >= 2.0 * SIDE_MARGIN + 100.0)
+        .then(|| bar_rect(page).translate(Vec2::new(0.0, shown * RESERVED)))
+}
+
 /// Seconds at pointer `x` on a progress line from `left` to `right`.
 fn seek_target(x: f32, left: f32, right: f32, duration: f64) -> f64 {
     if right <= left || duration <= 0.0 || !duration.is_finite() {
@@ -95,11 +102,10 @@ impl YTDugem {
     /// Draws the bar over the bottom of `page`. `shown` is the Now Playing sheet's slide (0 to
     /// 1): the bar fades and drops away as the sheet comes up.
     pub(super) fn floating_bar(&mut self, ui: &mut egui::Ui, page: Rect, shown: f32) {
-        let visible = 1.0 - shown;
-        if visible <= 0.0 || page.width() < 2.0 * SIDE_MARGIN + 100.0 {
+        let Some(bar) = placed_bar(page, shown) else {
             return;
-        }
-        let bar = bar_rect(page).translate(Vec2::new(0.0, shown * RESERVED));
+        };
+        let visible = 1.0 - shown;
         let mut ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(bar)
@@ -108,7 +114,10 @@ impl YTDugem {
         ui.set_clip_rect(page);
         ui.set_opacity(visible);
         let radius = HEIGHT / 2.0;
-        if glass(&ui) {
+        if glass(&ui) && self.glass.is_some() {
+            // Blurs and refracts the page, rendered off screen by `page_under_glass`.
+            egui_glass::paint_glass(&ui, bar, &live_glass::BAR);
+        } else if glass(&ui) {
             glass_slab(ui.painter(), bar, radius, 228);
         } else {
             ui.painter().add(

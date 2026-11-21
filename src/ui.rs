@@ -27,6 +27,7 @@ mod artist;
 mod explore;
 mod floating_bar;
 mod library_view;
+mod live_glass;
 mod playlist_files;
 mod pull_refresh;
 mod search_box;
@@ -270,11 +271,13 @@ pub struct YTDugem {
     follow_lyrics: bool,
     active_lyric: Option<usize>,
     cover: Option<egui::TextureHandle>,
-    backdrop: Option<egui::TextureHandle>,
+    backdrop: Option<live_glass::Backdrop>,
     /// The previous track's backdrop, kept on screen until the new one has faded in over it.
-    backdrop_prev: Option<egui::TextureHandle>,
+    backdrop_prev: Option<live_glass::Backdrop>,
     /// When the backdrop crossfade started; `None` while the next artwork is still loading.
     backdrop_fade: Option<Instant>,
+    /// Liquid Glass's live backdrop; `None` without a wgpu renderer.
+    glass: Option<live_glass::GlassGpu>,
     import_path: String,
     download_path: String,
     sleep_until: Option<Instant>,
@@ -395,11 +398,12 @@ impl YTDugem {
         }
         self
     }
-    /// `--screenshot-player`: open Now Playing on the most recent history track, for UI checks.
-    pub fn with_player_open(mut self, open: bool) -> Self {
-        if let Some(t) = self.library.history.first().cloned().filter(|_| open) {
+    /// `--screenshot-player`: open Now Playing on the most recent history track, and
+    /// `--screenshot-playing`: just play it, under the player bar. For UI checks.
+    pub fn with_player_open(mut self, play: bool, open: bool) -> Self {
+        if let Some(t) = self.library.history.first().cloned().filter(|_| play) {
             self.now_origin = "History".into();
-            self.expanded = true;
+            self.expanded = open;
             self.play(t);
         }
         self
@@ -500,6 +504,7 @@ impl YTDugem {
             app.tray = crate::tray::Tray::new(&cc.egui_ctx);
             app.hwnd = hwnd;
         }
+        app.glass = cc.wgpu_render_state.as_ref().map(live_glass::GlassGpu::new);
         if app.account.is_some() {
             // The saved session is shown at once and checked with YouTube in the background;
             // one YouTube retired is read again from its browser or ends (Meiro `renewSession`).
@@ -585,6 +590,7 @@ impl YTDugem {
             backdrop: None,
             backdrop_prev: None,
             backdrop_fade: None,
+            glass: None,
             import_path: String::new(),
             download_path,
             sleep_until: None,
@@ -4224,11 +4230,14 @@ impl YTDugem {
                             ..egui::TextureOptions::LINEAR
                         },
                     ));
-                    self.backdrop = Some(ctx.load_texture(
-                        format!("back:{key}"),
-                        back,
-                        egui::TextureOptions::LINEAR,
-                    ));
+                    self.backdrop = Some(live_glass::Backdrop {
+                        native: self.glass.as_ref().map(|g| g.upload(&back)),
+                        handle: ctx.load_texture(
+                            format!("back:{key}"),
+                            back,
+                            egui::TextureOptions::LINEAR,
+                        ),
+                    });
                     self.backdrop_fade = Some(Instant::now());
                 }
                 // No artwork for this track: fade the previous backdrop out instead of keeping it.
@@ -4448,7 +4457,7 @@ impl YTDugem {
             .backdrop
             .as_ref()
             .or(self.backdrop_prev.as_ref())
-            .map_or(Vec2::splat(1.0), |t| t.size_vec2());
+            .map_or(Vec2::splat(1.0), |b| b.handle.size_vec2());
         let coverage = self.paint_backdrop(painter, rect, cover_uv(size, rect.size()), eased);
         painter.rect_filled(
             rect,
@@ -5776,11 +5785,11 @@ impl eframe::App for YTDugem {
         }
         self.tray_step(ctx);
         self.stats_save_step();
-        forget_idle_images(ctx);
+        forget_idle_images(ctx, self.glass.as_ref().and_then(|g| g.twin()));
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         self.stats_on_exit();
     }
 
@@ -5793,6 +5802,9 @@ impl YTDugem {
     /// One frame of the window; `eframe::App::ui` without the frame, so tests can drive it.
     fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
+        if let Some(gpu) = &self.glass {
+            gpu.free_retired();
+        }
         let typing = ctx.egui_wants_keyboard_input();
         // While the palette is open it owns Escape (its modal closes on it), and so does the
         // focused search box (it closes its list, then leaves the box).
@@ -5884,7 +5896,6 @@ impl YTDugem {
         );
         // The page stays drawn while the sheet is dragged down, so it shows behind it.
         if shown < 1.0 || self.sheet_drag > 0.0 {
-            self.ambient_backdrop(ui);
             if self.account.is_some()
                 && self.account_playlists.is_none()
                 && !self.account_playlists_loading
@@ -5892,54 +5903,8 @@ impl YTDugem {
                 // Song menus offer them under "Add to playlist".
                 self.load_account_playlists();
             }
-            egui::Panel::top("topbar")
-                .exact_size(TOP_BAR_HEIGHT)
-                .frame(
-                    egui::Frame::new()
-                        .fill(surface(ui, SIDE, 0))
-                        .inner_margin(0.0),
-                )
-                .show(ui, |ui| {
-                    self.topbar(ui, ui.max_rect());
-                });
-            egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::new()
-                        .fill(surface(ui, BG, 205))
-                        .inner_margin(egui::Margin::same(28)),
-                )
-                .show(ui, |ui| {
-                    // The whole panel, margin included: the player bar is placed in it.
-                    let page = ui.max_rect().expand(28.0);
-                    if self.page == Page::Home {
-                        self.feed_home_pull(ui, page);
-                    }
-                    // One scroll position per page: opening Settings from a scrolled Home page
-                    // used to land halfway down it.
-                    let scrolled = egui::ScrollArea::vertical()
-                        .id_salt(("page", self.page.clone(), self.explore_scroll_key()))
-                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                        .show(ui, |ui| {
-                            // Centred, at most CONTENT_WIDTH wide.
-                            let width = ui.available_width().min(CONTENT_WIDTH);
-                            let pad = (ui.available_width() - width) / 2.0;
-                            ui.horizontal_top(|ui| {
-                                ui.add_space(pad);
-                                ui.vertical(|ui| {
-                                    ui.set_width(width);
-                                    if !self.message.is_empty() {
-                                        ui.label(RichText::new(&self.message).color(MUTED));
-                                    }
-                                    self.content(ui);
-                                    // Room to scroll the last row out from under the player bar.
-                                    ui.add_space(floating_bar::RESERVED);
-                                });
-                            });
-                        });
-                    // A touchpad's rubber band pulls the offset below zero: still the top.
-                    self.page_at_top = scrolled.state.unclamped_offset().y <= 0.5;
-                    self.floating_bar(ui, page, shown);
-                });
+            let page = self.page_under_glass(ui, shown);
+            self.floating_bar(ui, page, shown);
         }
         if shown > 0.0 {
             self.expanded_view(ctx, shown);
@@ -5954,6 +5919,65 @@ impl YTDugem {
         self.update_dialog(ctx);
         self.screenshot_step(ctx);
         self.toasts.show(ctx);
+    }
+
+    /// The ambient backdrop, the top bar and the page; returns the page's rect, margin included,
+    /// for the player bar that floats over it.
+    fn page_layers(&mut self, ui: &mut egui::Ui) -> Rect {
+        self.ambient_backdrop(ui);
+        egui::Panel::top("topbar")
+            .exact_size(TOP_BAR_HEIGHT)
+            .frame(
+                egui::Frame::new()
+                    .fill(surface(ui, SIDE, 0))
+                    .inner_margin(0.0),
+            )
+            .show(ui, |ui| {
+                // The glass never samples the top bar; its space is all the twin pass needs.
+                if !live_glass::twin_pass(ui.ctx()) {
+                    self.topbar(ui, ui.max_rect());
+                }
+            });
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(surface(ui, BG, 205))
+                    .inner_margin(egui::Margin::same(28)),
+            )
+            .show(ui, |ui| {
+                // The whole panel, margin included: the player bar is placed in it.
+                let page = ui.max_rect().expand(28.0);
+                // The pull spring advances once a frame, in the window's pass.
+                if self.page == Page::Home && !live_glass::twin_pass(ui.ctx()) {
+                    self.feed_home_pull(ui, page);
+                }
+                // One scroll position per page: opening Settings from a scrolled Home page
+                // used to land halfway down it.
+                let scrolled = egui::ScrollArea::vertical()
+                    .id_salt(("page", self.page.clone(), self.explore_scroll_key()))
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(ui, |ui| {
+                        // Centred, at most CONTENT_WIDTH wide.
+                        let width = ui.available_width().min(CONTENT_WIDTH);
+                        let pad = (ui.available_width() - width) / 2.0;
+                        ui.horizontal_top(|ui| {
+                            ui.add_space(pad);
+                            ui.vertical(|ui| {
+                                ui.set_width(width);
+                                if !self.message.is_empty() {
+                                    ui.label(RichText::new(&self.message).color(MUTED));
+                                }
+                                self.content(ui);
+                                // Room to scroll the last row out from under the player bar.
+                                ui.add_space(floating_bar::RESERVED);
+                            });
+                        });
+                    });
+                // A touchpad's rubber band pulls the offset below zero: still the top.
+                self.page_at_top = scrolled.state.unclamped_offset().y <= 0.5;
+                page
+            })
+            .inner
     }
 }
 
@@ -6307,7 +6331,8 @@ fn draw_image(ui: &mut egui::Ui, url: &str, r: Rect, texture: Option<&egui::Text
     if !ui.is_rect_visible(r) {
         return;
     }
-    if let Some(tex) = texture {
+    // The window's own textures are unknown to Liquid Glass's twin pass; it loads `url` instead.
+    if let Some(tex) = texture.filter(|_| !live_glass::twin_pass(ui.ctx())) {
         egui::Image::new(tex)
             .fit_to_exact_size(r.size())
             .corner_radius(8.0)
@@ -6358,8 +6383,9 @@ fn web_image(uri: String) -> egui::Image<'static> {
 
 /// Releases the download, pixels and texture of web pictures not drawn for `IMAGE_IDLE`,
 /// checking twice a minute. Pages left behind, and everything while the window sits in the
-/// tray, then stop holding memory; they load again when shown.
-fn forget_idle_images(ctx: &egui::Context) {
+/// tray, then stop holding memory; they load again when shown. Liquid Glass's `twin` keeps its
+/// own textures of them.
+fn forget_idle_images(ctx: &egui::Context, twin: Option<&egui::Context>) {
     let now = Instant::now();
     let stale = match DRAWN_IMAGES.lock() {
         Ok(mut drawn) if drawn.1.is_none_or(|at| now - at >= Duration::from_secs(30)) => {
@@ -6370,6 +6396,9 @@ fn forget_idle_images(ctx: &egui::Context) {
     };
     for uri in stale {
         ctx.forget_image(&uri);
+        if let Some(twin) = twin {
+            twin.forget_image(&uri);
+        }
     }
 }
 

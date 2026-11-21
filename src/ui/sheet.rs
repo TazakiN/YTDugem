@@ -366,11 +366,13 @@ impl YTDugem {
             } else {
                 1.0 - eased
             };
-            painter.image(prev.id(), rect, uv, Color32::WHITE.gamma_multiply(alpha));
+            let id = prev.id(painter.ctx());
+            painter.image(id, rect, uv, Color32::WHITE.gamma_multiply(alpha));
             coverage = alpha;
         }
         if let Some(back) = &self.backdrop {
-            painter.image(back.id(), rect, uv, Color32::WHITE.gamma_multiply(eased));
+            let id = back.id(painter.ctx());
+            painter.image(id, rect, uv, Color32::WHITE.gamma_multiply(eased));
             coverage = coverage.max(eased);
         }
         coverage

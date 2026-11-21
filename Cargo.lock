@@ -903,7 +903,6 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "egui_glow",
- "glow",
  "glutin",
  "glutin-winit",
  "image",
@@ -1041,6 +1040,18 @@ dependencies = [
  "itertools",
  "log",
  "profiling",
+]
+
+[[package]]
+name = "egui_glass"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2803a25dd7739bbcfdec6c6c9169ca416007dcbc602b35a4d1eb88e026fe1a0a"
+dependencies = [
+ "bytemuck",
+ "egui 0.37.0",
+ "egui-wgpu",
+ "wgpu",
 ]
 
 [[package]]
@@ -5137,6 +5148,7 @@ dependencies = [
  "egui-notify",
  "egui-phosphor",
  "egui_extras",
+ "egui_glass",
  "egui_kittest",
  "embed-resource",
  "hmac",

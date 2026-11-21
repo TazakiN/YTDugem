@@ -30,6 +30,7 @@ fn main() -> eframe::Result {
             .map_err(|e| eframe::Error::AppCreation(e.into()));
     }
     let open_player = args.iter().any(|s| s == "--screenshot-player");
+    let play = open_player || args.iter().any(|s| s == "--screenshot-playing");
     let open_artist = args
         .iter()
         .position(|s| s == "--screenshot-artist")
@@ -48,6 +49,10 @@ fn main() -> eframe::Result {
         // ponytail: WSLg's GPU/Wayland path can create an invisible window; use Mesa's CPU renderer.
         std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
         std::env::set_var("GALLIUM_DRIVER", "llvmpipe");
+        // wgpu tries Vulkan first; its GL backend is the one that honours the two above.
+        if std::env::var_os("WGPU_BACKEND").is_none() {
+            std::env::set_var("WGPU_BACKEND", "gl");
+        }
         if std::env::var_os("DISPLAY").is_some() {
             std::env::remove_var("WAYLAND_DISPLAY");
         }
@@ -81,6 +86,8 @@ fn main() -> eframe::Result {
     }
     let options = eframe::NativeOptions {
         viewport,
+        // Liquid Glass draws its live blur through egui_glass's wgpu paint callbacks.
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
     eframe::run_native(
@@ -90,7 +97,7 @@ fn main() -> eframe::Result {
             Ok(Box::new(
                 ui::YTDugem::new(cc)
                     .with_screenshot(screenshot)
-                    .with_player_open(open_player)
+                    .with_player_open(play, open_player)
                     .with_artist_open(open_artist)
                     .with_updated(after_update),
             ))
