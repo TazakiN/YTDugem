@@ -3,7 +3,5 @@
 /references/
 __pycache__/
 *.tmp
-# egui_kittest output of a failed or updated snapshot comparison
-tests/snapshots/*.new.png
-tests/snapshots/*.diff.png
-tests/snapshots/*.old.png
+# egui_kittest reference images; they depend on the GPU that drew them, so they stay local
+tests/snapshots/

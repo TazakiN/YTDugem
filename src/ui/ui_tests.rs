@@ -1,5 +1,5 @@
 //! Headless screens: the app drawn from fixture data (no network, mpv or data folder) and
-//! compared with the reference images in `tests/snapshots`.
+//! compared with the reference images in `tests/snapshots`, which git ignores.
 //!
 //! The references come from this project's Windows development machine. Another GPU or a
 //! software renderer anti-aliases differently, so CI (`CI` set) draws every screen, which still
