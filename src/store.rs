@@ -659,6 +659,31 @@ mod tests {
     }
 
     #[test]
+    fn backup_holds_the_previous_save() {
+        let dir =
+            std::env::temp_dir().join(format!("ytdugem-store-backup-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.json");
+        let first = Library {
+            volume: 10.0,
+            ..Default::default()
+        };
+        first.save(&path).unwrap();
+        let a = std::fs::read(&path).unwrap();
+        let second = Library {
+            volume: 20.0,
+            ..Default::default()
+        };
+        second.save(&path).unwrap();
+        let b = std::fs::read(&path).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(std::fs::read(path.with_extension("json.bak")).unwrap(), a);
+        assert_eq!(Library::load(&path).unwrap().volume, 20.0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn lyrics_preferences_roundtrip_and_old_libraries_get_defaults() {
         let old: Library = serde_json::from_str(r#"{"volume":70.0}"#).unwrap();
         assert!(old.lyrics_enabled);

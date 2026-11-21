@@ -452,14 +452,7 @@ impl YTDugem {
     }
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let path = store::data_path();
-        let (library, mut message, read_only) = match Library::load(&path) {
-            Ok(l) => (l, String::new(), false),
-            Err(e) => (
-                Library::default(),
-                format!("{e:#}. Saving disabled to preserve your library."),
-                true,
-            ),
-        };
+        let (library, mut message, read_only) = open_library(&path);
         configure_style(&cc.egui_ctx, library.theme);
         let stats = stats_page::Stats::load(&path);
         if let Some(e) = stats.error() {
@@ -5330,6 +5323,19 @@ mod fade_tests {
     }
 }
 
+/// The library at `path`, the message to show, and whether saving must stay off. A library
+/// that exists but cannot be read is kept as it is on disk: the app starts empty and read-only.
+fn open_library(path: &Path) -> (Library, String, bool) {
+    match Library::load(path) {
+        Ok(l) => (l, String::new(), false),
+        Err(e) => (
+            Library::default(),
+            format!("{e:#}. Saving disabled to preserve your library."),
+            true,
+        ),
+    }
+}
+
 /// Add imported `tracks` to `local`. A file already there (matched by path, ignoring the Windows
 /// `\\?\` prefix older imports stored) is refreshed in place, keeping its artwork if the new
 /// entry has none, so re-importing repairs stale titles and artists.
@@ -7067,5 +7073,67 @@ mod font_baseline_tests {
                 "{chr:?} baseline {y} vs Latin {latin}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod library_safety_tests {
+    use super::*;
+
+    /// A fresh temp dir for one test and the `library.json` path inside it.
+    fn temp_library(name: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "ytdugem-library-safety-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.json");
+        (dir, path)
+    }
+
+    #[test]
+    fn a_corrupt_library_opens_read_only_and_untouched() {
+        let (dir, path) = temp_library("a_corrupt_library_opens_read_only_and_untouched");
+        std::fs::write(&path, b"{ not json").unwrap();
+        let (lib, message, read_only) = open_library(&path);
+        assert!(read_only);
+        assert!(message.contains("Saving disabled"), "{message}");
+        assert!(lib.history.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_read_only_app_never_writes_the_library() {
+        let (dir, path) = temp_library("a_read_only_app_never_writes_the_library");
+        std::fs::write(&path, b"{ not json").unwrap();
+        let mut app = YTDugem::with_parts(
+            Library::default(),
+            path.clone(),
+            true,
+            String::new(),
+            None,
+            stats_page::Stats::load(&path),
+            Integrations::new(),
+        );
+        app.library.liked.push(Track {
+            id: "x".into(),
+            ..Default::default()
+        });
+        app.save();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
+        assert!(!path.with_extension("json.bak").exists());
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_library_opens_writable() {
+        let (dir, path) = temp_library("a_missing_library_opens_writable");
+        let (_, message, read_only) = open_library(&path);
+        assert!(!read_only);
+        assert!(message.is_empty(), "{message}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
