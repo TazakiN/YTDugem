@@ -30,6 +30,7 @@ fn main() -> eframe::Result {
             .map_err(|e| eframe::Error::AppCreation(e.into()));
     }
     let open_player = args.iter().any(|s| s == "--screenshot-player");
+    let play = open_player || args.iter().any(|s| s == "--screenshot-playing");
     let open_artist = args
         .iter()
         .position(|s| s == "--screenshot-artist")
@@ -96,7 +97,7 @@ fn main() -> eframe::Result {
             Ok(Box::new(
                 ui::YTDugem::new(cc)
                     .with_screenshot(screenshot)
-                    .with_player_open(open_player)
+                    .with_player_open(play, open_player)
                     .with_artist_open(open_artist)
                     .with_updated(after_update),
             ))

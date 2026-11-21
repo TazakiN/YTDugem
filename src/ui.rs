@@ -398,11 +398,12 @@ impl YTDugem {
         }
         self
     }
-    /// `--screenshot-player`: open Now Playing on the most recent history track, for UI checks.
-    pub fn with_player_open(mut self, open: bool) -> Self {
-        if let Some(t) = self.library.history.first().cloned().filter(|_| open) {
+    /// `--screenshot-player`: open Now Playing on the most recent history track, and
+    /// `--screenshot-playing`: just play it, under the player bar. For UI checks.
+    pub fn with_player_open(mut self, play: bool, open: bool) -> Self {
+        if let Some(t) = self.library.history.first().cloned().filter(|_| play) {
             self.now_origin = "History".into();
-            self.expanded = true;
+            self.expanded = open;
             self.play(t);
         }
         self
