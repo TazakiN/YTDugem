@@ -103,6 +103,9 @@ fn owning_tab(page: &Page) -> Option<Page> {
 /// Recently played songs on Home, at most.
 const RECENTS: usize = 12;
 
+/// Rapid changes (a slider drag, a track change's two saves) become one write.
+const LIBRARY_SAVE_AFTER: Duration = Duration::from_secs(1);
+
 /// Columns of the Home Recents grid in a page `width` wide: one per 320 px, up to three.
 fn recent_columns(width: f32) -> usize {
     ((width / 320.0) as usize).clamp(1, 3)
@@ -144,6 +147,8 @@ enum Event {
     SearchPreview(u64, search_box::SearchPreview),
     /// Writing `stats.json` failed in the background.
     StatsSaveFailed(String),
+    /// Writing `library.json` failed in the background.
+    LibrarySaveFailed(String),
     Translated(u64, Result<Translation, String>),
     Romanized(u64, String, Result<Romanization, String>),
     SongInfo(u64, String, Result<services::SongInfo, String>),
@@ -216,6 +221,14 @@ pub struct YTDugem {
     library: Library,
     path: PathBuf,
     read_only: bool,
+    /// Bumped by every library change; the writer skips a snapshot older than what it wrote.
+    library_revision: u64,
+    /// Set by the first unsaved change; the library is written `LIBRARY_SAVE_AFTER` later.
+    library_unsaved_since: Option<Instant>,
+    /// The revision on disk. Shared with background writers, which run one at a time.
+    library_written: Arc<Mutex<u64>>,
+    /// A background write failed: retry on exit even without another change.
+    library_save_failed: bool,
     player: Player,
     integrations: Integrations,
     status: PlayerStatus,
@@ -529,6 +542,10 @@ impl YTDugem {
             library,
             path,
             read_only,
+            library_revision: 0,
+            library_unsaved_since: None,
+            library_written: Arc::default(),
+            library_save_failed: false,
             player: Player::new(),
             integrations,
             status: PlayerStatus::default(),
@@ -661,11 +678,62 @@ impl YTDugem {
             search_box: Default::default(),
         }
     }
+    /// Marks the library changed; `library_save_step` writes it within `LIBRARY_SAVE_AFTER`.
     fn save(&mut self) {
         if !self.read_only {
-            if let Err(e) = self.library.save(&self.path) {
+            self.library_revision += 1;
+            self.library_unsaved_since.get_or_insert_with(Instant::now);
+        }
+    }
+    fn library_save_step(&mut self) {
+        if self
+            .library_unsaved_since
+            .is_some_and(|t| t.elapsed() >= LIBRARY_SAVE_AFTER)
+        {
+            self.write_library(false);
+        }
+    }
+    /// Writes the library: in the background, or now (`wait`, on exit).
+    fn write_library(&mut self, wait: bool) {
+        let pending = self.library_unsaved_since.take().is_some();
+        let retry = std::mem::take(&mut self.library_save_failed);
+        if self.read_only || !(pending || retry) {
+            return;
+        }
+        let bytes = match serde_json::to_vec_pretty(&self.library) {
+            Ok(b) => b,
+            Err(e) => {
                 self.message = format!("Could not save library: {e:#}");
+                return;
             }
+        };
+        let (path, written, revision) = (
+            self.path.clone(),
+            self.library_written.clone(),
+            self.library_revision,
+        );
+        let job = move || -> anyhow::Result<()> {
+            let mut last = written
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Library saver failed"))?;
+            if *last >= revision {
+                return Ok(());
+            }
+            store::save_bytes(&path, &bytes)?;
+            *last = revision;
+            Ok(())
+        };
+        if wait {
+            if let Err(e) = job() {
+                eprintln!("YTDugem: could not save library: {e:#}");
+            }
+        } else {
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = job() {
+                    let _ = tx.send(Event::LibrarySaveFailed(err(e)));
+                }
+            });
         }
     }
     fn apply_audio_settings(&mut self) {
@@ -3992,6 +4060,10 @@ impl YTDugem {
                 Event::StatsSaveFailed(e) => {
                     self.toast_error(format!("Could not save listening stats: {e}"))
                 }
+                Event::LibrarySaveFailed(e) => {
+                    self.library_save_failed = true;
+                    self.message = format!("Could not save library: {e}");
+                }
                 Event::Suggestions(id, query, r)
                     if id == self.palette_request && query == self.palette_query.trim() =>
                 {
@@ -5791,11 +5863,13 @@ impl eframe::App for YTDugem {
         }
         self.tray_step(ctx);
         self.stats_save_step();
+        self.library_save_step();
         forget_idle_images(ctx, self.glass.as_ref().and_then(|g| g.twin()));
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 
     fn on_exit(&mut self) {
+        self.write_library(true);
         self.stats_on_exit();
     }
 
@@ -7122,9 +7196,58 @@ mod library_safety_tests {
             ..Default::default()
         });
         app.save();
+        app.write_library(true);
         assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
         assert!(!path.with_extension("json.bak").exists());
         assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn writable_app(path: &Path) -> YTDugem {
+        YTDugem::with_parts(
+            Library::default(),
+            path.to_path_buf(),
+            false,
+            String::new(),
+            None,
+            stats_page::Stats::load(path),
+            Integrations::new(),
+        )
+    }
+
+    #[test]
+    fn rapid_changes_are_written_once_by_the_flush() {
+        let (dir, path) = temp_library("rapid_changes_are_written_once_by_the_flush");
+        let mut app = writable_app(&path);
+        for i in 0..50 {
+            app.library.volume = i as f64;
+            app.save();
+        }
+        assert!(!path.exists(), "a change must not be written synchronously");
+        app.write_library(true);
+        assert_eq!(Library::load(&path).unwrap().volume, 49.0);
+        assert!(!path.with_extension("json.bak").exists(), "written once");
+        app.write_library(true);
+        assert!(
+            !path.with_extension("json.bak").exists(),
+            "a flush with nothing pending must not write"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_older_snapshot_never_replaces_a_newer_one() {
+        let (dir, path) = temp_library("an_older_snapshot_never_replaces_a_newer_one");
+        let mut app = writable_app(&path);
+        app.library.volume = 20.0;
+        app.save();
+        app.save();
+        app.write_library(true);
+        app.library_revision = 1;
+        app.library.volume = 10.0;
+        app.library_unsaved_since = Some(Instant::now());
+        app.write_library(true);
+        assert_eq!(Library::load(&path).unwrap().volume, 20.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
