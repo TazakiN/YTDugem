@@ -216,8 +216,27 @@ fn extinf(info: &str) -> (f64, String, String) {
     }
 }
 
+/// A path that names another computer or a device: `\\host\share`, `//host/share`,
+/// `\\?\UNC\…`, `\\.\…`. Even checking whether one exists makes Windows connect to that host
+/// and offer the user's sign-in (NTLM), so a shared playlist must not cause it. A local drive
+/// in verbatim form (`\\?\C:\…`, as older imports stored paths) is not one.
+fn is_network_or_device(entry: &str) -> bool {
+    let entry = entry.replace('/', "\\");
+    let Some(rest) = entry.strip_prefix("\\\\") else {
+        return false;
+    };
+    match rest.strip_prefix("?\\") {
+        Some(verbatim) => {
+            let b = verbatim.as_bytes();
+            !(b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\')
+        }
+        None => true,
+    }
+}
+
 /// Read M3U/M3U8 text. Relative paths resolve against `base` (the playlist's folder); a local
 /// entry is kept only when `usable` accepts its path. Web entries must be YouTube video URLs.
+/// Network and device paths are skipped without being opened.
 /// Unusable, duplicate and excess entries are counted in `skipped`.
 pub fn parse_m3u(text: &str, base: Option<&Path>, usable: impl Fn(&Path) -> bool) -> Parsed {
     let mut parsed = Parsed::default();
@@ -249,6 +268,8 @@ pub fn parse_m3u(text: &str, base: Option<&Path>, usable: impl Fn(&Path) -> bool
                 id,
                 ..Default::default()
             })
+        } else if is_network_or_device(line) {
+            None
         } else {
             let path = PathBuf::from(line);
             let path = match base {
@@ -425,6 +446,41 @@ mod tests {
         assert_eq!(parsed.tracks[0].title, "Never Gonna");
         assert_eq!(parsed.tracks[0].artist, "Rick");
         assert_eq!(parsed.tracks[0].key(), "dQw4w9WgXcQ");
+    }
+
+    #[test]
+    fn network_and_device_paths_are_recognized() {
+        for entry in [
+            r"\\host\share\a.mp3",
+            "//host/share/a.mp3",
+            r"\\?\UNC\host\share\a.mp3",
+            r"\\.\pipe\x",
+            r"\\?\Volume{abc}\a.mp3",
+        ] {
+            assert!(is_network_or_device(entry), "{entry}");
+        }
+        for entry in [
+            r"C:\Music\a.mp3",
+            r"\\?\C:\Music\a.mp3",
+            r"\\?\d:\a.mp3",
+            "sub/song.mp3",
+            "/home/u/a.mp3",
+            r"..\a.mp3",
+        ] {
+            assert!(!is_network_or_device(entry), "{entry}");
+        }
+    }
+
+    #[test]
+    fn network_entries_are_skipped_without_being_opened() {
+        let text = "\\\\host\\share\\a.mp3\n//host/share/b.mp3\n\\\\?\\C:\\Music\\c.mp3\n";
+        let parsed = parse_m3u(text, None, |p| {
+            assert!(!p.to_string_lossy().contains("host"), "opened {p:?}");
+            true
+        });
+        assert_eq!(parsed.skipped, 2);
+        assert_eq!(parsed.tracks.len(), 1);
+        assert_eq!(parsed.tracks[0].source, r"\\?\C:\Music\c.mp3");
     }
 
     #[test]
