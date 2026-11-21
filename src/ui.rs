@@ -1204,6 +1204,16 @@ impl YTDugem {
         self.bulk_request += 1;
         self.bulk_loading = false;
     }
+    /// A translation still running is for the previous language: drop it, then ask again.
+    fn set_translation_language(&mut self, language: String) {
+        self.library.translation_language = language;
+        self.save();
+        self.translation_request += 1;
+        self.translating = false;
+        if self.lyrics_mode == LyricsMode::Translated {
+            self.request_translation();
+        }
+    }
     fn sync_account(&mut self) {
         self.invalidate_account_results();
         self.account = auth::current_account();
@@ -2942,11 +2952,7 @@ impl YTDugem {
                                     }
                                 });
                             if chosen != current {
-                                self.library.translation_language = chosen;
-                                self.save();
-                                if self.lyrics_mode == LyricsMode::Translated {
-                                    self.request_translation();
-                                }
+                                self.set_translation_language(chosen);
                             }
                         },
                     );
