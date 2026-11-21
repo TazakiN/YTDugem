@@ -412,6 +412,24 @@ pub fn data_path() -> PathBuf {
         .join("library.json")
 }
 
+/// Writes serialized library bytes the way `Library::save` always has: a synced temp file, the
+/// previous file kept as `.bak`, then an atomic rename. Safe to call from a worker thread.
+pub fn save_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension("json.tmp");
+    let mut file = std::fs::File::create(&temp)?;
+    use std::io::Write;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    // Keep a last-known-good copy; rename replaces files atomically on Windows too.
+    if path.exists() {
+        std::fs::copy(path, path.with_extension("json.bak"))?;
+    }
+    std::fs::rename(temp, path).context("Cannot commit library")
+}
+
 pub fn lock(path: &Path) -> Result<std::fs::File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -465,20 +483,10 @@ impl Library {
         Ok(value)
     }
 
+    /// The app writes through `save_bytes` off the GUI thread; tests save directly.
+    #[cfg(test)]
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temp = path.with_extension("json.tmp");
-        let mut file = std::fs::File::create(&temp)?;
-        use std::io::Write;
-        file.write_all(&serde_json::to_vec_pretty(self)?)?;
-        file.sync_all()?;
-        // Keep a last-known-good copy; rename replaces files atomically on Windows too.
-        if path.exists() {
-            std::fs::copy(path, path.with_extension("json.bak"))?;
-        }
-        std::fs::rename(temp, path).context("Cannot commit library")
+        save_bytes(path, &serde_json::to_vec_pretty(self)?)
     }
 
     pub fn remember(&mut self, track: &Track) {
