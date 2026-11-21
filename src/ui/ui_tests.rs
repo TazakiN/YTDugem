@@ -152,6 +152,9 @@ fn snapshot<S>(harness: &mut Harness<'_, S>, name: &str) {
 #[test]
 fn home_wide() {
     let mut h = harness(app(), 1440.0, 900.0);
+    // Hover a recents row: its highlight must frame the cover, not start at the cover's edge.
+    h.hover_at(egui::Pos2::new(700.0, 186.0));
+    h.run();
     snapshot(&mut h, "home_1440x900");
 }
 

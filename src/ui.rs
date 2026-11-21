@@ -4851,7 +4851,8 @@ impl YTDugem {
             );
             34.0
         } else {
-            0.0
+            // Inset like the cover's top and bottom, so the hover highlight frames it.
+            6.0
         };
         let art = Rect::from_min_size(rect.min + Vec2::new(offset, 5.0), Vec2::splat(56.0));
         draw_cover(ui, track, art, None);
