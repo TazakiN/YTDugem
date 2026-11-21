@@ -64,6 +64,7 @@ fn main() -> eframe::Result {
     let _instance =
         lock_instance(after_update).map_err(|e| eframe::Error::AppCreation(e.into()))?;
     update::cleanup();
+    auth::sweep_leftovers();
     let icon = image::load_from_memory(include_bytes!("../assets/icon.png"))
         .ok()
         .map(|image| {
