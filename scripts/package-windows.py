@@ -7,6 +7,7 @@ extractor. No machine-wide installation.
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -18,24 +19,29 @@ CACHE = ROOT / "target/windows-runtime"
 DIST = ROOT / "dist"
 TOOLS = DIST / "tools"
 EXECUTABLES = ("mpv.exe", "yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe", "deno.exe")
-ASSETS = {
-    "mpv": (
-        "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261021/mpv-x86_64-20261021-git-e471496c56.7z",
-        "4a355f3e89c83fabc730d33fb4e759dfec747806ed2287b61a90d1681b83e8d3",
-    ),
-    "ffmpeg": (
-        "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.7z",
-        "4705843ccaaf54257c16ad90f3e952ece33c17df964ecf7bfdbb0f49c7171077",
-    ),
-    "yt-dlp": (
-        "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.26/yt-dlp.exe",
-        "f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d",
-    ),
-    "deno": (
-        "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-pc-windows-msvc.zip",
-        "cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf",
-    ),
-}
+TOOLS_TABLE = Path(__file__).with_name("runtime-tools.json")
+
+
+def load_tools(path=TOOLS_TABLE):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def asset_url(entry):
+    return f"https://github.com/{entry['repo']}/releases/download/{entry['tag']}/{entry['asset']}"
+
+
+def source_lines(tools):
+    mpv = tools["mpv"]
+    mpv_commit = re.search(r"-git-([0-9a-f]+)\.", mpv["asset"]).group(1)
+    ffmpeg = tools["ffmpeg"]["tag"]
+    return (
+        f"mpv/FFmpeg build recipes and upstream source: https://github.com/{mpv['repo']}/tree/{mpv['tag']}\n"
+        f"mpv source: https://github.com/mpv-player/mpv/tree/{mpv_commit}\n"
+        f"FFmpeg source: https://github.com/FFmpeg/FFmpeg/tree/n{ffmpeg}\n"
+        f"FFmpeg Windows build: https://github.com/{tools['ffmpeg']['repo']}/releases/tag/{ffmpeg}\n"
+        f"yt-dlp source/license: https://github.com/{tools['yt-dlp']['repo']}/tree/{tools['yt-dlp']['tag']}\n"
+        f"Deno source/license: https://github.com/{tools['deno']['repo']}/tree/{tools['deno']['tag']}\n"
+    )
 
 
 def fetch(url, digest):
@@ -77,8 +83,10 @@ def main():
         raise RuntimeError("Build the Windows release executable first")
     CACHE.mkdir(parents=True, exist_ok=True)
     TOOLS.mkdir(parents=True, exist_ok=True)
+    tools = load_tools()
     manifest = {}
-    for name, (url, digest) in ASSETS.items():
+    for name, entry in tools.items():
+        url, digest = asset_url(entry), entry["sha256"]
         archive = fetch(url, digest)
         manifest[name] = {"url": url, "sha256": digest}
         if archive.suffix == ".exe":
@@ -114,12 +122,7 @@ def main():
         "Keep the tools folder beside YTDugem.exe. No PATH changes or admin installation needed.\n"
         "Audio and download tools are bundled; online playback still requires internet access.\n"
         "Runtime versions/checksums: runtime-sources.json. YTDugem source: source/.\n"
-        "mpv/FFmpeg build recipes and upstream source: https://github.com/shinchiro/mpv-winbuild-cmake/tree/20261021\n"
-        "mpv source: https://github.com/mpv-player/mpv/tree/e471496c56\n"
-        "FFmpeg source: https://github.com/FFmpeg/FFmpeg/tree/n9.0.2\n"
-        "FFmpeg Windows build: https://github.com/GyanD/codexffmpeg/releases/tag/9.0.2\n"
-        "yt-dlp source/license: https://github.com/yt-dlp/yt-dlp/tree/2026.10.26\n"
-        "Deno source/license: https://github.com/denoland/deno/tree/v2.9.8\n"
+        + source_lines(tools)
     )
     output = DIST / "YTDugem-windows-x86_64.zip"
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:

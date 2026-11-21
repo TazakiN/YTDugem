@@ -1,0 +1,43 @@
+name: Runtime tools
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Bump pinned runtime tools
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Bumps the bundled Windows runtime tools in \`scripts/runtime-tools.json\` to their latest upstream releases, with SHA-256 checked against the downloaded files."
+            echo
+            echo "The **Rust desktop** check packages the portable ZIP with these tools and runs the playback smoke test. Merging does not ship anything: users get the new tools with the next release."
+            echo
+            python3 scripts/update-runtime.py
+          } > "$RUNNER_TEMP/runtime-tools-body.md"
+      - name: Open or update the pull request
+        id: pr
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: runtime-tools/update
+          title: 'chore(deps): bump bundled runtime tools'
+          commit-message: 'chore(deps): bump bundled runtime tools'
+          body-path: ${{ runner.temp }}/runtime-tools-body.md
+          delete-branch: true
+      - name: Run the checks on the pull request branch
+        if: steps.pr.outputs.pull-request-operation == 'created' || steps.pr.outputs.pull-request-operation == 'updated'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run check.yml --ref runtime-tools/update --repo "$GITHUB_REPOSITORY"

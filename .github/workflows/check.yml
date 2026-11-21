@@ -33,6 +33,8 @@ jobs:
       - run: cargo build --release --locked
       - name: Check Windows packaging selection and extraction commands
         run: python scripts/test-package-windows.py
+      - name: Check runtime tool update selection
+        run: python scripts/test-update-runtime.py
       - name: Package Windows audio tools
         if: runner.os == 'Windows'
         env:
