@@ -4559,8 +4559,8 @@ impl YTDugem {
                         self.page = p;
                     }
                 }
-                let (logo, _) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
-                widgets::paint(ui.painter(), Icon::Logo, logo, ACCENT);
+                let (logo, _) = ui.allocate_exact_size(Vec2::splat(24.0), egui::Sense::hover());
+                widgets::app_icon(ui, logo);
                 ui.label(heading("YTDugem", 17.0));
                 ui.add_space(14.0);
                 let current = owning_tab(&self.page);
