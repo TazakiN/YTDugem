@@ -5780,7 +5780,7 @@ impl eframe::App for YTDugem {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         self.stats_on_exit();
     }
 
