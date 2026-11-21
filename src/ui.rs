@@ -227,8 +227,6 @@ pub struct YTDugem {
     library_unsaved_since: Option<Instant>,
     /// The revision on disk. Shared with background writers, which run one at a time.
     library_written: Arc<Mutex<u64>>,
-    /// A background write failed: retry on exit even without another change.
-    library_save_failed: bool,
     player: Player,
     integrations: Integrations,
     status: PlayerStatus,
@@ -545,7 +543,6 @@ impl YTDugem {
             library_revision: 0,
             library_unsaved_since: None,
             library_written: Arc::default(),
-            library_save_failed: false,
             player: Player::new(),
             integrations,
             status: PlayerStatus::default(),
@@ -693,11 +690,12 @@ impl YTDugem {
             self.write_library(false);
         }
     }
-    /// Writes the library: in the background, or now (`wait`, on exit).
+    /// Writes the library: in the background, or now (`wait`, on exit). Waiting writes whatever
+    /// revision is not on disk yet, so a change handed to a background writer that failed, or
+    /// that the exiting process would cut off, is not lost.
     fn write_library(&mut self, wait: bool) {
         let pending = self.library_unsaved_since.take().is_some();
-        let retry = std::mem::take(&mut self.library_save_failed);
-        if self.read_only || !(pending || retry) {
+        if self.read_only || !(pending || wait) {
             return;
         }
         let bytes = match serde_json::to_vec_pretty(&self.library) {
@@ -4061,8 +4059,7 @@ impl YTDugem {
                     self.toast_error(format!("Could not save listening stats: {e}"))
                 }
                 Event::LibrarySaveFailed(e) => {
-                    self.library_save_failed = true;
-                    self.message = format!("Could not save library: {e}");
+                    self.message = format!("Could not save library: {e}")
                 }
                 Event::Suggestions(id, query, r)
                     if id == self.palette_request && query == self.palette_query.trim() =>
@@ -7232,6 +7229,19 @@ mod library_safety_tests {
             !path.with_extension("json.bak").exists(),
             "a flush with nothing pending must not write"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_exit_flush_writes_a_change_no_writer_finished() {
+        let (dir, path) = temp_library("the_exit_flush_writes_a_change_no_writer_finished");
+        let mut app = writable_app(&path);
+        app.library.volume = 33.0;
+        app.save();
+        // Handed to a background writer that failed, or was still queued when the app closed.
+        app.library_unsaved_since = None;
+        app.write_library(true);
+        assert_eq!(Library::load(&path).unwrap().volume, 33.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
