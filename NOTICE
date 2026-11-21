@@ -37,7 +37,7 @@ exact versions and SHA-256 checksums are listed in runtime-sources.json.
   yt-dlp    https://github.com/yt-dlp/yt-dlp
   Deno      https://deno.com
 
-Pinned download URLs are defined in scripts/package-windows.py.
+Pinned download URLs are defined in scripts/runtime-tools.json.
 
 Trademarks
 ----------
