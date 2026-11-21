@@ -5884,7 +5884,6 @@ impl YTDugem {
         );
         // The page stays drawn while the sheet is dragged down, so it shows behind it.
         if shown < 1.0 || self.sheet_drag > 0.0 {
-            self.ambient_backdrop(ui);
             if self.account.is_some()
                 && self.account_playlists.is_none()
                 && !self.account_playlists_loading
@@ -5892,54 +5891,8 @@ impl YTDugem {
                 // Song menus offer them under "Add to playlist".
                 self.load_account_playlists();
             }
-            egui::Panel::top("topbar")
-                .exact_size(TOP_BAR_HEIGHT)
-                .frame(
-                    egui::Frame::new()
-                        .fill(surface(ui, SIDE, 0))
-                        .inner_margin(0.0),
-                )
-                .show(ui, |ui| {
-                    self.topbar(ui, ui.max_rect());
-                });
-            egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::new()
-                        .fill(surface(ui, BG, 205))
-                        .inner_margin(egui::Margin::same(28)),
-                )
-                .show(ui, |ui| {
-                    // The whole panel, margin included: the player bar is placed in it.
-                    let page = ui.max_rect().expand(28.0);
-                    if self.page == Page::Home {
-                        self.feed_home_pull(ui, page);
-                    }
-                    // One scroll position per page: opening Settings from a scrolled Home page
-                    // used to land halfway down it.
-                    let scrolled = egui::ScrollArea::vertical()
-                        .id_salt(("page", self.page.clone(), self.explore_scroll_key()))
-                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                        .show(ui, |ui| {
-                            // Centred, at most CONTENT_WIDTH wide.
-                            let width = ui.available_width().min(CONTENT_WIDTH);
-                            let pad = (ui.available_width() - width) / 2.0;
-                            ui.horizontal_top(|ui| {
-                                ui.add_space(pad);
-                                ui.vertical(|ui| {
-                                    ui.set_width(width);
-                                    if !self.message.is_empty() {
-                                        ui.label(RichText::new(&self.message).color(MUTED));
-                                    }
-                                    self.content(ui);
-                                    // Room to scroll the last row out from under the player bar.
-                                    ui.add_space(floating_bar::RESERVED);
-                                });
-                            });
-                        });
-                    // A touchpad's rubber band pulls the offset below zero: still the top.
-                    self.page_at_top = scrolled.state.unclamped_offset().y <= 0.5;
-                    self.floating_bar(ui, page, shown);
-                });
+            let page = self.page_layers(ui);
+            self.floating_bar(ui, page, shown);
         }
         if shown > 0.0 {
             self.expanded_view(ctx, shown);
@@ -5954,6 +5907,61 @@ impl YTDugem {
         self.update_dialog(ctx);
         self.screenshot_step(ctx);
         self.toasts.show(ctx);
+    }
+
+    /// The ambient backdrop, the top bar and the page; returns the page's rect, margin included,
+    /// for the player bar that floats over it.
+    fn page_layers(&mut self, ui: &mut egui::Ui) -> Rect {
+        self.ambient_backdrop(ui);
+        egui::Panel::top("topbar")
+            .exact_size(TOP_BAR_HEIGHT)
+            .frame(
+                egui::Frame::new()
+                    .fill(surface(ui, SIDE, 0))
+                    .inner_margin(0.0),
+            )
+            .show(ui, |ui| {
+                self.topbar(ui, ui.max_rect());
+            });
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(surface(ui, BG, 205))
+                    .inner_margin(egui::Margin::same(28)),
+            )
+            .show(ui, |ui| {
+                // The whole panel, margin included: the player bar is placed in it.
+                let page = ui.max_rect().expand(28.0);
+                if self.page == Page::Home {
+                    self.feed_home_pull(ui, page);
+                }
+                // One scroll position per page: opening Settings from a scrolled Home page
+                // used to land halfway down it.
+                let scrolled = egui::ScrollArea::vertical()
+                    .id_salt(("page", self.page.clone(), self.explore_scroll_key()))
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(ui, |ui| {
+                        // Centred, at most CONTENT_WIDTH wide.
+                        let width = ui.available_width().min(CONTENT_WIDTH);
+                        let pad = (ui.available_width() - width) / 2.0;
+                        ui.horizontal_top(|ui| {
+                            ui.add_space(pad);
+                            ui.vertical(|ui| {
+                                ui.set_width(width);
+                                if !self.message.is_empty() {
+                                    ui.label(RichText::new(&self.message).color(MUTED));
+                                }
+                                self.content(ui);
+                                // Room to scroll the last row out from under the player bar.
+                                ui.add_space(floating_bar::RESERVED);
+                            });
+                        });
+                    });
+                // A touchpad's rubber band pulls the offset below zero: still the top.
+                self.page_at_top = scrolled.state.unclamped_offset().y <= 0.5;
+                page
+            })
+            .inner
     }
 }
 
