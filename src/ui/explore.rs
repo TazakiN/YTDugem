@@ -435,11 +435,11 @@ fn mood_tile(ui: &mut egui::Ui, item: &MoodGenre, size: Vec2) -> egui::Response 
             544
         };
         // egui has no duotone filter; multiplying by the highlight tints the cover the same way.
-        web_image(artwork_at(url, px))
+        let image = web_image(artwork_at(url, px))
             .uv(cover_uv(art.size()))
             .tint(tone.highlight)
-            .corner_radius(corners)
-            .paint_at(ui, art);
+            .corner_radius(corners);
+        live_glass::paint_picture(ui, image, art);
     }
     if response.hovered() {
         painter.rect_filled(rect, MOOD_RADIUS, Color32::from_black_alpha(40));

@@ -27,6 +27,7 @@ mod artist;
 mod explore;
 mod floating_bar;
 mod library_view;
+mod live_glass;
 mod playlist_files;
 mod pull_refresh;
 mod search_box;
@@ -270,11 +271,13 @@ pub struct YTDugem {
     follow_lyrics: bool,
     active_lyric: Option<usize>,
     cover: Option<egui::TextureHandle>,
-    backdrop: Option<egui::TextureHandle>,
+    backdrop: Option<live_glass::Backdrop>,
     /// The previous track's backdrop, kept on screen until the new one has faded in over it.
-    backdrop_prev: Option<egui::TextureHandle>,
+    backdrop_prev: Option<live_glass::Backdrop>,
     /// When the backdrop crossfade started; `None` while the next artwork is still loading.
     backdrop_fade: Option<Instant>,
+    /// Liquid Glass's live backdrop; `None` without a wgpu renderer.
+    glass: Option<live_glass::GlassGpu>,
     import_path: String,
     download_path: String,
     sleep_until: Option<Instant>,
@@ -500,6 +503,7 @@ impl YTDugem {
             app.tray = crate::tray::Tray::new(&cc.egui_ctx);
             app.hwnd = hwnd;
         }
+        app.glass = cc.wgpu_render_state.as_ref().map(live_glass::GlassGpu::new);
         if app.account.is_some() {
             // The saved session is shown at once and checked with YouTube in the background;
             // one YouTube retired is read again from its browser or ends (Meiro `renewSession`).
@@ -585,6 +589,7 @@ impl YTDugem {
             backdrop: None,
             backdrop_prev: None,
             backdrop_fade: None,
+            glass: None,
             import_path: String::new(),
             download_path,
             sleep_until: None,
@@ -4224,11 +4229,14 @@ impl YTDugem {
                             ..egui::TextureOptions::LINEAR
                         },
                     ));
-                    self.backdrop = Some(ctx.load_texture(
-                        format!("back:{key}"),
-                        back,
-                        egui::TextureOptions::LINEAR,
-                    ));
+                    self.backdrop = Some(live_glass::Backdrop {
+                        native: self.glass.as_ref().map(|g| g.upload(&back)),
+                        handle: ctx.load_texture(
+                            format!("back:{key}"),
+                            back,
+                            egui::TextureOptions::LINEAR,
+                        ),
+                    });
                     self.backdrop_fade = Some(Instant::now());
                 }
                 // No artwork for this track: fade the previous backdrop out instead of keeping it.
@@ -4448,7 +4456,7 @@ impl YTDugem {
             .backdrop
             .as_ref()
             .or(self.backdrop_prev.as_ref())
-            .map_or(Vec2::splat(1.0), |t| t.size_vec2());
+            .map_or(Vec2::splat(1.0), |b| b.handle.size_vec2());
         let coverage = self.paint_backdrop(painter, rect, cover_uv(size, rect.size()), eased);
         painter.rect_filled(
             rect,
@@ -5721,10 +5729,10 @@ fn dialog_frame(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 fn avatar(ui: &egui::Ui, url: &str, name: &str, rect: Rect) {
     let radius = rect.width() / 2.0;
     if url.starts_with("https://") {
-        web_image(url.to_owned())
+        let image = web_image(url.to_owned())
             .fit_to_exact_size(rect.size())
-            .corner_radius(radius)
-            .paint_at(ui, rect);
+            .corner_radius(radius);
+        live_glass::paint_picture(ui, image, rect);
         return;
     }
     ui.painter()
@@ -5793,6 +5801,9 @@ impl YTDugem {
     /// One frame of the window; `eframe::App::ui` without the frame, so tests can drive it.
     fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
+        if let Some(gpu) = &self.glass {
+            gpu.free_retired();
+        }
         let typing = ctx.egui_wants_keyboard_input();
         // While the palette is open it owns Escape (its modal closes on it), and so does the
         // focused search box (it closes its list, then leaves the box).
@@ -5891,7 +5902,7 @@ impl YTDugem {
                 // Song menus offer them under "Add to playlist".
                 self.load_account_playlists();
             }
-            let page = self.page_layers(ui);
+            let page = self.page_under_glass(ui, shown);
             self.floating_bar(ui, page, shown);
         }
         if shown > 0.0 {
@@ -5921,7 +5932,10 @@ impl YTDugem {
                     .inner_margin(0.0),
             )
             .show(ui, |ui| {
-                self.topbar(ui, ui.max_rect());
+                // The glass never samples the top bar; its space is all the twin pass needs.
+                if !live_glass::twin_pass(ui.ctx()) {
+                    self.topbar(ui, ui.max_rect());
+                }
             });
         egui::CentralPanel::default()
             .frame(
@@ -5932,7 +5946,8 @@ impl YTDugem {
             .show(ui, |ui| {
                 // The whole panel, margin included: the player bar is placed in it.
                 let page = ui.max_rect().expand(28.0);
-                if self.page == Page::Home {
+                // The pull spring advances once a frame, in the window's pass.
+                if self.page == Page::Home && !live_glass::twin_pass(ui.ctx()) {
                     self.feed_home_pull(ui, page);
                 }
                 // One scroll position per page: opening Settings from a scrolled Home page
@@ -6316,10 +6331,10 @@ fn draw_image(ui: &mut egui::Ui, url: &str, r: Rect, texture: Option<&egui::Text
         return;
     }
     if let Some(tex) = texture {
-        egui::Image::new(tex)
+        let image = egui::Image::new(tex)
             .fit_to_exact_size(r.size())
-            .corner_radius(8.0)
-            .paint_at(ui, r);
+            .corner_radius(8.0);
+        live_glass::paint_picture(ui, image, r);
     } else if url.starts_with("https://") {
         // A few shared buckets so rows and cards reuse one cached download each.
         let px = r.width().max(r.height()) * ui.ctx().pixels_per_point();
@@ -6330,10 +6345,10 @@ fn draw_image(ui: &mut egui::Ui, url: &str, r: Rect, texture: Option<&egui::Text
         } else {
             544
         };
-        web_image(artwork_at(url, px))
+        let image = web_image(artwork_at(url, px))
             .fit_to_exact_size(r.size())
-            .corner_radius(8.0)
-            .paint_at(ui, r);
+            .corner_radius(8.0);
+        live_glass::paint_picture(ui, image, r);
     } else {
         ui.painter()
             .rect_filled(r, 8.0, Color32::from_rgb(51, 53, 48));

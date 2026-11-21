@@ -3,7 +3,7 @@
 //! volume buttons. A YTDugem addition modelled on the Apple Music web mini-player.
 use super::*;
 
-const HEIGHT: f32 = 64.0;
+pub(super) const HEIGHT: f32 = 64.0;
 /// From the bottom of the page to the bar.
 const GAP: f32 = 18.0;
 /// The least room left on either side of the bar.
@@ -114,7 +114,10 @@ impl YTDugem {
         ui.set_clip_rect(page);
         ui.set_opacity(visible);
         let radius = HEIGHT / 2.0;
-        if glass(&ui) {
+        if glass(&ui) && self.glass.is_some() {
+            // Blurs and refracts the page, rendered off screen by `page_under_glass`.
+            egui_glass::paint_glass(&ui, bar, &live_glass::BAR);
+        } else if glass(&ui) {
             glass_slab(ui.painter(), bar, radius, 228);
         } else {
             ui.painter().add(
