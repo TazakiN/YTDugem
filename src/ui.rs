@@ -2473,7 +2473,7 @@ impl YTDugem {
             tray.update(
                 self.current
                     .as_ref()
-                    .map(|t| format!("{} · {}", t.title, t.artist)),
+                    .map(|t| (t.title.as_str(), t.artist.as_str())),
                 playing,
             );
             for action in tray.poll() {
