@@ -14,8 +14,8 @@ use std::{
 use std::time::Duration;
 
 #[cfg(windows)]
-const APP_ID: &str = "1411019391843172514";
-const APP_URL: &str = "https://github.com/kushagrasinghx/BitChord";
+const APP_ID: &str = "1574030570353066084";
+const APP_URL: &str = "https://github.com/TazakiN/YTDugem";
 
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq)]
@@ -155,7 +155,7 @@ fn build_activity(
         actions.push(json!({"label":"Listen on YouTube Music","url":format!("https://music.youtube.com/watch?v={}", track.id)}));
     }
     if buttons[1] {
-        actions.push(json!({"label":"Visit BitChord","url":APP_URL}));
+        actions.push(json!({"label":"Visit YTDugem","url":APP_URL}));
     }
     let mut out =
         json!({"type":2,"details":title,"state":artist,"timestamps":timestamps,"assets":assets});
