@@ -2590,39 +2590,30 @@ impl YTDugem {
             });
         }
         if hit(q, rows[6]) {
+            setting_row(
+                ui,
+                rows[6],
+                "Your profile card, and the line under your name in member lists",
+                |_| {},
+            );
             let sample = crate::model::Track {
                 title: "Song title".into(),
                 artist: "Artist".into(),
+                duration: 209.0,
+                source: "https://music.youtube.com/".into(),
                 ..Default::default()
             };
-            let track = self.current.as_ref().unwrap_or(&sample);
-            let name = card.name.trim();
-            let (bold, other) = if card.lead_with_song {
-                (&track.title, &track.artist)
-            } else {
-                (&track.artist, &track.title)
+            let (track, position, duration) = match &self.current {
+                Some(t) => (
+                    t,
+                    self.status.position,
+                    self.status.duration.max(t.duration),
+                ),
+                None => (&sample, 90.0, sample.duration),
             };
-            let buttons = (0..2)
-                .filter(|&i| card.buttons[i])
-                .map(|i| format!("[{}]", card.button_label(i, track)))
-                .collect::<Vec<_>>()
-                .join(" ");
-            setting_row(ui, rows[6], "", |ui| {
-                ui.with_layout(egui::Layout::top_down(Align::Max), |ui| {
-                    ui.add_space(8.0);
-                    let heading = format!(
-                        "{} {}",
-                        card.activity.verb(),
-                        if name.is_empty() { APP_NAME } else { name }
-                    );
-                    ui.label(RichText::new(heading.to_uppercase()).size(11.0).strong());
-                    ui.label(RichText::new(bold.as_str()).color(WHITE).strong());
-                    ui.label(RichText::new(other.as_str()).color(MUTED));
-                    if !buttons.is_empty() {
-                        ui.label(RichText::new(buttons).size(12.0).color(MUTED));
-                    }
-                });
-            });
+            let cover = self.current.as_ref().and(self.cover.as_ref());
+            discord_preview(ui, card, track, position, duration, cover);
+            ui.add_space(14.0);
         }
         if changed {
             self.save();
@@ -6396,6 +6387,184 @@ fn draw_cover(
 ) {
     draw_image(ui, &t.thumbnail, r, texture.flatten());
 }
+/// Paints the Discord activity card as Discord's dark theme draws it on a profile, then the
+/// member-list line that `lead_with_song` picks.
+fn discord_preview(
+    ui: &mut egui::Ui,
+    card: &crate::discord::Card,
+    track: &crate::model::Track,
+    position: f64,
+    duration: f64,
+    cover: Option<&egui::TextureHandle>,
+) {
+    const SURFACE: Color32 = Color32::from_rgb(43, 45, 49);
+    const TEXT: Color32 = Color32::from_rgb(242, 243, 245);
+    const SOFT: Color32 = Color32::from_rgb(181, 186, 193);
+    const CONTROL: Color32 = Color32::from_rgb(78, 80, 88);
+    const PAD: f32 = 12.0;
+    const ART: f32 = 64.0;
+    const BUTTON: f32 = 32.0;
+    let bold = |size| FontId::new(size, egui::FontFamily::Name("bold".into()));
+    let regular = |size| FontId::proportional(size);
+    let painter = ui.painter().clone();
+    let text = |pos: Pos2, s: &str, font: FontId, color, width: f32, anchor: egui::Align2| {
+        let mut job = egui::text::LayoutJob::simple_singleline(s.to_owned(), font, color);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(width);
+        let galley = painter.layout_job(job);
+        let rect = anchor.anchor_size(pos, galley.size());
+        painter.galley(rect.min, galley, color);
+    };
+    let clock = |s: f64| {
+        let s = s.max(0.0) as u64;
+        format!("{:02}:{:02}", s / 60, s % 60)
+    };
+
+    // As sent: the YouTube Music button only for YouTube Music tracks.
+    let buttons: Vec<String> = (0..2)
+        .filter(|&i| card.buttons[i])
+        .filter(|&i| i == 1 || track.source.starts_with("https://music.youtube.com/"))
+        .map(|i| card.button_label(i, track))
+        .collect();
+    let width = ui.available_width().min(340.0);
+    let mut height = PAD + 16.0 + 10.0 + ART + PAD;
+    if !buttons.is_empty() {
+        height += 12.0 + buttons.len() as f32 * (BUTTON + 8.0) - 8.0;
+    }
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
+    painter.rect_filled(rect, 8.0, SURFACE);
+    let inner = rect.shrink(PAD);
+
+    let name = card.name.trim();
+    let name = if name.is_empty() {
+        crate::discord::APP_NAME
+    } else {
+        name
+    };
+    let heading = format!("{} {}", card.activity.verb(), name);
+    text(
+        inner.left_top(),
+        &heading,
+        bold(13.0),
+        TEXT,
+        inner.width() - 28.0,
+        egui::Align2::LEFT_TOP,
+    );
+    for i in 0..3 {
+        let x = inner.right() - 2.0 - i as f32 * 6.0;
+        painter.circle_filled(Pos2::new(x, inner.top() + 8.0), 1.6, SOFT);
+    }
+
+    let art = Rect::from_min_size(inner.left_top() + Vec2::new(0.0, 26.0), Vec2::splat(ART));
+    draw_image(ui, &track.thumbnail, art, cover);
+    let x = art.right() + 12.0;
+    let column = inner.right() - x;
+    let title = nonempty_or(&track.title, "Unknown title");
+    let artist = nonempty_or(&track.artist, "Unknown artist");
+    text(
+        Pos2::new(x, art.top() + 4.0),
+        title,
+        bold(15.0),
+        TEXT,
+        column,
+        egui::Align2::LEFT_TOP,
+    );
+    text(
+        Pos2::new(x, art.top() + 24.0),
+        artist,
+        regular(13.0),
+        SOFT,
+        column,
+        egui::Align2::LEFT_TOP,
+    );
+    if duration > 0.0 {
+        let y = art.bottom() - 10.0;
+        let mono = FontId::monospace(12.5);
+        let elapsed = clock(position.min(duration));
+        let total = clock(duration);
+        text(
+            Pos2::new(x, y),
+            &elapsed,
+            mono.clone(),
+            TEXT,
+            60.0,
+            egui::Align2::LEFT_CENTER,
+        );
+        text(
+            Pos2::new(inner.right(), y),
+            &total,
+            mono,
+            TEXT,
+            60.0,
+            egui::Align2::RIGHT_CENTER,
+        );
+        let bar = Rect::from_min_max(
+            Pos2::new(x + 48.0, y - 2.0),
+            Pos2::new(inner.right() - 48.0, y + 2.0),
+        );
+        if bar.width() > 0.0 {
+            painter.rect_filled(bar, 2.0, CONTROL);
+            let done = (position / duration).clamp(0.0, 1.0) as f32;
+            let mut fill = bar;
+            fill.set_width(bar.width() * done);
+            painter.rect_filled(fill, 2.0, TEXT);
+        }
+    }
+
+    let mut y = art.bottom() + 12.0;
+    for label in &buttons {
+        let button =
+            Rect::from_min_size(Pos2::new(inner.left(), y), Vec2::new(inner.width(), BUTTON));
+        painter.rect_filled(button, 8.0, CONTROL);
+        text(
+            button.center(),
+            label,
+            bold(14.0),
+            TEXT,
+            button.width() - 16.0,
+            egui::Align2::CENTER_CENTER,
+        );
+        y += BUTTON + 8.0;
+    }
+
+    // Members lists show one line, and `status_display_type` decides which.
+    ui.add_space(10.0);
+    let lead = if card.lead_with_song { title } else { artist };
+    let (row, _) = ui.allocate_exact_size(Vec2::new(width, 36.0), egui::Sense::hover());
+    let avatar = Pos2::new(row.left() + 16.0, row.center().y);
+    painter.circle_filled(avatar, 16.0, CONTROL);
+    painter.circle_filled(
+        avatar + Vec2::new(11.0, 11.0),
+        5.0,
+        Color32::from_rgb(35, 165, 90),
+    );
+    let x = row.left() + 42.0;
+    text(
+        Pos2::new(x, row.top() + 1.0),
+        "You",
+        bold(14.0),
+        TEXT,
+        width - 42.0,
+        egui::Align2::LEFT_TOP,
+    );
+    text(
+        Pos2::new(x, row.bottom() - 1.0),
+        &format!("{} {}", card.activity.verb(), lead),
+        regular(12.0),
+        SOFT,
+        width - 42.0,
+        egui::Align2::LEFT_BOTTOM,
+    );
+}
+
+fn nonempty_or<'a>(s: &'a str, fallback: &'a str) -> &'a str {
+    let s = s.trim();
+    if s.is_empty() {
+        fallback
+    } else {
+        s
+    }
+}
+
 fn draw_image(ui: &mut egui::Ui, url: &str, r: Rect, texture: Option<&egui::TextureHandle>) {
     // Off-screen cards (long shelves, scrolled lists) would otherwise all download and decode
     // at once; egui 0.31 decodes on the GUI thread, so only load what is actually shown.
@@ -6534,8 +6703,8 @@ fn artwork_at(url: &str, px: u32) -> String {
 }
 
 /// Inner margin of a text field. egui 0.37 derives it from `button_padding`, which this app sets
-/// large for buttons; egui 0.31 used this fixed margin.
-const TEXT_MARGIN: egui::Margin = egui::Margin::symmetric(4, 2);
+/// large for buttons. The sides clear the 12 px corner radius, so text never touches the curve.
+const TEXT_MARGIN: egui::Margin = egui::Margin::symmetric(10, 2);
 
 /// Adds a text field whose hint text is muted. egui 0.37 colours every hint from the style (an
 /// explicit colour on the hint is overridden), and the style makes it white, as 0.31 did for
@@ -6549,8 +6718,9 @@ fn muted_hint(ui: &mut egui::Ui, edit: egui::TextEdit<'_>) -> egui::Response {
 }
 
 /// A text field that paints no background or outline of its own, with the egui 0.31 margin.
+/// Its container (a search pill) already pads it, so it keeps the narrow sides.
 fn bare_text_frame() -> egui::Frame {
-    egui::Frame::NONE.inner_margin(TEXT_MARGIN)
+    egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2))
 }
 
 /// egui 0.32 to 0.37 changed several defaults (rounder, larger, slower widgets, a rubber-banding

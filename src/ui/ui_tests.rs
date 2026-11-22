@@ -277,3 +277,40 @@ fn shelf_arrows_page_the_row() {
     h.run_steps(3);
     assert!(h.query_by_label("Scroll left").is_some());
 }
+
+fn snapshot_discord_preview(name: &str, card: crate::discord::Card) {
+    let song = Track {
+        title: "Museum Duka".into(),
+        artist: "Revenge, YB & Tepe".into(),
+        duration: 209.0,
+        source: "https://music.youtube.com/watch?v=video00".into(),
+        ..Default::default()
+    };
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(380.0, 300.0))
+        .with_pixels_per_point(1.0)
+        .with_context_setup(|ctx| configure_style(ctx, store::Theme::Classic))
+        .build_ui(|ui| {
+            ui.painter().rect_filled(ui.max_rect(), 0.0, SIDE);
+            discord_preview(ui, &card, &song, 90.0, 209.0, None);
+        });
+    h.run_steps(2);
+    snapshot(&mut h, name);
+}
+
+#[test]
+fn discord_preview_default() {
+    snapshot_discord_preview("discord_preview_default", crate::discord::Card::default());
+}
+
+#[test]
+fn discord_preview_customized() {
+    let card = crate::discord::Card {
+        activity: crate::discord::Activity::Playing,
+        name: "my radio".into(),
+        lead_with_song: true,
+        button_text: ["Listen to {song_name}".into(), String::new()],
+        ..Default::default()
+    };
+    snapshot_discord_preview("discord_preview_custom", card);
+}

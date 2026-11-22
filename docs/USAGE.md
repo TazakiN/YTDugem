@@ -70,7 +70,7 @@ YTDugem automatically uses X11 and Mesa's software renderer to work around EGL/Z
 - **System media controls:** Linux MPRIS and Windows system media-control integration, when available in the desktop session.
 - **Discord Rich Presence:** opt-in, through the local Windows Discord IPC pipe, with no account token.
   - It shows title and artist, artwork, and a playback countdown.
-  - As in upstream, you can customize the card: the activity verb (Listening, Playing, Watching, Competing), the name after it, whether the song or the artist leads on the bold line, and each button's visibility and label. Labels can use `{song_name}`, `{artist_name}` and `{album_name}`. Settings shows a text preview.
+  - As in upstream, you can customize the card: the activity verb (Listening, Playing, Watching, Competing), the name after it, whether the song or the artist leads in member lists, and each button's visibility and label. Labels can use `{song_name}`, `{artist_name}` and `{album_name}`. Settings previews the profile card and the member-list line.
   - Upstream's online/idle/do-not-disturb status choice is not ported. It needs upstream's account-token route, and YTDugem only uses the local IPC pipe.
   - Pausing, stopping or disabling it clears the presence.
   - Background IPC uses bounded I/O, coalesced updates and reconnects.
