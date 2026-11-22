@@ -5164,6 +5164,7 @@ dependencies = [
  "souvlaki",
  "tray-icon",
  "tungstenite",
+ "vello_cpu 0.2.0",
  "windows-sys 0.61.2",
 ]
 
