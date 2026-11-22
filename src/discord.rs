@@ -653,12 +653,14 @@ mod tests {
         let p = build_activity(&bad, f64::INFINITY, f64::NAN, &only_first);
         assert_eq!(p["details"], "Unknown title");
         assert!(p["timestamps"]["end"].is_null());
+        // A local file gets no YouTube Music button, so its path never reaches Discord.
         assert!(p["buttons"].is_null());
         let none = Card {
             buttons: [false, false],
             ..Card::default()
         };
         let timed = build_activity(&t, 12.0, 1.5, &none);
+        assert!(timed["buttons"].is_null());
         assert_eq!(
             timed["timestamps"]["end"].as_i64().unwrap()
                 - timed["timestamps"]["start"].as_i64().unwrap(),

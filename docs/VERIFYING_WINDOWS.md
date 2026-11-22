@@ -31,11 +31,11 @@ If `python` is the Windows Store alias, use the full path to your installed Pyth
 
 1. Open the **Discord desktop client** on Windows; browser-only Discord has no local IPC pipe. No Discord token is needed or requested.
 2. In YTDugem Settings, enable **Discord Rich Presence** (off by default), then play a song. After an acknowledgement, the status should read **Discord: connected**. If Discord is absent it stays waiting; rejected/timed-out requests show an error and retry.
-3. Inspect your Discord profile: title, artist, artwork when public HTTPS artwork is available, album tooltip, and the countdown. Test a seek, speed change, next track, and the optional activity name/button settings. Ordinary edits are coalesced to at most one update per two seconds. Discord may control or ignore the application display name, external images or buttons; your own profile may not show your own buttons.
+3. Inspect your Discord profile: title, artist, artwork when public HTTPS artwork is available, album tooltip, and the countdown. Test a seek, speed change, next track, and the Lead with the song, Activity, Name and button settings against the Settings preview. Ordinary edits are coalesced to at most one update per two seconds. Discord may control or ignore the application display name, external images or buttons; your own profile may not show your own buttons.
 4. Pause, stop, or disable presence: activity should clear. Resume should restore it. Close YTDugem: it attempts a bounded clear and disconnects. Restart Discord during playback: reconnection occurs automatically (up to about 20 seconds without another playback change).
 5. Turn off Discord activity privacy/display settings to confirm they can hide activity independently of successful IPC. A connected acknowledgement proves delivery, not that Discord elected to display the activity.
 
-No account-token/gateway fallback is implemented. This local integration uses upstream's application ID and default Listening activity; advanced wording/status/type/custom-button-label controls remain outside this implementation. Local filesystem paths are not used for artwork or listen-button URLs.
+No account-token/gateway fallback is implemented, so upstream's online/idle/do-not-disturb status choice is not available. This local integration uses YTDugem's own Discord application ID. Local filesystem paths are not used for artwork or listen-button URLs.
 
 ## Account flow: interactive user verification required
 
