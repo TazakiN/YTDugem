@@ -71,10 +71,8 @@ pub struct Library {
     pub audio: AudioSettings,
     #[serde(default)]
     pub discord_enabled: bool,
-    #[serde(default)]
-    pub discord_activity_name: String,
-    #[serde(default = "discord_button_defaults")]
-    pub discord_buttons: [bool; 2],
+    #[serde(flatten)]
+    pub discord: crate::discord::Card,
     /// Upstream `crossfade_seconds`: 0 (off) to 12, blended equal-power between tracks.
     #[serde(default)]
     pub crossfade_seconds: u8,
@@ -136,7 +134,7 @@ pub enum Theme {
 }
 
 /// Unknown or malformed values fall back to the default instead of failing the whole library.
-fn deserialize_lenient<'de, D, T>(d: D) -> Result<T, D::Error>
+pub(crate) fn deserialize_lenient<'de, D, T>(d: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::de::DeserializeOwned + Default,
@@ -146,10 +144,6 @@ where
 
 fn download_format_default() -> String {
     "best".into()
-}
-
-fn discord_button_defaults() -> [bool; 2] {
-    [true, true]
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -383,8 +377,7 @@ impl Default for Library {
             lyrics_sources_seen: lyrics_order_default(),
             audio: AudioSettings::default(),
             discord_enabled: false,
-            discord_activity_name: String::new(),
-            discord_buttons: discord_button_defaults(),
+            discord: crate::discord::Card::default(),
             crossfade_seconds: 0,
             close_to_tray: false,
             translation_language: String::new(),
@@ -664,7 +657,19 @@ mod tests {
         assert!(old.lyrics_enabled);
         assert_eq!(old.lyrics_order, lyrics_order_default());
         assert!(!old.discord_enabled);
-        assert_eq!(old.discord_buttons, [true, true]);
+        assert_eq!(old.discord.buttons, [true, true]);
+        // Keys written before the card was customizable still load; an unknown activity
+        // falls back instead of failing the library.
+        let earlier: Library = serde_json::from_str(
+            r#"{"discord_activity_name":"Old","discord_buttons":[false,true],"discord_activity_type":"dancing"}"#,
+        )
+        .unwrap();
+        assert_eq!(earlier.discord.name, "Old");
+        assert_eq!(earlier.discord.buttons, [false, true]);
+        assert_eq!(
+            earlier.discord.activity,
+            crate::discord::Activity::Listening
+        );
         let dir =
             std::env::temp_dir().join(format!("bitchord-lyrics-migration-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -683,16 +688,19 @@ mod tests {
         configured.lyrics_order.reverse();
         configured.lyrics_sources = vec!["lrclib".into()];
         configured.discord_enabled = true;
-        configured.discord_activity_name = "My music".into();
-        configured.discord_buttons = [false, true];
+        configured.discord.name = "My music".into();
+        configured.discord.buttons = [false, true];
+        configured.discord.activity = crate::discord::Activity::Playing;
+        configured.discord.lead_with_song = true;
+        configured.discord.button_text[0] = "Hear {song_name}".into();
         let restored: Library =
             serde_json::from_slice(&serde_json::to_vec(&configured).unwrap()).unwrap();
         assert!(!restored.lyrics_enabled);
         assert_eq!(restored.lyrics_order, configured.lyrics_order);
         assert_eq!(restored.lyrics_sources, ["lrclib"]);
         assert!(restored.discord_enabled);
-        assert_eq!(restored.discord_activity_name, "My music");
-        assert_eq!(restored.discord_buttons, [false, true]);
+        assert_eq!(restored.discord.name, "My music");
+        assert_eq!(restored.discord, configured.discord);
     }
 
     #[test]

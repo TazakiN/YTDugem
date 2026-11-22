@@ -2524,6 +2524,111 @@ impl YTDugem {
         });
     }
 
+    /// The Discord card's wording, after upstream's Integrations dialog. `rows[1..=6]` are
+    /// lead-with-song, activity, name, the two buttons and the preview.
+    fn discord_card_rows(&mut self, ui: &mut egui::Ui, q: &str, rows: &[&str]) {
+        use crate::discord::{Activity, APP_NAME, DEFAULT_BUTTONS};
+        let mut changed = false;
+        let card = &mut self.library.discord;
+        if hit(q, rows[1]) {
+            changed |= toggle_row(
+                ui,
+                rows[1],
+                "Puts the title on the bold line instead of the artist",
+                &mut card.lead_with_song,
+            );
+        }
+        if hit(q, rows[2]) {
+            setting_row(ui, rows[2], "The verb shown above the card", |ui| {
+                let before = card.activity;
+                egui::ComboBox::from_id_salt("discord-activity")
+                    .width(240.0)
+                    .selected_text(card.activity.label())
+                    .show_ui(ui, |ui| {
+                        for activity in Activity::ALL {
+                            ui.selectable_value(&mut card.activity, activity, activity.label());
+                        }
+                    });
+                changed |= card.activity != before;
+            });
+        }
+        if hit(q, rows[3]) {
+            let subtitle = format!("What follows the verb. Leave it empty to use {APP_NAME}.");
+            setting_row(ui, rows[3], &subtitle, |ui| {
+                changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut card.name)
+                            .hint_text(APP_NAME)
+                            .char_limit(128)
+                            .margin(TEXT_MARGIN)
+                            .desired_width(240.0),
+                    )
+                    .changed();
+            });
+        }
+        for i in 0..2 {
+            if !hit(q, rows[4 + i]) {
+                continue;
+            }
+            let subtitle = if i == 0 {
+                "Opens the song on YouTube Music. {song_name}, {artist_name} and {album_name} are filled in."
+            } else {
+                "Opens this project. {song_name}, {artist_name} and {album_name} are filled in."
+            };
+            setting_row(ui, rows[4 + i], subtitle, |ui| {
+                changed |= toggle_switch(ui, &mut card.buttons[i]).changed();
+                ui.add_space(8.0);
+                changed |= ui
+                    .add_enabled(
+                        card.buttons[i],
+                        egui::TextEdit::singleline(&mut card.button_text[i])
+                            .hint_text(DEFAULT_BUTTONS[i])
+                            .margin(TEXT_MARGIN)
+                            .desired_width(240.0),
+                    )
+                    .changed();
+            });
+        }
+        if hit(q, rows[6]) {
+            let sample = crate::model::Track {
+                title: "Song title".into(),
+                artist: "Artist".into(),
+                ..Default::default()
+            };
+            let track = self.current.as_ref().unwrap_or(&sample);
+            let name = card.name.trim();
+            let (bold, other) = if card.lead_with_song {
+                (&track.title, &track.artist)
+            } else {
+                (&track.artist, &track.title)
+            };
+            let buttons = (0..2)
+                .filter(|&i| card.buttons[i])
+                .map(|i| format!("[{}]", card.button_label(i, track)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            setting_row(ui, rows[6], "", |ui| {
+                ui.with_layout(egui::Layout::top_down(Align::Max), |ui| {
+                    ui.add_space(8.0);
+                    let heading = format!(
+                        "{} {}",
+                        card.activity.verb(),
+                        if name.is_empty() { APP_NAME } else { name }
+                    );
+                    ui.label(RichText::new(heading.to_uppercase()).size(11.0).strong());
+                    ui.label(RichText::new(bold.as_str()).color(WHITE).strong());
+                    ui.label(RichText::new(other.as_str()).color(MUTED));
+                    if !buttons.is_empty() {
+                        ui.label(RichText::new(buttons).size(12.0).color(MUTED));
+                    }
+                });
+            });
+        }
+        if changed {
+            self.save();
+        }
+    }
+
     fn settings_body(&mut self, ui: &mut egui::Ui) {
         self.load_lyrics_keys();
         self.load_audio_devices();
@@ -3018,9 +3123,12 @@ impl YTDugem {
         // Integrations
         let rows = [
             "Discord Rich Presence",
-            "Activity name",
-            "Show YouTube Music button",
-            "Show YTDugem button",
+            "Lead with the song",
+            "Activity",
+            "Name",
+            "First button",
+            "Second button",
+            "Preview",
             "System media controls",
         ];
         if let Some(q) = group_query(&query, "Integrations", &rows) {
@@ -3051,36 +3159,12 @@ impl YTDugem {
                     }
                 }
                 if self.library.discord_enabled {
-                    if hit(&q, rows[1]) {
-                        setting_row(ui, rows[1], "Blank shows the song title", |ui| {
-                            if ui
-                                .add(
-                                    egui::TextEdit::singleline(
-                                        &mut self.library.discord_activity_name,
-                                    )
-                                    .margin(TEXT_MARGIN)
-                                    .desired_width(240.0),
-                                )
-                                .changed()
-                            {
-                                self.save();
-                            }
-                        });
-                    }
-                    for i in 0..2 {
-                        if hit(&q, rows[2 + i]) {
-                            let mut on = self.library.discord_buttons[i];
-                            if toggle_row(ui, rows[2 + i], "", &mut on) {
-                                self.library.discord_buttons[i] = on;
-                                self.save();
-                            }
-                        }
-                    }
+                    self.discord_card_rows(ui, &q, &rows);
                 }
-                if hit(&q, rows[4]) {
+                if hit(&q, rows[7]) {
                     setting_row(
                         ui,
-                        rows[4],
+                        rows[7],
                         "Media keys and the Windows volume flyout",
                         |ui| {
                             ui.label(
@@ -4373,8 +4457,7 @@ impl YTDugem {
                     &track,
                     self.status.position,
                     self.library.speed,
-                    &self.library.discord_activity_name,
-                    self.library.discord_buttons,
+                    &self.library.discord,
                 );
             } else {
                 self.discord.clear();

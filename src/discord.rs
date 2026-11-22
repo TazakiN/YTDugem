@@ -1,5 +1,6 @@
 //! Local Discord Rich Presence over desktop IPC.
 use crate::model::Track;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     sync::{
@@ -16,6 +17,109 @@ use std::time::Duration;
 #[cfg(windows)]
 const APP_ID: &str = "1574030570353066084";
 const APP_URL: &str = "https://github.com/TazakiN/YTDugem";
+pub const APP_NAME: &str = "YTDugem";
+pub const DEFAULT_BUTTONS: [&str; 2] = ["Listen on YouTube Music", "Visit YTDugem"];
+/// Discord rejects a whole activity whose button label is longer than this.
+const BUTTON_LABEL_MAX: usize = 32;
+
+/// The verb above the card, after upstream `DesktopDiscordSettings.activities`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Activity {
+    #[default]
+    Listening,
+    Playing,
+    Watching,
+    Competing,
+}
+
+impl Activity {
+    pub const ALL: [Activity; 4] = [
+        Activity::Listening,
+        Activity::Playing,
+        Activity::Watching,
+        Activity::Competing,
+    ];
+    /// Discord's activity type number.
+    fn number(self) -> u8 {
+        match self {
+            Activity::Playing => 0,
+            Activity::Listening => 2,
+            Activity::Watching => 3,
+            Activity::Competing => 5,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Activity::Listening => "Listening",
+            Activity::Playing => "Playing",
+            Activity::Watching => "Watching",
+            Activity::Competing => "Competing",
+        }
+    }
+    pub fn verb(self) -> &'static str {
+        match self {
+            Activity::Listening => "Listening to",
+            Activity::Playing => "Playing",
+            Activity::Watching => "Watching",
+            Activity::Competing => "Competing in",
+        }
+    }
+}
+
+/// How the Discord card is worded. Flattened into the library under the `discord_*` keys
+/// earlier versions already wrote, so their name and button choices carry over.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Card {
+    #[serde(
+        rename = "discord_activity_type",
+        deserialize_with = "crate::store::deserialize_lenient"
+    )]
+    pub activity: Activity,
+    /// What follows the verb; blank uses [`APP_NAME`].
+    #[serde(rename = "discord_activity_name")]
+    pub name: String,
+    /// Bold the song title instead of the artist, also in Discord's member list.
+    #[serde(rename = "discord_lead_with_song")]
+    pub lead_with_song: bool,
+    #[serde(rename = "discord_buttons")]
+    pub buttons: [bool; 2],
+    /// Button labels with `{song_name}`, `{artist_name}` and `{album_name}`; blank uses
+    /// [`DEFAULT_BUTTONS`].
+    #[serde(rename = "discord_button_text")]
+    pub button_text: [String; 2],
+}
+
+impl Default for Card {
+    fn default() -> Self {
+        Self {
+            activity: Activity::default(),
+            name: String::new(),
+            lead_with_song: false,
+            buttons: [true, true],
+            button_text: Default::default(),
+        }
+    }
+}
+
+impl Card {
+    /// The label button `i` shows for `track`: variables filled in, Discord's length limit
+    /// applied, and the default when the text comes out blank.
+    pub fn button_label(&self, i: usize, track: &Track) -> String {
+        let label = self.button_text[i]
+            .replace("{song_name}", track.title.trim())
+            .replace("{artist_name}", track.artist.trim())
+            .replace("{album_name}", track.album.trim());
+        let label = label.trim();
+        let label = if label.is_empty() {
+            DEFAULT_BUTTONS[i]
+        } else {
+            label
+        };
+        label.chars().take(BUTTON_LABEL_MAX).collect()
+    }
+}
 
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq)]
@@ -75,15 +179,8 @@ impl Presence {
     pub fn clear(&self) {
         self.update(None);
     }
-    pub fn publish(
-        &self,
-        track: &Track,
-        position: f64,
-        speed: f64,
-        name: &str,
-        buttons: [bool; 2],
-    ) {
-        self.update(Some(build_activity(track, position, speed, name, buttons)));
+    pub fn publish(&self, track: &Track, position: f64, speed: f64, card: &Card) {
+        self.update(Some(build_activity(track, position, speed, card)));
     }
     fn update(&self, value: Option<Value>) {
         let mut latest = self.latest.lock().unwrap();
@@ -109,13 +206,7 @@ impl Drop for Presence {
     }
 }
 
-fn build_activity(
-    track: &Track,
-    position: f64,
-    speed: f64,
-    name: &str,
-    buttons: [bool; 2],
-) -> Value {
+fn build_activity(track: &Track, position: f64, speed: f64, card: &Card) -> Value {
     let title = nonempty(&track.title, "Unknown title");
     let artist = nonempty(&track.artist, "Unknown artist");
     let speed = if speed.is_finite() {
@@ -151,16 +242,26 @@ fn build_activity(
         );
     }
     let mut actions = Vec::new();
-    if buttons[0] && valid_id(&track.id) && track.source.starts_with("https://music.youtube.com/") {
-        actions.push(json!({"label":"Listen on YouTube Music","url":format!("https://music.youtube.com/watch?v={}", track.id)}));
+    if card.buttons[0]
+        && valid_id(&track.id)
+        && track.source.starts_with("https://music.youtube.com/")
+    {
+        actions.push(json!({"label":card.button_label(0, track),"url":format!("https://music.youtube.com/watch?v={}", track.id)}));
     }
-    if buttons[1] {
-        actions.push(json!({"label":"Visit YTDugem","url":APP_URL}));
+    if card.buttons[1] {
+        actions.push(json!({"label":card.button_label(1, track),"url":APP_URL}));
     }
-    let mut out =
-        json!({"type":2,"details":title,"state":artist,"timestamps":timestamps,"assets":assets});
-    if !name.trim().is_empty() {
-        out["name"] = json!(name.trim().chars().take(128).collect::<String>());
+    let mut out = json!({
+        "type": card.activity.number(),
+        "details": title,
+        "state": artist,
+        // Which line Discord bolds and repeats in the member list: 2 is details, 1 is state.
+        "status_display_type": if card.lead_with_song { 2 } else { 1 },
+        "timestamps": timestamps,
+        "assets": assets,
+    });
+    if !card.name.trim().is_empty() {
+        out["name"] = json!(card.name.trim().chars().take(128).collect::<String>());
     }
     if !actions.is_empty() {
         out["buttons"] = json!(actions);
@@ -529,7 +630,11 @@ mod tests {
             source: "https://music.youtube.com/watch?v=5NV6Rdv1a3I".into(),
             artists: Vec::new(),
         };
-        let p = build_activity(&t, 12.0, 1.5, "", [true, false]);
+        let only_first = Card {
+            buttons: [true, false],
+            ..Card::default()
+        };
+        let p = build_activity(&t, 12.0, 1.5, &only_first);
         assert_eq!(p["details"], "Song");
         assert_eq!(p["state"], "Artist");
         assert!(
@@ -545,11 +650,15 @@ mod tests {
         bad.duration = f64::NAN;
         bad.title.clear();
         bad.source = r"C:\private\song.flac".into();
-        let p = build_activity(&bad, f64::INFINITY, f64::NAN, "", [true, false]);
+        let p = build_activity(&bad, f64::INFINITY, f64::NAN, &only_first);
         assert_eq!(p["details"], "Unknown title");
         assert!(p["timestamps"]["end"].is_null());
         assert!(p["buttons"].is_null());
-        let timed = build_activity(&t, 12.0, 1.5, "", [false, false]);
+        let none = Card {
+            buttons: [false, false],
+            ..Card::default()
+        };
+        let timed = build_activity(&t, 12.0, 1.5, &none);
         assert_eq!(
             timed["timestamps"]["end"].as_i64().unwrap()
                 - timed["timestamps"]["start"].as_i64().unwrap(),
@@ -563,6 +672,50 @@ mod tests {
         ] {
             assert!(safe_artwork(url).is_none(), "{url}");
         }
+    }
+
+    #[test]
+    fn card_wording_is_applied() {
+        let t = Track {
+            id: "5NV6Rdv1a3I".into(),
+            title: "Song".into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            duration: 120.0,
+            thumbnail: String::new(),
+            source: "https://music.youtube.com/watch?v=5NV6Rdv1a3I".into(),
+            artists: Vec::new(),
+        };
+        let plain = build_activity(&t, 0.0, 1.0, &Card::default());
+        assert_eq!(plain["type"], 2);
+        assert_eq!(plain["status_display_type"], 1);
+        assert!(plain["name"].is_null());
+        assert_eq!(plain["buttons"][0]["label"], DEFAULT_BUTTONS[0]);
+        assert_eq!(plain["buttons"][1]["label"], DEFAULT_BUTTONS[1]);
+
+        let card = Card {
+            activity: Activity::Competing,
+            name: " My radio ".into(),
+            lead_with_song: true,
+            buttons: [true, true],
+            button_text: [
+                "{song_name} by {artist_name} from {album_name}, a very long label".into(),
+                " {album_name} ".into(),
+            ],
+        };
+        let custom = build_activity(&t, 0.0, 1.0, &card);
+        assert_eq!(custom["type"], 5);
+        assert_eq!(custom["status_display_type"], 2);
+        assert_eq!(custom["name"], "My radio");
+        assert_eq!(
+            custom["buttons"][0]["label"],
+            "Song by Artist from Album, a ver"
+        );
+        assert_eq!(custom["buttons"][1]["label"], "Album");
+        // A label that resolves to nothing falls back rather than being rejected by Discord.
+        let mut no_album = t.clone();
+        no_album.album.clear();
+        assert_eq!(card.button_label(1, &no_album), DEFAULT_BUTTONS[1]);
     }
 
     #[test]
