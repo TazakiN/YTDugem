@@ -259,6 +259,35 @@ pub fn audio_devices() -> Result<Vec<(String, String)>> {
     Ok(devices)
 }
 
+/// How long a device list is trusted before mpv is asked again. Devices change rarely; a
+/// device unplugged within this window is caught on the next load after it.
+const DEVICE_LIST_TTL: Duration = Duration::from_secs(60);
+
+/// The device list mpv last gave, as (id, label) pairs, and when.
+type DeviceList = (Instant, Vec<(String, String)>);
+
+static DEVICE_LIST: std::sync::Mutex<Option<DeviceList>> = std::sync::Mutex::new(None);
+
+/// Whether `device` is one mpv currently offers; `None` when mpv cannot list devices.
+/// A recent list that contains it is trusted; one that does not is checked again, so a
+/// device plugged back in is used at once.
+fn device_present(device: &str) -> Option<bool> {
+    let cached = DEVICE_LIST.lock().ok().and_then(|c| {
+        c.as_ref()
+            .filter(|(at, _)| at.elapsed() < DEVICE_LIST_TTL)
+            .map(|(_, list)| list.iter().any(|(id, _)| id == device))
+    });
+    if cached == Some(true) {
+        return Some(true);
+    }
+    let list = audio_devices().ok()?;
+    let present = list.iter().any(|(id, _)| id == device);
+    if let Ok(mut c) = DEVICE_LIST.lock() {
+        *c = Some((Instant::now(), list));
+    }
+    Some(present)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PlayerStatus {
     pub position: f64,
@@ -349,27 +378,8 @@ impl Player {
         // A WASAPI device id changes with driver updates and vanishes with an unplugged
         // headset; mpv then opens no output and ends the track with an error. Play on the
         // default output instead, keeping the saved choice for when the device returns.
-        if !force_null_output && !audio.output_device.is_empty() {
-            if let Ok(devices) = audio_devices() {
-                if !devices.iter().any(|(id, _)| *id == audio.output_device) {
-                    self.missing_device = Some(std::mem::take(&mut audio.output_device));
-                }
-            }
-        }
-        #[cfg(windows)]
-        if !force_null_output
-            && audio.wasapi_exclusive
-            && !audio.output_device.is_empty()
-            && !audio
-                .output_device
-                .to_ascii_lowercase()
-                .starts_with("wasapi/")
-        {
-            bail!(
-                "WASAPI exclusive output requires a wasapi/ audio device; selected {}",
-                audio.output_device
-            );
-        }
+        // Checked below, while the stream resolves.
+        let need_check = !force_null_output && !audio.output_device.is_empty();
 
         #[cfg(unix)]
         let (ipc_path, socket_dir) = {
@@ -406,7 +416,29 @@ impl Player {
             self.socket_dir = socket_dir;
         }
 
-        let stream = prepared.or_else(|| resolve_stream(source));
+        let device = audio.output_device.clone();
+        let (present, stream) = std::thread::scope(|s| {
+            let check = need_check.then(|| s.spawn(|| device_present(&device)));
+            let stream = prepared.or_else(|| resolve_stream(source));
+            (check.and_then(|h| h.join().ok().flatten()), stream)
+        });
+        if present == Some(false) {
+            self.missing_device = Some(std::mem::take(&mut audio.output_device));
+        }
+        #[cfg(windows)]
+        if !force_null_output
+            && audio.wasapi_exclusive
+            && !audio.output_device.is_empty()
+            && !audio
+                .output_device
+                .to_ascii_lowercase()
+                .starts_with("wasapi/")
+        {
+            bail!(
+                "WASAPI exclusive output requires a wasapi/ audio device; selected {}",
+                audio.output_device
+            );
+        }
 
         let mpv = std::env::var_os("BITCHORD_MPV").unwrap_or_else(|| "mpv".into());
         let mut cmd = Command::new(mpv);
@@ -946,6 +978,15 @@ mod stream_tests {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn a_recent_device_list_that_has_the_device_is_trusted_without_mpv() {
+        *DEVICE_LIST.lock().unwrap() = Some((
+            Instant::now(),
+            vec![("wasapi/{test-device}".into(), "Test".into())],
+        ));
+        assert_eq!(device_present("wasapi/{test-device}"), Some(true));
+    }
 
     #[test]
     fn protocol_eof_and_validation() {
