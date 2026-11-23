@@ -6911,7 +6911,15 @@ fn baseline_shift_em(primary: &[u8], fallback: &[u8]) -> Option<f32> {
     Some(ascent_p - (ascent_f + 0.5 * (height_p - height_f)))
 }
 
+/// The app's fonts, built once: the system fallback fonts are tens of megabytes, and the window
+/// and Liquid Glass's twin context share the same `Arc`ed bytes.
 fn font_definitions() -> egui::FontDefinitions {
+    static FONTS: std::sync::LazyLock<egui::FontDefinitions> =
+        std::sync::LazyLock::new(build_font_definitions);
+    FONTS.clone()
+}
+
+fn build_font_definitions() -> egui::FontDefinitions {
     let inter_regular: &'static [u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
@@ -7411,6 +7419,15 @@ mod font_baseline_tests {
                 (y - latin).abs() < 1.5,
                 "{chr:?} baseline {y} vs Latin {latin}"
             );
+        }
+    }
+
+    #[test]
+    fn font_definitions_share_font_bytes() {
+        let (a, b) = (font_definitions(), font_definitions());
+        assert!(Arc::ptr_eq(&a.font_data["inter"], &b.font_data["inter"]));
+        if let (Some(x), Some(y)) = (a.font_data.get("emoji"), b.font_data.get("emoji")) {
+            assert!(Arc::ptr_eq(x, y));
         }
     }
 }
