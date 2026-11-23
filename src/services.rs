@@ -121,10 +121,33 @@ pub struct Collection {
 }
 
 fn client() -> Result<reqwest::blocking::Client> {
-    Ok(reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(25))
-        .user_agent("Mozilla/5.0 YTDugem/0.1")
-        .build()?)
+    // One client for every InnerTube call: a blocking client owns a runtime thread and a
+    // connection pool, so building one per request paid a thread and a TLS handshake each time.
+    static CLIENT: std::sync::LazyLock<reqwest::Result<reqwest::blocking::Client>> =
+        std::sync::LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(25))
+                .user_agent("Mozilla/5.0 YTDugem/0.1")
+                .build()
+        });
+    CLIENT
+        .as_ref()
+        .map(Clone::clone)
+        .map_err(|e| anyhow!("Could not start the HTTP client: {e}"))
+}
+
+/// The client for `audio_stream`: no user agent of its own, since each request sets its headers.
+fn stream_client() -> Result<reqwest::blocking::Client> {
+    static CLIENT: std::sync::LazyLock<reqwest::Result<reqwest::blocking::Client>> =
+        std::sync::LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+        });
+    CLIENT
+        .as_ref()
+        .map(Clone::clone)
+        .map_err(|e| anyhow!("Could not start the HTTP client: {e}"))
 }
 
 static SIGN_IN_REJECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -195,9 +218,7 @@ pub fn audio_stream(video_id: &str) -> Result<(String, f64)> {
     if !valid_video_id(video_id) {
         bail!("Not a YouTube video ID: {video_id}");
     }
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()?;
+    let client = stream_client()?;
     let visitor = visitor_data(&client)?;
     let body = json!({
         "videoId": video_id,
@@ -1936,6 +1957,11 @@ fn parse_progress(line: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_client_builds_repeatedly() {
+        assert!(client().is_ok() && client().is_ok());
+    }
 
     #[test]
     fn parses_song_info() {

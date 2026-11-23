@@ -359,10 +359,18 @@ fn embedded(track: &Track) -> Option<Vec<LyricLine>> {
 }
 
 fn http() -> Result<reqwest::blocking::Client> {
-    Ok(reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(7))
-        .user_agent("YTDugem/0.1 (lyrics lookup)")
-        .build()?)
+    // Shared by every provider lookup, so a run of misses reuses one runtime and pool.
+    static CLIENT: std::sync::LazyLock<reqwest::Result<reqwest::blocking::Client>> =
+        std::sync::LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(7))
+                .user_agent("YTDugem/0.1 (lyrics lookup)")
+                .build()
+        });
+    CLIENT
+        .as_ref()
+        .map(Clone::clone)
+        .map_err(|e| anyhow!("Could not start the HTTP client: {e}"))
 }
 
 const RESPONSE_LIMIT: u64 = 8 * 1024 * 1024;

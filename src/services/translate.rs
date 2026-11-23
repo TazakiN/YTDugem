@@ -57,11 +57,18 @@ pub enum Romanization {
     AlreadyLatin,
 }
 
-fn http_client(agent: &str) -> Result<reqwest::blocking::Client> {
-    Ok(reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(12))
-        .user_agent(agent)
-        .build()?)
+fn http_client() -> Result<reqwest::blocking::Client> {
+    static CLIENT: std::sync::LazyLock<reqwest::Result<reqwest::blocking::Client>> =
+        std::sync::LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(12))
+                .user_agent("YTDugem/0.1 (lyrics translation)")
+                .build()
+        });
+    CLIENT
+        .as_ref()
+        .map(Clone::clone)
+        .map_err(|e| anyhow!("Could not start the HTTP client: {e}"))
 }
 
 /// One request for a batch's payload; `dt` is `t` (translate) or `rm` (romanize).
@@ -97,7 +104,7 @@ pub fn translate(lines: &[LyricLine], target: &str) -> Result<Translation> {
     if slots.is_empty() {
         bail!("These lyrics have no text to translate");
     }
-    let client = http_client("YTDugem/0.1 (lyrics translation)")?;
+    let client = http_client()?;
     let mut translated = Vec::with_capacity(slots.len());
     let mut sources: Vec<(String, usize)> = vec![];
     for batch in batches(&slots, lines) {
@@ -162,7 +169,7 @@ pub fn romanize(lines: &[LyricLine]) -> Result<Romanization> {
     if !slots.iter().any(|&i| has_non_latin_letters(&lines[i].text)) {
         return Ok(Romanization::AlreadyLatin);
     }
-    let client = http_client("YTDugem/0.1 (lyrics translation)")?;
+    let client = http_client()?;
     let mut romanized = Vec::with_capacity(slots.len());
     let mut sources: Vec<(String, usize)> = vec![];
     for batch in batches(&slots, lines) {

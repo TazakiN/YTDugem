@@ -7219,11 +7219,22 @@ fn artwork_candidates(url: &str) -> Vec<String> {
     out
 }
 
+fn artwork_client() -> anyhow::Result<reqwest::blocking::Client> {
+    static CLIENT: std::sync::LazyLock<reqwest::Result<reqwest::blocking::Client>> =
+        std::sync::LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+        });
+    CLIENT
+        .as_ref()
+        .map(Clone::clone)
+        .map_err(|e| anyhow::anyhow!("Could not start the HTTP client: {e}"))
+}
+
 fn load_artwork(url: &str) -> anyhow::Result<(egui::ColorImage, egui::ColorImage)> {
     use std::io::Read;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()?;
+    let client = artwork_client()?;
     let mut last = None;
     let mut bytes = vec![];
     for candidate in artwork_candidates(url) {
