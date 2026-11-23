@@ -346,6 +346,16 @@ impl Player {
         let mut audio = audio.clone();
         audio.sanitize();
         let force_null_output = std::env::var("BITCHORD_AUDIO_OUTPUT").as_deref() == Ok("null");
+        // A WASAPI device id changes with driver updates and vanishes with an unplugged
+        // headset; mpv then opens no output and ends the track with an error. Play on the
+        // default output instead, keeping the saved choice for when the device returns.
+        if !force_null_output && !audio.output_device.is_empty() {
+            if let Ok(devices) = audio_devices() {
+                if !devices.iter().any(|(id, _)| *id == audio.output_device) {
+                    self.missing_device = Some(std::mem::take(&mut audio.output_device));
+                }
+            }
+        }
         #[cfg(windows)]
         if !force_null_output
             && audio.wasapi_exclusive
@@ -667,6 +677,7 @@ impl Player {
         self.status = PlayerStatus::default();
         self.audio_backend.clear();
         self.last_error = None;
+        self.missing_device = None;
     }
 
     fn command(&mut self, command: Value) -> Result<()> {
