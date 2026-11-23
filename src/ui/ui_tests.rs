@@ -314,3 +314,19 @@ fn discord_preview_customized() {
     };
     snapshot_discord_preview("discord_preview_custom", card);
 }
+
+/// Rows scrolled out of view draw nothing: of 2,000 search results only the rows on screen
+/// lay out their "···" menu button.
+#[test]
+fn hidden_song_rows_are_not_laid_out() {
+    use egui_kittest::kittest::Queryable;
+    let mut app = search_app();
+    app.results = (0..2000).map(track).collect();
+    let h = harness(app, 1440.0, 900.0);
+    let shown = h.query_all_by_label("···").count();
+    assert!(shown > 0, "the visible rows still draw their menu button");
+    assert!(
+        shown < 50,
+        "{shown} rows laid out; hidden rows should be skipped"
+    );
+}
