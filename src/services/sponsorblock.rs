@@ -2,7 +2,7 @@
 //! music videos, skipped during playback. Only the first four hex digits of the video id's
 //! SHA-256 are sent; the matching video is picked out of the response locally.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -25,15 +25,26 @@ pub fn hash_prefix(video_id: &str) -> String {
     format!("{:02x}{:02x}", digest[0], digest[1])
 }
 
+fn client() -> Result<reqwest::blocking::Client> {
+    static CLIENT: std::sync::LazyLock<reqwest::Result<reqwest::blocking::Client>> =
+        std::sync::LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .user_agent("YTDugem")
+                .build()
+        });
+    CLIENT
+        .as_ref()
+        .map(Clone::clone)
+        .map_err(|e| anyhow!("Could not start the HTTP client: {e}"))
+}
+
 /// The `music_offtopic` segments of `video_id`; an empty list when it has none.
 pub fn fetch(video_id: &str) -> Result<Vec<Segment>> {
     if !super::valid_video_id(video_id) {
         bail!("Not a YouTube video ID: {video_id}");
     }
-    let response = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent("YTDugem")
-        .build()?
+    let response = client()?
         .get(format!("{API}/{}", hash_prefix(video_id)))
         .query(&[("categories", r#"["music_offtopic"]"#)])
         .send()?;

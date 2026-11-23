@@ -547,11 +547,19 @@ mod secretfile {
 // ---- Asking YouTube ---------------------------------------------------------------------------
 
 fn http() -> Result<reqwest::blocking::Client> {
-    Ok(reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(WEB_AGENT)
-        .build()?)
+    // Cookies are set per request, never on the client, so one shared client serves every account.
+    static CLIENT: std::sync::LazyLock<reqwest::Result<reqwest::blocking::Client>> =
+        std::sync::LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(20))
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent(WEB_AGENT)
+                .build()
+        });
+    CLIENT
+        .as_ref()
+        .map(Clone::clone)
+        .map_err(|e| anyhow!("Could not start the HTTP client: {e}"))
 }
 
 /// Signs in with `cookie` as `source.channel`, and falls back to the account's own channel when
