@@ -4994,6 +4994,11 @@ impl YTDugem {
         width: f32,
     ) -> bool {
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 68.0), egui::Sense::click());
+        // Rows scrolled out of view keep their height (so the scroll range is right) but draw
+        // nothing: long lists would otherwise lay out thousands of hidden titles every frame.
+        if !ui.is_rect_visible(rect) {
+            return response.clicked();
+        }
         let active = self
             .current
             .as_ref()

@@ -196,6 +196,17 @@ impl YTDugem {
             drag_stopped: false,
         };
         let base = ui.scope_id().with("queue-row");
+        // Hidden rows draw nothing, except the one whose handle is held or was just released:
+        // its drag state must keep updating while the list scrolls under the pointer.
+        let handle_id = base.with("handle");
+        let ctx = ui.ctx();
+        if !ui.is_rect_visible(rect)
+            && !ctx.is_being_dragged(handle_id)
+            && ctx.drag_stopped_id() != Some(handle_id)
+        {
+            events.clicked = response.clicked();
+            return events;
+        }
         let mut handle_active = false;
         let mut left = rect.left() + 6.0;
         if index.is_some() {
@@ -205,7 +216,7 @@ impl YTDugem {
                         Pos2::new(rect.left() + 20.0, rect.center().y),
                         Vec2::new(28.0, 44.0),
                     ),
-                    base.with("handle"),
+                    handle_id,
                     egui::Sense::drag(),
                 )
                 .on_hover_cursor(egui::CursorIcon::Grab);
