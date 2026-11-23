@@ -330,3 +330,34 @@ fn hidden_song_rows_are_not_laid_out() {
         "{shown} rows laid out; hidden rows should be skipped"
     );
 }
+
+mod slider_throttle {
+    use super::*;
+
+    #[test]
+    fn audio_filter_step_sends_once_for_many_changes() {
+        let mut app = app();
+        assert!(!app.player.is_active());
+        app.apply_audio_settings();
+        app.apply_audio_settings();
+        assert!(app.audio_filter_pending);
+        app.audio_filter_step();
+        assert!(!app.audio_filter_pending);
+        assert!(app.audio_filter_sent.is_some());
+    }
+
+    #[test]
+    fn audio_filter_step_waits_after_a_send() {
+        let mut app = app();
+        app.apply_audio_settings();
+        app.audio_filter_step();
+        let sent = app.audio_filter_sent;
+        app.audio_filter_pending = true;
+        app.audio_filter_step();
+        assert!(
+            app.audio_filter_pending,
+            "a change right after a send waits"
+        );
+        assert_eq!(app.audio_filter_sent, sent);
+    }
+}

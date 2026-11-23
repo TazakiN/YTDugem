@@ -102,6 +102,10 @@ const RECENTS: usize = 12;
 
 /// Rapid changes (a slider drag, a track change's two saves) become one write.
 const LIBRARY_SAVE_AFTER: Duration = Duration::from_secs(1);
+/// Shortest gap between two audio filter rebuilds while a slider moves.
+const AUDIO_FILTER_EVERY: Duration = Duration::from_millis(100);
+/// Shortest gap between two seeks sent while the seek bar is dragged.
+const SEEK_DRAG_EVERY: Duration = Duration::from_millis(150);
 
 /// Columns of the Home Recents grid in a page `width` wide: one per 320 px, up to three.
 fn recent_columns(width: f32) -> usize {
@@ -226,6 +230,12 @@ pub struct YTDugem {
     library_unsaved_since: Option<Instant>,
     /// The revision on disk. Shared with background writers, which run one at a time.
     library_written: Arc<Mutex<u64>>,
+    /// The audio filter changed and mpv has not been told yet; sent by `audio_filter_step`.
+    audio_filter_pending: bool,
+    /// When the filter was last sent, so a slider drag rebuilds mpv's graph a few times a second.
+    audio_filter_sent: Option<Instant>,
+    /// The position the seek bar is dragged to, and when a seek was last sent during the drag.
+    seek_drag: Option<(f64, Instant)>,
     player: Player,
     integrations: Integrations,
     status: PlayerStatus,
@@ -678,6 +688,9 @@ impl YTDugem {
             updates: Default::default(),
             stats,
             search_box: Default::default(),
+            audio_filter_pending: false,
+            audio_filter_sent: None,
+            seek_drag: None,
         }
     }
     /// Marks the library changed; `library_save_step` writes it within `LIBRARY_SAVE_AFTER`.
@@ -739,7 +752,21 @@ impl YTDugem {
             });
         }
     }
+    /// Marks the audio filter changed; `audio_filter_step` sends it to mpv.
     fn apply_audio_settings(&mut self) {
+        self.audio_filter_pending = true;
+    }
+    /// Sends the latest audio filter to mpv, at most every `AUDIO_FILTER_EVERY`.
+    fn audio_filter_step(&mut self) {
+        if !self.audio_filter_pending
+            || self
+                .audio_filter_sent
+                .is_some_and(|t| t.elapsed() < AUDIO_FILTER_EVERY)
+        {
+            return;
+        }
+        self.audio_filter_pending = false;
+        self.audio_filter_sent = Some(Instant::now());
         if self.player.is_active() {
             if let Err(error) = self.player.set_audio_filter(&self.library.audio) {
                 self.message = format!("Could not update audio filter: {error:#}");
@@ -4889,9 +4916,9 @@ impl YTDugem {
     }
     fn seekbar(&mut self, ui: &mut egui::Ui, width: f32, id: &str) {
         let duration = self.duration();
-        let mut position = self.status.position;
-        let old = position;
-        widgets::slider(
+        // While dragging, the knob follows the pointer rather than mpv's lagging position.
+        let mut position = self.seek_drag.map_or(self.status.position, |(p, _)| p);
+        let response = widgets::slider(
             ui,
             id,
             &mut position,
@@ -4899,9 +4926,26 @@ impl YTDugem {
             width,
             "Seek playback position",
         );
-        if (position - old).abs() > 0.02 && self.player.is_active() {
-            let r = self.player.seek(position);
-            self.report(r);
+        let moved = (position - self.status.position).abs() > 0.02;
+        if response.dragged() && self.player.is_active() {
+            let due = self
+                .seek_drag
+                .is_none_or(|(_, sent)| sent.elapsed() >= SEEK_DRAG_EVERY);
+            if due && moved {
+                let r = self.player.seek(position);
+                self.report(r);
+                self.seek_drag = Some((position, Instant::now()));
+            } else if let Some((dragged_to, _)) = &mut self.seek_drag {
+                *dragged_to = position;
+            }
+        }
+        if response.drag_stopped() || response.clicked() {
+            // A drag that already sent seeks always lands on the release position.
+            let dragging = self.seek_drag.take().is_some();
+            if (dragging || moved) && self.player.is_active() {
+                let r = self.player.seek(position);
+                self.report(r);
+            }
         }
     }
     /// A song's menu entries, grouped and drawn like the player's menu (`sheet_menu`).
@@ -5955,6 +5999,7 @@ impl eframe::App for YTDugem {
         self.tray_step(ctx);
         self.stats_save_step();
         self.library_save_step();
+        self.audio_filter_step();
         forget_idle_images(ctx, self.glass.as_ref().and_then(|g| g.twin()));
         ctx.request_repaint_after(Duration::from_millis(100));
     }
