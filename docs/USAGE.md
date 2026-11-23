@@ -144,6 +144,8 @@ Public search needs no account credentials or API keys. Online playback depends 
 | `BITCHORD_WSL_COMPAT=0` | Disable the WSL graphics workaround |
 | `YTDUGEM_NO_UPDATE_CHECK=1` | Skip the update check at startup |
 
+If the output device chosen under **Audio output** is no longer connected (an unplugged headset, or a driver update that changed its Windows id), music plays on the default output and a warning says so once. The choice stays saved and applies again when the device returns.
+
 The library and credentials keep the legacy BitChord application-data directory (`~/.local/share/bitchord` on Linux; Settings shows the exact path), so existing data survived the rename. The `BITCHORD_*` environment variables also remain compatible. New libraries download to `Music/YTDugem` by default, and existing libraries keep their configured download directory.
 
 Listening stats are kept in `stats.json` beside `library.json`, never in the library file, and are never sent anywhere. Each play stores the song (id, title, artist, album, artwork link), when it started (UTC) and how many seconds were heard. Plays older than two years, and the oldest beyond 40,000 plays, are dropped. New plays are saved in the background about 30 seconds after they are recorded and when YTDugem exits. The save is atomic with a `stats.json.bak` copy, and a `stats.json` that cannot be read is left untouched: recording pauses and an error is shown instead of overwriting it.

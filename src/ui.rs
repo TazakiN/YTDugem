@@ -307,6 +307,8 @@ pub struct YTDugem {
     audio_devices: Vec<(String, String)>,
     audio_devices_loading: bool,
     audio_devices_loaded: bool,
+    /// The missing output device last warned about, so each track does not warn again.
+    missing_device_warned: Option<String>,
     lyric_keys_request: u64,
     last_poll: Instant,
     /// SponsorBlock non-music segments of the playing track.
@@ -616,6 +618,7 @@ impl YTDugem {
             audio_devices: vec![],
             audio_devices_loading: false,
             audio_devices_loaded: false,
+            missing_device_warned: None,
             lyric_keys_request: 0,
             last_poll: Instant::now(),
             skipper: Default::default(),
@@ -1134,6 +1137,11 @@ impl YTDugem {
         match result {
             // `play` already showed the track, its artwork and lyrics; only attach the engine.
             Ok(p) => {
+                let missing = p.missing_device().map(str::to_owned);
+                if missing.is_some() && missing != self.missing_device_warned {
+                    self.toast_warning("The selected audio output is not connected, so music plays on the default output. Pick another one under Audio output.");
+                }
+                self.missing_device_warned = missing;
                 self.player = p;
                 self.library.remember(&t);
                 self.status = PlayerStatus::default();

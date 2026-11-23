@@ -284,6 +284,7 @@ pub struct Player {
     cookie_file: Option<crate::auth::CookieFile>,
     next_command_id: u64,
     last_error: Option<String>,
+    missing_device: Option<String>,
 }
 
 impl Player {
@@ -299,6 +300,7 @@ impl Player {
             cookie_file: None,
             next_command_id: 1,
             last_error: None,
+            missing_device: None,
         }
     }
 
@@ -344,6 +346,16 @@ impl Player {
         let mut audio = audio.clone();
         audio.sanitize();
         let force_null_output = std::env::var("BITCHORD_AUDIO_OUTPUT").as_deref() == Ok("null");
+        // A WASAPI device id changes with driver updates and vanishes with an unplugged
+        // headset; mpv then opens no output and ends the track with an error. Play on the
+        // default output instead, keeping the saved choice for when the device returns.
+        if !force_null_output && !audio.output_device.is_empty() {
+            if let Ok(devices) = audio_devices() {
+                if !devices.iter().any(|(id, _)| *id == audio.output_device) {
+                    self.missing_device = Some(std::mem::take(&mut audio.output_device));
+                }
+            }
+        }
         #[cfg(windows)]
         if !force_null_output
             && audio.wasapi_exclusive
@@ -599,6 +611,11 @@ impl Player {
     pub fn take_error(&mut self) -> Option<String> {
         self.last_error.take()
     }
+    /// The saved output device this track was asked to use but mpv no longer lists, so it
+    /// plays on the default output instead.
+    pub fn missing_device(&self) -> Option<&str> {
+        self.missing_device.as_deref()
+    }
 
     /// Replace only the filter chain while playback continues. An empty `af set` bypasses it.
     pub fn set_audio_filter(&mut self, settings: &crate::store::AudioSettings) -> Result<()> {
@@ -660,6 +677,7 @@ impl Player {
         self.status = PlayerStatus::default();
         self.audio_backend.clear();
         self.last_error = None;
+        self.missing_device = None;
     }
 
     fn command(&mut self, command: Value) -> Result<()> {
@@ -1125,13 +1143,12 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "requires mpv; run with BITCHORD_AUDIO_OUTPUT=null"]
-    fn plays_local_audio() {
+    /// A silent 44.1 kHz mono WAV of `seconds`, named after `name`.
+    fn silent_wav(name: &str, seconds: u32) -> std::path::PathBuf {
         use std::{fs::File, io::Write};
-        let path = std::env::temp_dir().join(format!("bitchord-test-{}.wav", std::process::id()));
+        let path = std::env::temp_dir().join(format!("bitchord-{name}-{}.wav", std::process::id()));
         let mut f = File::create(&path).unwrap();
-        let samples = 44_100u32 * 12;
+        let samples = 44_100u32 * seconds;
         f.write_all(b"RIFF").unwrap();
         f.write_all(&(36 + samples * 2).to_le_bytes()).unwrap();
         f.write_all(b"WAVEfmt ").unwrap();
@@ -1147,7 +1164,43 @@ mod tests {
         for _ in 0..samples {
             f.write_all(&0i16.to_le_bytes()).unwrap();
         }
-        drop(f);
+        path
+    }
+
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "requires mpv and a real audio output (not BITCHORD_AUDIO_OUTPUT=null)"]
+    fn plays_on_the_default_output_when_the_saved_device_is_gone() {
+        let path = silent_wav("missing-device", 3);
+        let mut audio = crate::store::AudioSettings::default();
+        audio.output_device = "wasapi/{00000000-0000-0000-0000-000000000000}".into();
+        let mut p = Player::new();
+        p.load_with_audio(path.to_str().unwrap(), 0.0, 1.0, &audio)
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        let s = loop {
+            let s = p.poll().expect("mpv quit before audio started");
+            assert!(!s.errored, "playback failed on a missing audio device");
+            if s.position > 0.1 && s.audio_sample_rate > 0 {
+                break s;
+            }
+            assert!(Instant::now() < until, "timed out: {s:?}");
+            thread::sleep(Duration::from_millis(25));
+        };
+        assert_eq!(p.missing_device(), Some(audio.output_device.as_str()));
+        println!(
+            "Played on {} at {:.2}s instead of the missing device",
+            p.audio_backend(),
+            s.position
+        );
+        p.stop();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "requires mpv; run with BITCHORD_AUDIO_OUTPUT=null"]
+    fn plays_local_audio() {
+        let path = silent_wav("test", 12);
         std::env::set_var("BITCHORD_AUDIO_OUTPUT", "null");
         let mut p = Player::new();
         p.load(path.to_str().unwrap(), 50.0, 1.0).unwrap();
