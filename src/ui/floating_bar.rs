@@ -313,15 +313,39 @@ impl YTDugem {
             egui::Sense::click_and_drag(),
         );
         let response = response.on_hover_text("Seek playback position");
-        let mut position = self.status.position;
+        // While dragging, the line follows the pointer rather than mpv's lagging position.
+        let mut position = self.seek_drag.map_or(self.status.position, |(p, _)| p);
         if duration > 0.0 && (response.clicked() || response.dragged()) {
             if let Some(pos) = response.interact_pointer_pos() {
                 let target = seek_target(pos.x, hit.left(), hit.right(), duration);
-                if (target - position).abs() > 0.02 && self.player.is_active() {
+                let moved = (target - self.status.position).abs() > 0.02;
+                if response.dragged() && self.player.is_active() {
+                    // At most every `SEEK_DRAG_EVERY` while dragged: each seek on a stream is
+                    // a new network request.
+                    let due = self
+                        .seek_drag
+                        .is_none_or(|(_, sent)| sent.elapsed() >= SEEK_DRAG_EVERY);
+                    if due && moved {
+                        let r = self.player.seek(target);
+                        self.report(r);
+                        self.seek_drag = Some((target, Instant::now()));
+                    } else if let Some((dragged_to, _)) = &mut self.seek_drag {
+                        *dragged_to = target;
+                    }
+                } else if response.clicked() && moved && self.player.is_active() {
                     let r = self.player.seek(target);
                     self.report(r);
                 }
                 position = target;
+            }
+        }
+        if response.drag_stopped() {
+            // The drag always lands where it was released.
+            if let Some((to, _)) = self.seek_drag.take() {
+                if self.player.is_active() {
+                    let r = self.player.seek(to);
+                    self.report(r);
+                }
             }
         }
         if response.hovered() || response.dragged() {
