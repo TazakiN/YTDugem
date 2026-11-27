@@ -1,24 +1,24 @@
 {
   "mpv": {
     "repo": "shinchiro/mpv-winbuild-cmake",
-    "tag": "20261021",
-    "asset": "mpv-x86_64-20261021-git-e471496c56.7z",
+    "tag": "20261111",
+    "asset": "mpv-x86_64-20261111-git-bcde6b93cc.7z",
     "asset_pattern": "mpv-x86_64-\\d{8}-git-[0-9a-f]+\\.7z",
-    "sha256": "4a355f3e89c83fabc730d33fb4e759dfec747806ed2287b61a90d1681b83e8d3"
+    "sha256": "f259b5fd4b5c395617c948a4fadcdf55bba1c5282fb7c13e88626b3f71072baf"
   },
   "ffmpeg": {
     "repo": "GyanD/codexffmpeg",
-    "tag": "9.0.2",
-    "asset": "ffmpeg-9.0.2-essentials_build.7z",
+    "tag": "9.1",
+    "asset": "ffmpeg-9.1-essentials_build.7z",
     "asset_pattern": "ffmpeg-[0-9.]+-essentials_build\\.7z",
-    "sha256": "4705843ccaaf54257c16ad90f3e952ece33c17df964ecf7bfdbb0f49c7171077"
+    "sha256": "835b9a733445ba7a56a37a26cf7bde84e2f3ce7da2a8ec984276bb2abb1b922c"
   },
   "yt-dlp": {
     "repo": "yt-dlp/yt-dlp",
-    "tag": "2026.10.26",
+    "tag": "2026.11.23",
     "asset": "yt-dlp.exe",
     "asset_pattern": "yt-dlp\\.exe",
-    "sha256": "f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d"
+    "sha256": "622ed48023cac1daa52a3bf3a6ac38f03514de214b5f0fa069389fd0f6d17e5c"
   },
   "deno": {
     "repo": "denoland/deno",
