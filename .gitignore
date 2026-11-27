@@ -5,3 +5,5 @@ __pycache__/
 *.tmp
 # egui_kittest reference images; they depend on the GPU that drew them, so they stay local
 tests/snapshots/
+# Local git worktrees made by coding agents
+/.claude/worktrees/
