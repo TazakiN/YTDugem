@@ -269,21 +269,6 @@ fn recents_take_one_column_per_320_points_up_to_three() {
 }
 
 #[test]
-fn recents_lead_with_songs_played_here_then_the_account_history() {
-    let ids = |list: Vec<Track>| list.into_iter().map(|t| t.id).collect::<Vec<_>>();
-    let played = [track(5), track(1)];
-    let account = [track(1), track(2), track(3)];
-    assert_eq!(
-        ids(home_recents(&played, &account)),
-        ["video05", "video01", "video02", "video03"],
-        "a song played here shows even when YouTube's history has not caught up, once"
-    );
-    assert_eq!(ids(home_recents(&[], &account)), ids(account.to_vec()));
-    let long: Vec<Track> = (0..20).map(track).collect();
-    assert_eq!(home_recents(&long, &account).len(), RECENTS);
-}
-
-#[test]
 fn shelf_arrows_page_the_row() {
     use egui_kittest::kittest::Queryable;
     let mut h = harness(app(), 1440.0, 900.0);

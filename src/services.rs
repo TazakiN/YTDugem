@@ -13,6 +13,7 @@ use std::{
 
 pub mod account;
 pub mod artist;
+pub mod history;
 pub mod lyrics;
 pub mod sponsorblock;
 pub mod translate;

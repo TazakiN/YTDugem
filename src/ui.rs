@@ -112,21 +112,6 @@ fn recent_columns(width: f32) -> usize {
     ((width / 320.0) as usize).clamp(1, 3)
 }
 
-/// Home's Recents: songs played in this app first, then the account's YouTube Music history.
-/// YTDugem does not report plays to YouTube, so that history alone would never show them.
-fn home_recents(played: &[Track], account: &[Track]) -> Vec<Track> {
-    let mut out: Vec<Track> = Vec::with_capacity(RECENTS);
-    for t in played.iter().chain(account) {
-        if out.len() == RECENTS {
-            break;
-        }
-        if !out.iter().any(|o| o.key() == t.key()) {
-            out.push(t.clone());
-        }
-    }
-    out
-}
-
 /// The Library page's links to its sub-pages.
 const LIBRARY_ENTRIES: [(Page, Icon, &str); 4] = [
     (Page::History, Icon::History, "History"),
@@ -420,6 +405,8 @@ pub struct YTDugem {
     playlist_files: playlist_files::PlaylistFiles,
     updates: updater::Updates,
     stats: stats_page::Stats,
+    /// Registers plays in the signed-in account's YouTube Music history.
+    history: services::history::Reporter,
     search_box: search_box::SearchBox,
 }
 
@@ -702,6 +689,7 @@ impl YTDugem {
             playlist_files: Default::default(),
             updates: Default::default(),
             stats,
+            history: Default::default(),
             search_box: Default::default(),
             audio_filter_pending: false,
             audio_filter_sent: None,
@@ -799,6 +787,15 @@ impl YTDugem {
         if let Err(e) = r {
             self.message = format!("{e:#}");
         }
+    }
+    /// Each poll: tells the history reporter what is playing and where.
+    fn report_history(&mut self) {
+        let now = self
+            .current
+            .as_ref()
+            .map(|t| (self.play_request, t.id.as_str()));
+        let audible = !self.loading && !self.status.paused && !self.status.ended;
+        self.history.step(now, audible, self.status.position);
     }
     fn load_home(&mut self) {
         self.home_stale = None;
@@ -4556,6 +4553,7 @@ impl YTDugem {
                 }
             }
             self.track_listen();
+            self.report_history();
             self.step_fade();
             self.maybe_crossfade();
             self.prepare_next();
@@ -5191,8 +5189,15 @@ impl YTDugem {
             Some((shelves, recents)) => (shelves.clone(), recents.clone()),
             None => (self.home.clone(), self.recents.clone()),
         };
-        let recent = home_recents(&self.library.history, &recents);
+        // Upstream: the account's Recently played signed in, which plays here now reach; this
+        // computer's history signed out.
+        let recent = if recents.is_empty() {
+            self.library.history.clone()
+        } else {
+            recents
+        };
         if !recent.is_empty() {
+            let recent: Vec<Track> = recent.into_iter().take(RECENTS).collect();
             ui.horizontal(|ui| {
                 ui.label(heading("Recents", 24.0));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -6017,6 +6022,7 @@ impl eframe::App for YTDugem {
     fn on_exit(&mut self) {
         self.write_library(true);
         self.stats_on_exit();
+        self.history.finish();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
