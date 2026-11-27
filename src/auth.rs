@@ -33,7 +33,7 @@ const MAX_INPUT: usize = 1024 * 1024;
 const MUSIC: &str = "https://music.youtube.com";
 const SIGNING: &[&str] = &["SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID"];
 const WEB_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
-const WEB_VERSION: &str = "1.20260601.01.00";
+pub(crate) const WEB_VERSION: &str = "1.20260601.01.00";
 
 /// The Google sign-in page that returns to YouTube Music, in the form of youtube.com's own Sign in
 /// link: the `youtube.com/signin` handler in `continue` is what sets the YouTube cookies. Opening
