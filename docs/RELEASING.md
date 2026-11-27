@@ -38,14 +38,17 @@ long-lived `stable` or `nightly` branches:
    git push origin v0.2.0
    ```
 
-4. `.github/workflows/release.yml` runs on the tag. It checks the version, then runs fmt, clippy,
-   the tests, the release build, the packager and the offline playback smoke test. It then
-   publishes a GitHub release with generated notes and these files:
+4. `.github/workflows/release.yml` runs on the tag in three jobs:
+   - **verify** checks that the tag is `v` + the `Cargo.toml` version and that it points at a
+     commit on `main`;
+   - **build** runs `.github/workflows/build.yml`, the same build CI uses: fmt, clippy, tests,
+     the release build, the packaging checks, the packager, the offline playback smoke test, and
+     the installer test (install, start, uninstall). It has a read-only token;
+   - **publish** is the only job that can write to the repository. It takes the build's files,
+     writes the checksums and publishes a GitHub release with generated notes and these files:
    - `YTDugem-windows-x86_64-setup.exe`: the installer
    - `YTDugem-windows-x86_64.zip`: the portable package
    - a `.sha256` for each (`<hash>  <file>`, as `sha256sum` prints it)
-
-   It also builds the installer and test-installs it silently: install, start, uninstall.
 5. Edit the release notes on GitHub if you want. The update dialog shows them.
 
 If the workflow fails, fix the problem on `main`, delete the tag (`git push origin :v0.2.0`,
