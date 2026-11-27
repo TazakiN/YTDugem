@@ -112,6 +112,21 @@ fn recent_columns(width: f32) -> usize {
     ((width / 320.0) as usize).clamp(1, 3)
 }
 
+/// Home's Recents: songs played in this app first, then the account's YouTube Music history.
+/// YTDugem does not report plays to YouTube, so that history alone would never show them.
+fn home_recents(played: &[Track], account: &[Track]) -> Vec<Track> {
+    let mut out: Vec<Track> = Vec::with_capacity(RECENTS);
+    for t in played.iter().chain(account) {
+        if out.len() == RECENTS {
+            break;
+        }
+        if !out.iter().any(|o| o.key() == t.key()) {
+            out.push(t.clone());
+        }
+    }
+    out
+}
+
 /// The Library page's links to its sub-pages.
 const LIBRARY_ENTRIES: [(Page, Icon, &str); 4] = [
     (Page::History, Icon::History, "History"),
@@ -5168,7 +5183,7 @@ impl YTDugem {
         }
     }
     fn home_view(&mut self, ui: &mut egui::Ui) {
-        self.settle_home_refresh();
+        self.settle_home_refresh(ui.ctx());
         self.home_pull_slot(ui);
         // While a pull refresh loads, the old shelves stay on screen.
         let refreshing = self.home_stale.is_some();
@@ -5176,13 +5191,8 @@ impl YTDugem {
             Some((shelves, recents)) => (shelves.clone(), recents.clone()),
             None => (self.home.clone(), self.recents.clone()),
         };
-        let recent = if recents.is_empty() {
-            self.library.history.clone()
-        } else {
-            recents
-        };
+        let recent = home_recents(&self.library.history, &recents);
         if !recent.is_empty() {
-            let recent: Vec<Track> = recent.into_iter().take(RECENTS).collect();
             ui.horizontal(|ui| {
                 ui.label(heading("Recents", 24.0));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -6788,7 +6798,25 @@ fn forget_idle_images(ctx: &egui::Context, twin: Option<&egui::Context>) {
         }
         _ => return,
     };
-    for uri in stale {
+    forget_images(ctx, twin, stale);
+}
+
+/// Releases every web picture drawn so far, so the next draw downloads it again. egui keeps a
+/// failed download for the whole session, so without this a refresh would leave it blank.
+fn forget_drawn_images(ctx: &egui::Context, twin: Option<&egui::Context>) {
+    let drawn = match DRAWN_IMAGES.lock() {
+        Ok(mut drawn) => std::mem::take(&mut drawn.0),
+        Err(_) => return,
+    };
+    forget_images(ctx, twin, drawn.into_keys());
+}
+
+fn forget_images(
+    ctx: &egui::Context,
+    twin: Option<&egui::Context>,
+    uris: impl IntoIterator<Item = String>,
+) {
+    for uri in uris {
         ctx.forget_image(&uri);
         if let Some(twin) = twin {
             twin.forget_image(&uri);

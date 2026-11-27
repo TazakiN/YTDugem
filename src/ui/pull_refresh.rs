@@ -109,9 +109,9 @@ impl YTDugem {
         }
     }
 
-    /// Once every Home request has answered, drop the old shelves, or put them back if the
-    /// refresh brought nothing (the error is already in `message`).
-    pub(super) fn settle_home_refresh(&mut self) {
+    /// Once every Home request has answered, drop the old shelves and their pictures, or put
+    /// them back if the refresh brought nothing (the error is already in `message`).
+    pub(super) fn settle_home_refresh(&mut self, ctx: &egui::Context) {
         if self.home_pending > 0 {
             return;
         }
@@ -121,6 +121,8 @@ impl YTDugem {
                 if self.recents.is_empty() {
                     self.recents = recents;
                 }
+            } else {
+                forget_drawn_images(ctx, self.glass.as_ref().and_then(|g| g.twin()));
             }
         }
     }
