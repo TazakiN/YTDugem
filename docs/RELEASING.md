@@ -56,7 +56,7 @@ If the workflow fails, fix the problem on `main`, delete the tag (`git push orig
 The bundled mpv, FFmpeg, yt-dlp and Deno builds are pinned in `scripts/runtime-tools.json`.
 The **Runtime tools** workflow checks their latest upstream releases daily. When one is newer, it
 rewrites the pin with the SHA-256 of the downloaded file and opens or updates a single
-`runtime-tools/update` pull request, then runs the **Rust desktop** checks on it. Merging that PR
+`runtime-tools/update` pull request, then runs the **Rust desktop** checks on it. If a scheduled run fails, it opens (or comments on) an issue titled "Runtime tools update is failing". The PR step needs the repository setting "Allow GitHub Actions to create and approve pull requests" (Settings → Actions → General). Merging that PR
 ships nothing by itself: users get the new tools with the next release. To bump by hand, run
 `python scripts/update-runtime.py`.
 
