@@ -312,18 +312,6 @@ impl YTDugem {
                 self.lyrics_sources_open = false;
             }
         }
-        // The page's status line is hidden behind the sheet; failures must still be seen.
-        if !self.message.is_empty() {
-            fit_text(
-                ui.painter(),
-                Pos2::new(rect.center().x, rect.bottom() - 10.0),
-                egui::Align2::CENTER_CENTER,
-                &self.message,
-                FontId::proportional(12.0),
-                MUTED,
-                rect.width() - 80.0,
-            );
-        }
     }
 
     /// Advances the backdrop crossfade and returns its eased progress, 0 → 1; settled at 1 when

@@ -268,7 +268,6 @@ pub struct YTDugem {
     collection_request: u64,
     tx: Sender<Event>,
     rx: Receiver<Event>,
-    message: String,
     /// Short results (signed in, downloaded, errors) shown as toasts instead of page text.
     toasts: egui_notify::Toasts,
     importing: bool,
@@ -553,7 +552,7 @@ impl YTDugem {
     ) -> Self {
         let download_path = library.download_dir.to_string_lossy().into_owned();
         let (tx, rx) = mpsc::channel();
-        Self {
+        let mut app = Self {
             library,
             path,
             read_only,
@@ -589,7 +588,6 @@ impl YTDugem {
             collection_request: 0,
             tx,
             rx,
-            message,
             // Top right, below the top bar so the account button stays clear.
             toasts: egui_notify::Toasts::new()
                 .with_anchor(egui_notify::Anchor::TopRight)
@@ -697,7 +695,15 @@ impl YTDugem {
             audio_filter_pending: false,
             audio_filter_sent: None,
             seek_drag: None,
+        };
+        // A start-up problem (an unreadable library, saving turned off) stays until closed.
+        if !message.is_empty() {
+            app.toasts
+                .warning(message)
+                .width(TOAST_WIDTH)
+                .duration(None);
         }
+        app
     }
     /// Marks the library changed; `library_save_step` writes it within `LIBRARY_SAVE_AFTER`.
     fn save(&mut self) {
@@ -725,7 +731,7 @@ impl YTDugem {
         let bytes = match serde_json::to_vec_pretty(&self.library) {
             Ok(b) => b,
             Err(e) => {
-                self.message = format!("Could not save library: {e:#}");
+                self.toast_error(format!("Could not save library: {e:#}"));
                 return;
             }
         };
@@ -775,7 +781,7 @@ impl YTDugem {
         self.audio_filter_sent = Some(Instant::now());
         if self.player.is_active() {
             if let Err(error) = self.player.set_audio_filter(&self.library.audio) {
-                self.message = format!("Could not update audio filter: {error:#}");
+                self.toast_error(format!("Could not update audio filter: {error:#}"));
             }
         }
     }
@@ -788,7 +794,7 @@ impl YTDugem {
     }
     fn report(&mut self, r: anyhow::Result<()>) {
         if let Err(e) = r {
-            self.message = format!("{e:#}");
+            self.toast_error(format!("{e:#}"));
         }
     }
     /// Each poll: tells the history reporter what is playing and where.
@@ -1121,7 +1127,7 @@ impl YTDugem {
             return;
         }
         if self.account.is_none() {
-            self.message = "Sign in to YouTube Music to rate songs".into();
+            self.toast_info("Sign in to YouTube Music to rate songs");
             return;
         }
         let previous = self.rating_of(&t);
@@ -1191,7 +1197,7 @@ impl YTDugem {
                     fade.started = Some(Instant::now());
                 } else if self.player.volume(self.library.volume).is_err() {
                     // Started silent for a blend that has already ended; restore it.
-                    self.message = "Could not restore the volume after a crossfade".into();
+                    self.toast_error("Could not restore the volume after a crossfade");
                 }
                 self.save();
             }
@@ -1199,7 +1205,7 @@ impl YTDugem {
                 self.status.paused = true;
                 self.status.ended = true;
                 self.fade = None;
-                self.message = format!("Playback failed: {e}");
+                self.toast_error(format!("Playback failed: {e}"));
             }
         }
     }
@@ -1531,7 +1537,7 @@ impl YTDugem {
                 d.cancel = Arc::new(AtomicBool::new(false));
             }
             Some(_) => {
-                self.message = format!("{} is already in Downloads", t.title);
+                self.toast_info(format!("{} is already in Downloads", t.title));
                 return;
             }
             None => self.downloads.push(DownloadItem {
@@ -1742,7 +1748,7 @@ impl YTDugem {
         job: impl FnOnce() -> anyhow::Result<PlaylistEdit> + Send + 'static,
     ) -> bool {
         if self.playlist_busy {
-            self.message = "Another playlist change is still being saved".into();
+            self.toast_info("Another playlist change is still being saved");
             return false;
         }
         self.playlist_busy = true;
@@ -1771,7 +1777,7 @@ impl YTDugem {
                 if pending && self.playlist_dialog.is_some() {
                     self.playlist_error = e.clone();
                 }
-                self.message = e;
+                self.toast_error(e);
                 return;
             }
         };
@@ -1782,15 +1788,15 @@ impl YTDugem {
         let open = self.collection.as_ref().and_then(|c| c.playlist_id.clone());
         match edit {
             PlaylistEdit::Created { title, seeded } => {
-                self.message = if seeded {
+                self.toast_success(if seeded {
                     format!("Created “{title}” with the song")
                 } else {
                     format!("Created “{title}”")
-                };
+                });
                 self.load_account_playlists();
             }
             PlaylistEdit::Deleted { id } => {
-                self.message = "Playlist deleted".into();
+                self.toast_success("Playlist deleted");
                 if open.as_deref() == Some(id.as_str()) {
                     self.collection = None;
                     self.page = Page::Library;
@@ -1800,7 +1806,7 @@ impl YTDugem {
                 }
             }
             PlaylistEdit::Renamed { id, name } => {
-                self.message = format!("Renamed to “{name}”");
+                self.toast_success(format!("Renamed to “{name}”"));
                 if open.as_deref() == Some(id.as_str()) {
                     if let Some(c) = &mut self.collection {
                         c.title = name.clone();
@@ -1815,7 +1821,7 @@ impl YTDugem {
                 }
             }
             PlaylistEdit::Added { id, track, set_id } => {
-                self.message = format!("Added “{}”", track.title);
+                self.toast_success(format!("Added “{}”", track.title));
                 if open.as_deref() == Some(id.as_str()) {
                     if let Some(c) = &mut self.collection {
                         if let Some(set_id) = set_id {
@@ -1826,7 +1832,7 @@ impl YTDugem {
                 }
             }
             PlaylistEdit::Removed { id, video_id } => {
-                self.message = "Removed from playlist".into();
+                self.toast_success("Removed from playlist");
                 if open.as_deref() == Some(id.as_str()) {
                     if let Some(c) = &mut self.collection {
                         if let Some(i) = c.tracks.iter().position(|t| t.id == video_id) {
@@ -1837,11 +1843,11 @@ impl YTDugem {
                 }
             }
             PlaylistEdit::Saved { id, saved } => {
-                self.message = if saved {
-                    "Saved to your library".into()
+                self.toast_success(if saved {
+                    "Saved to your library"
                 } else {
-                    "Removed from your library".into()
-                };
+                    "Removed from your library"
+                });
                 if open.as_deref() == Some(id.as_str()) {
                     if let Some(c) = &mut self.collection {
                         c.saved = Some(saved);
@@ -1850,7 +1856,7 @@ impl YTDugem {
                 self.load_account_playlists();
             }
             PlaylistEdit::Privacy { id, privacy } => {
-                self.message = format!("Playlist is now {}", privacy_label(&privacy));
+                self.toast_success(format!("Playlist is now {}", privacy_label(&privacy)));
                 if open.as_deref() == Some(id.as_str()) {
                     if let Some(c) = &mut self.collection {
                         c.privacy = Some(privacy);
@@ -1858,7 +1864,7 @@ impl YTDugem {
                 }
             }
             PlaylistEdit::Described { id, description } => {
-                self.message = "Description saved".into();
+                self.toast_success("Description saved");
                 if open.as_deref() == Some(id.as_str()) {
                     if let Some(c) = &mut self.collection {
                         c.description = description;
@@ -1866,7 +1872,7 @@ impl YTDugem {
                 }
             }
             PlaylistEdit::Reordered(collection) => {
-                self.message = "Playlist order saved".into();
+                self.toast_success("Playlist order saved");
                 if collection.playlist_id.is_some() && collection.playlist_id == open {
                     self.collection = Some(*collection);
                 }
@@ -1924,7 +1930,7 @@ impl YTDugem {
     }
     fn apply_bulk(&mut self, action: PlaylistBulk, mut tracks: Vec<Track>, origin: &str) {
         if tracks.is_empty() {
-            self.message = "This playlist is empty".into();
+            self.toast_info("This playlist is empty");
             return;
         }
         match action {
@@ -1934,21 +1940,21 @@ impl YTDugem {
                 self.start_tracks(tracks, 0, origin);
             }
             PlaylistBulk::Queue => {
-                self.message = format!("Added {} songs to the queue", tracks.len());
+                self.toast_success(format!("Added {} songs to the queue", tracks.len()));
                 self.library.queue.extend(tracks);
                 self.save();
             }
             PlaylistBulk::Download => {
                 tracks.retain(is_youtube_track);
                 if tracks.is_empty() {
-                    self.message = "None of these songs can be downloaded".into();
+                    self.toast_info("None of these songs can be downloaded");
                     return;
                 }
                 let n = tracks.len();
                 for t in tracks {
                     self.download(t);
                 }
-                self.message = format!("Downloading {n} songs");
+                self.toast_success(format!("Downloading {n} songs"));
             }
         }
     }
@@ -2472,10 +2478,10 @@ impl YTDugem {
             DialogAct::PickLocal(index, track) => {
                 if let Some(name) = self.library.playlists.get(index).map(|p| p.name.clone()) {
                     if self.library.add_to_playlist(index, track) {
-                        self.message = format!("Added to {name}");
+                        self.toast_success(format!("Added to {name}"));
                         self.save();
                     } else {
-                        self.message = format!("Already in {name}");
+                        self.toast_info(format!("Already in {name}"));
                     }
                 }
                 return;
@@ -2515,7 +2521,7 @@ impl YTDugem {
                     match self.library.create_playlist(&name, seed.clone()) {
                         Ok(index) => {
                             self.save();
-                            self.message = format!("Created “{}”", name.trim());
+                            self.toast_success(format!("Created “{}”", name.trim()));
                             self.navigate(Page::Playlist(index));
                             return None;
                         }
@@ -2546,7 +2552,7 @@ impl YTDugem {
             } => match self.library.rename_playlist(index, &name) {
                 Ok(()) => {
                     self.save();
-                    self.message = format!("Renamed to “{}”", name.trim());
+                    self.toast_success(format!("Renamed to “{}”", name.trim()));
                     None
                 }
                 Err(e) => {
@@ -2581,7 +2587,7 @@ impl YTDugem {
                 if self.library.delete_playlist(index).is_some() {
                     self.local_playlist_deleted();
                     self.save();
-                    self.message = format!("Deleted “{title}”");
+                    self.toast_success(format!("Deleted “{title}”"));
                 }
                 None
             }
@@ -3809,8 +3815,9 @@ impl YTDugem {
     fn toast_warning(&mut self, text: impl Into<egui::WidgetText>) {
         self.toasts.warning(text).width(TOAST_WIDTH);
     }
+    /// Errors stay until clicked away, so none is missed while looking elsewhere.
     fn toast_error(&mut self, text: impl Into<egui::WidgetText>) {
-        self.toasts.error(text).width(TOAST_WIDTH);
+        self.toasts.error(text).width(TOAST_WIDTH).duration(None);
     }
     /// The account's picture in the top bar, which opens a menu of the account, its channels,
     /// the settings and the sign-in (Meiro `accountButton`).
@@ -4242,7 +4249,7 @@ impl YTDugem {
                         Ok(list) => self.account_playlists = Some(list),
                         Err(e) => {
                             self.account_playlists = Some(vec![]);
-                            self.message = e;
+                            self.toast_error(e);
                         }
                     }
                 }
@@ -4254,7 +4261,7 @@ impl YTDugem {
                     self.toast_error(format!("Could not save listening stats: {e}"))
                 }
                 Event::LibrarySaveFailed(e) => {
-                    self.message = format!("Could not save library: {e}")
+                    self.toast_error(format!("Could not save library: {e}"))
                 }
                 Event::Suggestions(id, query, r)
                     if id == self.palette_request && query == self.palette_query.trim() =>
@@ -4272,7 +4279,7 @@ impl YTDugem {
                             if matches!(action, PlaylistBulk::Play | PlaylistBulk::Shuffle)
                                 && played != self.play_request => {}
                         Ok(tracks) => self.apply_bulk(action, tracks, &origin),
-                        Err(e) => self.message = e,
+                        Err(e) => self.toast_error(e),
                     }
                 }
                 Event::Translated(id, r) if id == self.translation_request => {
@@ -4283,14 +4290,14 @@ impl YTDugem {
                                 self.translation = Some((key, self.translation_target(), t));
                             }
                         }
-                        Err(e) => self.message = format!("Translation unavailable: {e}"),
+                        Err(e) => self.toast_error(format!("Translation unavailable: {e}")),
                     }
                 }
                 Event::Romanized(id, key, r) if id == self.romanization_request => {
                     self.romanizing = false;
                     match r {
                         Ok(romanized) => self.romanization = Some((key, romanized)),
-                        Err(e) => self.message = format!("Romanization unavailable: {e}"),
+                        Err(e) => self.toast_error(format!("Romanization unavailable: {e}")),
                     }
                 }
                 // Quiet on failure: the like button and the album/artist entries just stay off.
@@ -4306,7 +4313,7 @@ impl YTDugem {
                         }
                         // Left loading, so it is not retried until the account changes; the row
                         // menus still offer Like and Dislike, just without the known state.
-                        Err(e) => self.message = format!("Could not load your liked songs: {e}"),
+                        Err(e) => self.toast_error(format!("Could not load your liked songs: {e}")),
                     }
                 }
                 Event::Rated(epoch, track, status, previous, r) if epoch == self.account_epoch => {
@@ -4334,7 +4341,7 @@ impl YTDugem {
                     self.busy = false;
                     match r {
                         Ok(t) => self.results = t,
-                        Err(e) => self.message = e,
+                        Err(e) => self.toast_error(e),
                     }
                 }
                 Event::Home(id, r) if id == self.home_request => {
@@ -4358,7 +4365,7 @@ impl YTDugem {
                         }
                         Err(e) => {
                             if self.home.is_empty() {
-                                self.message = e;
+                                self.toast_error(e);
                             }
                         }
                     }
@@ -4418,7 +4425,7 @@ impl YTDugem {
                                 self.collection = Some(c);
                             }
                         }
-                        Err(e) => self.message = e,
+                        Err(e) => self.toast_error(e),
                     }
                 }
                 Event::Imported(r) => {
@@ -4532,15 +4539,12 @@ impl YTDugem {
                     Ok(_) => {
                         // A refusal of the old session no longer applies.
                         services::take_sign_in_rejected();
-                        if self.message.starts_with("Your YouTube sign-in has expired") {
-                            self.message.clear();
-                        }
                         self.sync_account();
                     }
                     // YouTube retired the session and no browser could replace it.
                     Err((true, e)) => {
                         self.sync_account();
-                        self.message = e;
+                        self.toast_error(e);
                     }
                     // Offline or YouTube unreachable: keep the session and check next time.
                     Err((false, _)) => {}
@@ -4552,7 +4556,7 @@ impl YTDugem {
                             self.lyric_keys = keys.into_iter().collect();
                             self.lyric_keys_loaded = true;
                         }
-                        Err(e) => self.message = e,
+                        Err(e) => self.toast_error(e),
                     }
                 }
                 Event::LyricsKeySaved(id, key, r) if id == self.lyric_keys_request => {
@@ -4564,7 +4568,7 @@ impl YTDugem {
                             self.lyric_keys_loaded = true;
                             self.lyrics_settings_changed(true);
                         }
-                        Err(e) => self.message = e,
+                        Err(e) => self.toast_error(e),
                     }
                 }
                 Event::AudioDevices(result) => {
@@ -4572,9 +4576,8 @@ impl YTDugem {
                     self.audio_devices_loaded = true;
                     match result {
                         Ok(devices) => self.audio_devices = devices,
-                        Err(error) => {
-                            self.message = format!("Could not enumerate mpv audio devices: {error}")
-                        }
+                        Err(error) => self
+                            .toast_error(format!("Could not enumerate mpv audio devices: {error}")),
                     }
                 }
                 Event::Radio(id, key, r)
@@ -4591,7 +4594,7 @@ impl YTDugem {
                             }
                             self.save();
                         }
-                        Err(e) => self.message = e,
+                        Err(e) => self.toast_error(e),
                     }
                 }
                 Event::Update(e) => self.update_event(ctx, e),
@@ -4631,7 +4634,7 @@ impl YTDugem {
         if self.sleep_until.is_some_and(|t| Instant::now() >= t) {
             self.sleep_until = None;
             self.stop();
-            self.message = "Sleep timer finished".into();
+            self.toast_info("Sleep timer finished");
         }
         if self.library.discord_enabled {
             if let Some(track) = self
@@ -6328,9 +6331,6 @@ impl YTDugem {
                             ui.add_space(pad);
                             ui.vertical(|ui| {
                                 ui.set_width(width);
-                                if !self.message.is_empty() {
-                                    ui.label(RichText::new(&self.message).color(MUTED));
-                                }
                                 self.content(ui);
                                 // Room to scroll the last row out from under the player bar.
                                 ui.add_space(floating_bar::RESERVED);
@@ -7867,6 +7867,6 @@ mod stale_result_tests {
         assert_eq!(app.translation_request, 6);
         assert!(!app.translating);
         deliver(&mut app, Event::Translated(5, Err("late".into())));
-        assert!(app.message.is_empty());
+        assert!(app.toasts.is_empty());
     }
 }

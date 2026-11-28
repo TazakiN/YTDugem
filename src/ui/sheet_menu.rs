@@ -280,22 +280,22 @@ impl YTDugem {
             MenuAction::SleepIn(minutes) => {
                 self.stop_after_track = false;
                 self.sleep_until = Some(Instant::now() + Duration::from_secs(minutes * 60));
-                self.message = format!("Playback will stop in {minutes} minutes");
+                self.toast_info(format!("Playback will stop in {minutes} minutes"));
             }
             MenuAction::SleepAfterSong => {
                 self.sleep_until = None;
                 self.stop_after_track = true;
-                self.message = "Playback will stop after this song".into();
+                self.toast_info("Playback will stop after this song");
             }
             MenuAction::SleepOff => {
                 self.sleep_until = None;
                 self.stop_after_track = false;
-                self.message = "Sleep timer off".into();
+                self.toast_info("Sleep timer off");
             }
             MenuAction::Share => {
                 ui.ctx()
                     .copy_text(format!("https://music.youtube.com/watch?v={}", track.id));
-                self.message = "Link copied".into();
+                self.toast_success("Link copied");
             }
         }
     }

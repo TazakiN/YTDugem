@@ -110,7 +110,7 @@ impl YTDugem {
     }
 
     /// Once every Home request has answered, drop the old shelves and their pictures, or put
-    /// them back if the refresh brought nothing (the error is already in `message`).
+    /// them back if the refresh brought nothing (the error was already shown as a toast).
     pub(super) fn settle_home_refresh(&mut self, ctx: &egui::Context) {
         if self.home_pending > 0 {
             return;

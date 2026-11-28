@@ -570,7 +570,7 @@ impl YTDugem {
         }
         self.artists.lookup_request += 1;
         let request = self.artists.lookup_request;
-        self.message = format!("Looking for {}…", link.name);
+        self.toast_info(format!("Looking for {}…", link.name));
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let result = services::artist::find_artist_id(&link.name).map_err(err);
@@ -587,12 +587,9 @@ impl YTDugem {
             return;
         }
         match result {
-            Ok(Some(id)) => {
-                self.message.clear();
-                self.open_artist(id);
-            }
-            Ok(None) => self.message = format!("No artist page found for {name}"),
-            Err(e) => self.message = e,
+            Ok(Some(id)) => self.open_artist(id),
+            Ok(None) => self.toast_info(format!("No artist page found for {name}")),
+            Err(e) => self.toast_error(e),
         }
     }
 
@@ -695,7 +692,7 @@ impl YTDugem {
         self.artists.queue_loading = false;
         match result {
             Ok(tracks) => self.start_tracks(tracks, 0, &origin),
-            Err(e) => self.message = e,
+            Err(e) => self.toast_error(e),
         }
     }
 
@@ -724,7 +721,7 @@ impl YTDugem {
         self.artists.subscribing = false;
         if let Err(e) = result {
             self.set_subscribed(&browse_id, Some(!subscribed));
-            self.message = e;
+            self.toast_error(e);
         }
     }
 
