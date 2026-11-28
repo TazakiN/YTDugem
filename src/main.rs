@@ -107,11 +107,22 @@ fn main() -> eframe::Result {
 }
 
 /// One app per library. Restarted by an update, the old app may still be closing: wait for it.
+/// The first run after the rename copies the BitChord data folder, under that folder's lock.
 fn lock_instance(after_update: bool) -> anyhow::Result<std::fs::File> {
     let path = store::data_path();
+    if let Some(legacy) = store::legacy_data_path() {
+        let _legacy_lock = lock_retrying(&legacy, after_update)?;
+        if let (Some(from), Some(to)) = (legacy.parent(), path.parent()) {
+            store::migrate_data(from, to)?;
+        }
+    }
+    lock_retrying(&path, after_update)
+}
+
+fn lock_retrying(path: &std::path::Path, after_update: bool) -> anyhow::Result<std::fs::File> {
     let mut tries = if after_update { 50 } else { 1 };
     loop {
-        match store::lock(&path) {
+        match store::lock(path) {
             Err(_) if tries > 1 => {
                 tries -= 1;
                 std::thread::sleep(std::time::Duration::from_millis(200));
