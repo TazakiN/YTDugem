@@ -3815,8 +3815,9 @@ impl YTDugem {
     fn toast_warning(&mut self, text: impl Into<egui::WidgetText>) {
         self.toasts.warning(text).width(TOAST_WIDTH);
     }
+    /// Errors stay until clicked away, so none is missed while looking elsewhere.
     fn toast_error(&mut self, text: impl Into<egui::WidgetText>) {
-        self.toasts.error(text).width(TOAST_WIDTH);
+        self.toasts.error(text).width(TOAST_WIDTH).duration(None);
     }
     /// The account's picture in the top bar, which opens a menu of the account, its channels,
     /// the settings and the sign-in (Meiro `accountButton`).
