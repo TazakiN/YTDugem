@@ -305,6 +305,8 @@ pub struct YTDugem {
     account: Option<Account>,
     /// The sign-in dialog while it is open.
     sign_in: SignIn,
+    /// The Switch account dialog is open.
+    switch_account: bool,
     account_request: u64,
     /// The accounts and channels the session can act as, and which one it does.
     channels: Vec<auth::Channel>,
@@ -619,6 +621,7 @@ impl YTDugem {
             stop_after_track: false,
             account,
             sign_in: SignIn::default(),
+            switch_account: false,
             account_request: 0,
             channels: vec![],
             source: auth::Source::default(),
@@ -3763,7 +3766,12 @@ impl YTDugem {
                     // A failed import or paste points at pasting instead.
                     self.sign_in.import_failed = self.sign_in.source.to_owned();
                 }
-                self.sign_in.err = e;
+                if self.sign_in.open {
+                    self.sign_in.err = e;
+                } else {
+                    // A switch from the account menu has no dialog left to show it.
+                    self.toast_error(format!("Could not switch account: {e}"));
+                }
             }
             Err(_) => {}
         }
@@ -3833,73 +3841,173 @@ impl YTDugem {
             &response,
             egui::PopupCloseBehavior::CloseOnClickOutside,
             |ui| {
-                ui.set_min_width(260.0);
-                if let Some(a) = &self.account {
-                    ui.add_space(4.0);
-                    ui.add(egui::Label::new(heading(&a.name, 15.0)).truncate());
-                    if !a.email.is_empty() {
-                        ui.add(
-                            egui::Label::new(RichText::new(&a.email).size(12.5).color(MUTED))
-                                .truncate(),
-                        );
-                    }
-                    ui.separator();
+                ui.set_width(280.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                self.account_menu_header(ui);
+                sheet_menu::separator(ui);
+                if self.account.is_some() {
                     // Only when the cookies can act as more than one account or channel.
-                    if self.channels.len() >= 2 {
-                        ui.label(RichText::new("Account / channel").size(12.0).color(MUTED));
-                        let has_selected = self
-                            .channels
-                            .iter()
-                            .any(|c| c.selected && c.account_index == self.source.account_index);
-                        for channel in &self.channels {
-                            let selected = channel.account_index == self.source.account_index
-                                && if has_selected {
-                                    channel.selected
-                                } else {
-                                    !self.source.channel.is_empty()
-                                        && channel.channel_id == self.source.channel
-                                };
-                            let text = format!(
-                                "{}  {}",
-                                if selected {
-                                    egui_phosphor::regular::CHECK
-                                } else {
-                                    "   "
-                                },
-                                channel.label()
-                            );
-                            let row = ui.add_enabled(
-                                !channel.disabled,
-                                egui::Button::new(text).frame(false),
-                            );
-                            if row.clicked() && !selected {
-                                action = Some(AccountAction::Switch(channel.clone()));
-                            }
-                        }
-                        ui.separator();
+                    if self.channels.len() >= 2
+                        && sheet_menu::menu_row(
+                            ui,
+                            Icon::SwitchAccount,
+                            "Switch account",
+                            Some(egui_phosphor::regular::CARET_RIGHT),
+                            true,
+                        )
+                    {
+                        action = Some(AccountAction::SwitchDialog);
                     }
-                }
-                if ui.add(egui::Button::new("Settings").frame(false)).clicked() {
-                    action = Some(AccountAction::Settings);
-                }
-                let (label, act) = if self.account.is_some() {
-                    ("Sign out", AccountAction::SignOut)
+                    if sheet_menu::menu_row(ui, Icon::Settings, "Settings", None, true) {
+                        action = Some(AccountAction::Settings);
+                    }
+                    sheet_menu::separator(ui);
+                    if sheet_menu::menu_row(ui, Icon::SignOut, "Sign out", None, true) {
+                        action = Some(AccountAction::SignOut);
+                    }
                 } else {
-                    ("Sign in", AccountAction::SignIn)
-                };
-                if ui.add(egui::Button::new(label).frame(false)).clicked() {
-                    action = Some(act);
+                    if sheet_menu::menu_row(ui, Icon::SignIn, "Sign in", None, true) {
+                        action = Some(AccountAction::SignIn);
+                    }
+                    if sheet_menu::menu_row(ui, Icon::Settings, "Settings", None, true) {
+                        action = Some(AccountAction::Settings);
+                    }
                 }
             },
         );
         if let Some(action) = action {
             egui::Popup::close_id(ui.ctx(), popup);
             match action {
-                AccountAction::Switch(channel) => self.switch_channel(channel),
+                AccountAction::SwitchDialog => self.switch_account = true,
                 AccountAction::Settings => self.navigate(Page::Settings),
                 AccountAction::SignOut => self.sign_out(),
                 AccountAction::SignIn => self.open_sign_in(),
             }
+        }
+    }
+    /// The top of the account menu: the picture, name and email, or a hint to sign in.
+    fn account_menu_header(&self, ui: &mut egui::Ui) {
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 60.0), egui::Sense::hover());
+        let picture = Rect::from_min_size(
+            Pos2::new(rect.left() + 10.0, rect.center().y - 20.0),
+            Vec2::splat(40.0),
+        );
+        let x = picture.right() + 12.0;
+        let width = rect.right() - x - 10.0;
+        let bold = FontId::new(15.0, egui::FontFamily::Name("bold".into()));
+        let (title, detail) = match &self.account {
+            Some(a) => {
+                avatar(ui, &a.thumbnail, &a.name, picture);
+                let detail = if a.email.is_empty() {
+                    self.current_channel()
+                        .map(|c| c.detail().to_owned())
+                        .unwrap_or_default()
+                } else {
+                    a.email.clone()
+                };
+                (a.name.clone(), detail)
+            }
+            None => {
+                ui.painter()
+                    .circle_filled(picture.center(), 20.0, widgets::white_alpha(22));
+                widgets::paint(ui.painter(), Icon::User, picture.shrink(10.0), MUTED);
+                (
+                    "Not signed in".to_owned(),
+                    "Sign in for your library and mixes".to_owned(),
+                )
+            }
+        };
+        let y = if detail.is_empty() {
+            rect.center().y
+        } else {
+            rect.center().y - 9.0
+        };
+        fit_text(
+            ui.painter(),
+            Pos2::new(x, y),
+            egui::Align2::LEFT_CENTER,
+            &title,
+            bold,
+            WHITE,
+            width,
+        );
+        if !detail.is_empty() {
+            fit_text(
+                ui.painter(),
+                Pos2::new(x, rect.center().y + 11.0),
+                egui::Align2::LEFT_CENTER,
+                &detail,
+                FontId::proportional(12.5),
+                MUTED,
+                width,
+            );
+        }
+    }
+    /// Whether `channel` is the account or channel the session acts as now.
+    fn is_current_channel(&self, channel: &auth::Channel) -> bool {
+        let has_selected = self
+            .channels
+            .iter()
+            .any(|c| c.selected && c.account_index == self.source.account_index);
+        channel.account_index == self.source.account_index
+            && if has_selected {
+                channel.selected
+            } else {
+                !self.source.channel.is_empty() && channel.channel_id == self.source.channel
+            }
+    }
+    fn current_channel(&self) -> Option<&auth::Channel> {
+        self.channels.iter().find(|c| self.is_current_channel(c))
+    }
+    /// Lists the session's accounts and channels in the middle of the window, as the sign-in
+    /// picker does, and switches to the one picked.
+    fn switch_account_dialog(&mut self, ctx: &egui::Context) {
+        if !self.switch_account {
+            return;
+        }
+        if self.account.is_none() {
+            self.switch_account = false;
+            return;
+        }
+        let mut picked = None;
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::unique("switch-account"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                dialog_frame(ui, |ui| {
+                    ui.label(heading("Switch account", 22.0));
+                    ui.add_space(6.0);
+                    muted(
+                        ui,
+                        "Choose the account or channel YTDugem uses. It remembers your choice.",
+                    );
+                    ui.add_space(10.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(ui.ctx().content_rect().height() * 0.6)
+                        .show(ui, |ui| {
+                            for channel in &self.channels {
+                                let current = self.is_current_channel(channel);
+                                if account_row(ui, channel, !channel.disabled && !current, current)
+                                {
+                                    picked = Some(channel.clone());
+                                }
+                                ui.add_space(6.0);
+                            }
+                        });
+                    ui.add_space(10.0);
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if widgets::action(ui, widgets::Action::Ghost, "Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if let Some(channel) = picked {
+            self.switch_account = false;
+            self.switch_channel(channel);
+        } else if close || modal.should_close() {
+            self.switch_account = false;
         }
     }
     /// The sign-in dialog (Meiro `signInDialog`): a browser window first, and under Advanced an
@@ -4089,45 +4197,7 @@ impl YTDugem {
                     ));
                     ui.add_space(10.0);
                     for (i, account) in accounts.iter().enumerate() {
-                        let enabled = !busy && !account.disabled;
-                        let (rect, row) = ui.allocate_exact_size(
-                            Vec2::new(ui.available_width(), 64.0),
-                            if enabled {
-                                egui::Sense::click()
-                            } else {
-                                egui::Sense::hover()
-                            },
-                        );
-                        let fill = if row.hovered() && enabled { 16 } else { 6 };
-                        ui.painter()
-                            .rect_filled(rect, 12.0, widgets::white_alpha(fill));
-                        let avatar_rect = Rect::from_min_size(
-                            rect.min + Vec2::new(12.0, 12.0),
-                            Vec2::splat(40.0),
-                        );
-                        avatar(ui, &account.thumbnail, account.label(), avatar_rect);
-                        let x = avatar_rect.right() + 12.0;
-                        let width = rect.right() - x - 12.0;
-                        let color = if enabled { WHITE } else { MUTED };
-                        fit_text(
-                            ui.painter(),
-                            Pos2::new(x, rect.top() + 22.0),
-                            egui::Align2::LEFT_CENTER,
-                            account.label(),
-                            FontId::new(15.0, egui::FontFamily::Name("bold".into())),
-                            color,
-                            width,
-                        );
-                        fit_text(
-                            ui.painter(),
-                            Pos2::new(x, rect.top() + 43.0),
-                            egui::Align2::LEFT_CENTER,
-                            account.detail(),
-                            FontId::proportional(12.5),
-                            MUTED,
-                            width,
-                        );
-                        if row.clicked() {
+                        if account_row(ui, account, !busy && !account.disabled, false) {
                             picked = Some(i);
                         }
                         ui.add_space(6.0);
@@ -5939,10 +6009,71 @@ struct SignIn {
 }
 
 enum AccountAction {
-    Switch(auth::Channel),
+    SwitchDialog,
     Settings,
     SignOut,
     SignIn,
+}
+
+/// One account or channel in a picker: picture, name and detail. `current` marks the one in
+/// use with a highlight and a check. Returns true when an enabled row is clicked.
+fn account_row(ui: &mut egui::Ui, account: &auth::Channel, enabled: bool, current: bool) -> bool {
+    let (rect, row) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), 64.0),
+        if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        },
+    );
+    let fill = if current || (row.hovered() && enabled) {
+        16
+    } else {
+        6
+    };
+    ui.painter()
+        .rect_filled(rect, 12.0, widgets::white_alpha(fill));
+    if current {
+        ui.painter().rect_stroke(
+            rect,
+            12.0,
+            Stroke::new(1.0, widgets::white_alpha(40)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let avatar_rect = Rect::from_min_size(rect.min + Vec2::new(12.0, 12.0), Vec2::splat(40.0));
+    avatar(ui, &account.thumbnail, account.label(), avatar_rect);
+    let x = avatar_rect.right() + 12.0;
+    let mut right = rect.right() - 12.0;
+    if current {
+        let check = Rect::from_center_size(
+            Pos2::new(rect.right() - 26.0, rect.center().y),
+            Vec2::splat(20.0),
+        );
+        widgets::paint(ui.painter(), Icon::Check, check, ACCENT);
+        right = check.left() - 8.0;
+    }
+    let width = right - x;
+    let color = if enabled || current { WHITE } else { MUTED };
+    fit_text(
+        ui.painter(),
+        Pos2::new(x, rect.top() + 22.0),
+        egui::Align2::LEFT_CENTER,
+        account.label(),
+        FontId::new(15.0, egui::FontFamily::Name("bold".into())),
+        color,
+        width,
+    );
+    fit_text(
+        ui.painter(),
+        Pos2::new(x, rect.top() + 43.0),
+        egui::Align2::LEFT_CENTER,
+        account.detail(),
+        FontId::proportional(12.5),
+        MUTED,
+        width,
+    );
+    enabled && row.clicked()
 }
 
 /// The body of a sign-in dialog, as wide as Meiro's.
@@ -6144,6 +6275,7 @@ impl YTDugem {
         self.output_overlay(ctx);
         self.palette(ctx);
         self.sign_in_dialog(ctx);
+        self.switch_account_dialog(ctx);
         self.playlist_dialog(ctx);
         self.download_delete_dialog(ctx);
         self.stats_clear_dialog(ctx);
