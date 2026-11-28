@@ -66,6 +66,9 @@ pub enum Icon {
     Smiley,
     ArrowUp,
     ArrowDown,
+    SwitchAccount,
+    SignOut,
+    SignIn,
 }
 
 /// White at `alpha` opacity, as egui 0.31's `Color32::from_white_alpha` made it: the opacity is
@@ -292,6 +295,9 @@ fn glyph(icon: Icon) -> (&'static str, bool) {
         Icon::Smiley => (regular::SMILEY, false),
         Icon::ArrowUp => (regular::ARROW_UP, false),
         Icon::ArrowDown => (regular::ARROW_DOWN, false),
+        Icon::SwitchAccount => (regular::USER_SWITCH, false),
+        Icon::SignOut => (regular::SIGN_OUT, false),
+        Icon::SignIn => (regular::SIGN_IN, false),
     }
 }
 
