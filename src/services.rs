@@ -1910,7 +1910,14 @@ fn download_attempt(
         command.args(["--audio-quality", "0"]);
     }
     command
-        .args(["--embed-metadata", "--print", "after_move:filepath", "-o"])
+        // Every format here (opus, m4a, mp3) holds cover art; JPEG is what players read best.
+        .args([
+            "--embed-metadata",
+            "--embed-thumbnail",
+            "--convert-thumbnails",
+            "jpg",
+        ])
+        .args(["--print", "after_move:filepath", "-o"])
         .arg(directory.join("%(title).150B [%(id)s].%(ext)s"))
         .arg("--")
         .arg(&track.source);
@@ -2012,22 +2019,48 @@ mod tests {
             source: "https://music.youtube.com/watch?v=jNQXAC9IVRw".into(),
             ..Default::default()
         };
-        let mut seen = vec![];
-        let started = Instant::now();
-        let path = download_with(&track, &dir, "best", &AtomicBool::new(false), &mut |f| {
-            seen.push(f)
-        })
-        .unwrap();
-        println!(
-            "downloaded {} in {:.1}s, {} progress updates, last {:?}",
-            path.display(),
-            started.elapsed().as_secs_f32(),
-            seen.len(),
-            seen.last()
-        );
-        assert!(path.is_file() && fs::metadata(&path).unwrap().len() > 10_000);
-        assert_eq!(seen.last(), Some(&1.0));
-        assert!(seen.windows(2).all(|w| w[0] <= w[1] || w[1] == 0.0));
+        for format in ["best", "m4a", "mp3"] {
+            let mut seen = vec![];
+            let started = Instant::now();
+            let path = download_with(&track, &dir, format, &AtomicBool::new(false), &mut |f| {
+                seen.push(f)
+            })
+            .unwrap();
+            println!(
+                "downloaded {} in {:.1}s, {} progress updates, last {:?}",
+                path.display(),
+                started.elapsed().as_secs_f32(),
+                seen.len(),
+                seen.last()
+            );
+            assert!(path.is_file() && fs::metadata(&path).unwrap().len() > 10_000);
+            assert_eq!(seen.last(), Some(&1.0));
+            assert!(seen.windows(2).all(|w| w[0] <= w[1] || w[1] == 0.0));
+            // Cover art is an attached picture stream; the title comes from --embed-metadata.
+            let probe = Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type:stream_disposition=attached_pic:stream_tags=title,artist:format_tags=title,artist",
+                    "-of",
+                    "default=nw=1",
+                ])
+                .arg(&path)
+                .output()
+                .unwrap();
+            let probe = String::from_utf8_lossy(&probe.stdout);
+            println!("{format}: {probe}");
+            assert!(
+                probe.contains("attached_pic=1"),
+                "{format}: no embedded cover"
+            );
+            assert!(
+                probe.to_lowercase().contains("tag:title="),
+                "{format}: no title tag"
+            );
+            fs::remove_file(&path).unwrap();
+        }
 
         let cancel = AtomicBool::new(false);
         let started = Instant::now();

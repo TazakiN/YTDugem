@@ -398,11 +398,55 @@ pub fn data_path() -> PathBuf {
     if let Some(path) = std::env::var_os("BITCHORD_DATA_DIR") {
         return PathBuf::from(path).join("library.json");
     }
-    // ponytail: retain the legacy data location so renaming never loses a library or sign-in.
-    directories::ProjectDirs::from("in", "BitChord", "BitChord")
+    directories::ProjectDirs::from("", "", "YTDugem")
         .expect("Home directory unavailable")
         .data_dir()
         .join("library.json")
+}
+
+/// `library.json` in the data folder used before the rename (`%APPDATA%\BitChord\BitChord\data`),
+/// when it still holds a library, sign-in or stats that [`migrate_data`] has not yet copied.
+pub fn legacy_data_path() -> Option<PathBuf> {
+    if std::env::var_os("BITCHORD_DATA_DIR").is_some() {
+        return None;
+    }
+    let path = directories::ProjectDirs::from("in", "BitChord", "BitChord")?
+        .data_dir()
+        .join("library.json");
+    let new = data_path();
+    (path.parent()?.is_dir() && !new.parent()?.exists()).then_some(path)
+}
+
+/// Copy the data folder `from` to `to` once, the first time `to` is missing. The copy is
+/// staged beside `to` and renamed into place, so an interrupted copy is redone, never half-used.
+/// `from` is left untouched: an older version still finds its library there. The caller holds
+/// `from`'s lock so nothing writes to it during the copy.
+pub fn migrate_data(from: &Path, to: &Path) -> Result<bool> {
+    if to.exists() || !from.is_dir() {
+        return Ok(false);
+    }
+    let staging = to.with_extension("migrating");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
+    }
+    copy_dir(from, &staging).context("Cannot copy the BitChord data folder")?;
+    std::fs::rename(&staging, to).context("Cannot move the copied data folder into place")?;
+    Ok(true)
+}
+
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else if kind.is_file() && entry.file_name() != "library.lock" {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 /// Writes serialized library bytes the way `Library::save` always has: a synced temp file, the
@@ -557,6 +601,35 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrate_data_copies_once_without_the_lock() {
+        let root = std::env::temp_dir().join(format!("ytdugem-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let from = root.join("BitChord").join("data");
+        let to = root.join("YTDugem").join("data");
+        std::fs::create_dir_all(from.join("auth")).unwrap();
+        std::fs::write(from.join("library.json"), b"{}").unwrap();
+        std::fs::write(from.join("library.lock"), b"").unwrap();
+        std::fs::write(from.join("auth").join("session.json"), b"sealed").unwrap();
+        // A copy interrupted before its rename is redone from scratch.
+        std::fs::create_dir_all(to.with_extension("migrating").join("stale")).unwrap();
+
+        assert!(migrate_data(&from, &to).unwrap());
+        assert_eq!(std::fs::read(to.join("library.json")).unwrap(), b"{}");
+        assert_eq!(
+            std::fs::read(to.join("auth").join("session.json")).unwrap(),
+            b"sealed"
+        );
+        assert!(!to.join("library.lock").exists() && !to.join("stale").exists());
+        assert!(!to.with_extension("migrating").exists() && from.join("library.json").exists());
+
+        // Once the new folder exists, it is never overwritten from the old one.
+        std::fs::write(from.join("library.json"), b"old").unwrap();
+        assert!(!migrate_data(&from, &to).unwrap());
+        assert_eq!(std::fs::read(to.join("library.json")).unwrap(), b"{}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn libraries_saved_with_the_old_player_bar_setting_still_load() {
