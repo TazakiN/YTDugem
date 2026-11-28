@@ -30,7 +30,7 @@ pub(super) struct Updates {
 impl YTDugem {
     pub fn with_updated(mut self, updated: bool) -> Self {
         if updated {
-            self.message = format!("YTDugem was updated to {}", update::CURRENT);
+            self.toast_success(format!("YTDugem was updated to {}", update::CURRENT));
         }
         self
     }
@@ -64,7 +64,7 @@ impl YTDugem {
                     Err(e) => {
                         self.updates.status = format!("Could not check for updates: {e}");
                         if manual {
-                            self.message = self.updates.status.clone();
+                            self.toast_error(self.updates.status.clone());
                         }
                     }
                 }
@@ -76,7 +76,7 @@ impl YTDugem {
                     Ok(path) => self.updates.staged = Some(path),
                     Err(e) => {
                         self.updates.status = format!("Update failed: {e}");
-                        self.message = self.updates.status.clone();
+                        self.toast_error(self.updates.status.clone());
                     }
                 }
             }
@@ -93,7 +93,7 @@ impl YTDugem {
                     }
                     Err(e) => {
                         self.updates.status = e.clone();
-                        self.message = e;
+                        self.toast_error(e);
                     }
                 }
             }
@@ -132,7 +132,7 @@ impl YTDugem {
             .iter()
             .any(|d| !matches!(d.state, DownloadState::Failed(_)))
         {
-            self.message = "Wait for downloads to finish, then restart to update".into();
+            self.toast_info("Wait for downloads to finish, then restart to update");
             return;
         }
         self.stop();

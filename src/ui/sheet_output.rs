@@ -399,7 +399,7 @@ impl YTDugem {
             && !id.is_empty()
             && !id.to_ascii_lowercase().starts_with("wasapi/")
         {
-            self.message = "WASAPI exclusive mode needs a wasapi/ device; pick one or turn exclusive mode off in Settings".into();
+            self.toast_warning("WASAPI exclusive mode needs a wasapi/ device; pick one or turn exclusive mode off in Settings");
             return;
         }
         if self.library.audio.output_device == id {
