@@ -54,7 +54,7 @@ raw-window-handle = "0.6"
 # Windows notification-area icon and its menu (upstream `DesktopTrayMenu`).
 tray-icon = { version = "=0.26.1", default-features = false }
 # Rasterizes the tray menu's Phosphor icons; already built for epaint's glyphs.
-vello_cpu = { version = "0.2", default-features = false, features = ["std", "u8_pipeline"] }
+vello_cpu = { version = "0.4", default-features = false, features = ["std", "u8_pipeline"] }
 # Close-to-tray: drop the taskbar button while the window stays (minimized) alive.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_LibraryLoader","Win32_Security_Credentials", "Win32_System_Time", "Win32_UI_WindowsAndMessaging"] }
 
